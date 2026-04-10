@@ -1,0 +1,23 @@
+# Environment variables — NEVER commit your real keys
+.env
+
+# Virtual environments
+venv312/
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE / OS
+.idea/
+.vscode/
+*.DS_Store
+
