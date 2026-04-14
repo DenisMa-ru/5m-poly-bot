@@ -288,9 +288,6 @@ st.sidebar.caption(f"Lines: {stats['total_lines']} | Updated: {stats['last_updat
 
 # ===== AUTO-REFRESH =====
 auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
-if auto_refresh:
-    time.sleep(3)
-    st.rerun()
 
 # ===== TITLE + STATUS =====
 st.title("5m Poly Bot")
@@ -412,3 +409,8 @@ if stats['last_trades']:
 # ===== FOOTER =====
 st.divider()
 st.caption(f"5m Poly Bot Dashboard | {'Auto-refresh ON' if auto_refresh else 'Auto-refresh OFF'} | {stats['last_update']}")
+
+# ===== AUTO-REFRESH (at the very end, after all rendering) =====
+if auto_refresh:
+    time.sleep(3)
+    st.rerun()
