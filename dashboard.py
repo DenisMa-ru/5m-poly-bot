@@ -172,8 +172,8 @@ with c1:
             p=sig['pm']; ok=mn <= p <= 0.99
             col="#51cf66" if ok else "#ff6b6b"
             lbl="✓" if ok else "✗"
-            st.markdown(f"`{name}` <span style="color:{col};font-weight:bold">{p:.3f} {lbl}</span> "
-                        f"δ{sig.get('d',0):.2f}% C{sig.get('c',0)}%", unsafe_allow_html=True)
+            st.markdown(f'`{name}` <span style="color:{col};font-weight:bold">{p:.3f} {lbl}</span> '
+                        f'δ{sig.get("d",0):.2f}% C{sig.get("c",0)}%', unsafe_allow_html=True)
         else:
             st.markdown(f"`{name}` —")
 with c2:
