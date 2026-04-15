@@ -1,5 +1,6 @@
 """
-5m Poly Bot Dashboard v2 — Управление ботом, статистика, настройки, сохранение сигналов.
+5m Poly Bot Dashboard v3 — Управление ботом, статистика, настройки, сохранение сигналов.
+Единый источник данных: signals.json (Dashboard и Statistics синхронизированы).
 Запуск: streamlit run dashboard.py --server.port 3001 --server.address 0.0.0.0 --server.headless true
 """
 import streamlit as st
@@ -38,121 +39,6 @@ st.markdown("""
     .pm-bad { color: #ff6b6b; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
-
-# ===== PATTERNS =====
-_P = {
-    "active": re.compile(r'Active window.*?close\s+([\d:]+)'),
-    "sleep":  re.compile(r'Sleeping\s+(\d+)s'),
-    "snc":    re.compile(r'next close\s+([\d:]+)'),
-    "closed": re.compile(r'Market closed'),
-    "coin":   re.compile(r'\[(BTC|ETH)\]'),
-    "time":   re.compile(r'(\d+\.?\d*)s\s*\|'),
-    "pm":     re.compile(r'PM:(Up|Down)@([\d.]+)'),
-    "delta":  re.compile(r'delta:([\d.]+)%'),
-    "conf":   re.compile(r'conf:(\d+)%'),
-    "price":  re.compile(r'Price:([\d,.]+)'),
-    "atr":    re.compile(r'range\s+\$?([\d.]+)\s*>\s*1\.5x\s*ATR\s+\$?([\d.]+)'),
-    "enter":  re.compile(r'ENTERING \[(BTC|ETH)\s+\w+\]'),
-    "amt":    re.compile(r'invested=\$([\d.]+)'),
-    "pnl":    re.compile(r'expected_pnl=\+?\$([\d.]+)'),
-}
-
-def parse(line):
-    if not line.strip():
-        return None
-    r = {'raw': line}
-    if _P["active"].search(line):
-        r['type'] = 'active'
-        m = _P["active"].search(line)
-        if m: r['nc'] = m.group(1)
-        return r
-    if _P["sleep"].search(line):
-        r['type'] = 'sleeping'
-        m = _P["sleep"].search(line)
-        if m: r['sec'] = int(m.group(1))
-        m3 = _P["snc"].search(line)
-        if m3: r['nc'] = m3.group(1)
-        return r
-    if _P["closed"].search(line):
-        r['type'] = 'closed'
-        return r
-    if '\U0001f3af' in line and ('PM:Up@' in line or 'PM:Down@' in line):
-        r['type'] = 'signal'
-        m = _P["coin"].search(line)
-        if m: r['coin'] = m.group(1)
-        m = _P["time"].search(line)
-        if m: r['t'] = float(m.group(1))
-        m = _P["pm"].search(line)
-        if m: r['side'] = m.group(1); r['pm'] = float(m.group(2))
-        m = _P["delta"].search(line)
-        if m: r['d'] = float(m.group(1))
-        m = _P["conf"].search(line)
-        if m: r['c'] = int(m.group(1))
-        m = _P["price"].search(line)
-        if m: r['bp'] = float(m.group(1).replace(',', ''))
-        return r
-    if 'SKIP' in line:
-        r['type'] = 'skip'
-        m = _P["coin"].search(line)
-        if m: r['coin'] = m.group(1)
-        raw = line
-        if '< 0.94' in raw: r['r'] = 'btc_low'
-        elif '< 0.92' in raw: r['r'] = 'eth_low'
-        elif '> 0.99' in raw: r['r'] = 'high'
-        elif 'too close' in raw: r['r'] = 'delta'
-        elif 'confidence' in raw and '< 30%' in raw: r['r'] = 'conf'
-        elif 'ATR skip' in raw: r['r'] = 'atr'
-        else: r['r'] = 'other'
-        return r
-    if re.compile(r'BINANCE ERROR').search(line):
-        r['type'] = 'err'
-        return r
-    if _P["enter"].search(line):
-        r['type'] = 'trade'
-        m = _P["enter"].search(line)
-        if m: r['coin'] = m.group(1)
-        m = _P["amt"].search(line)
-        if m: r['amt'] = float(m.group(1))
-        m = _P["pnl"].search(line)
-        if m: r['pnl'] = float(m.group(1))
-        return r
-    return None
-
-def parse_logs(path, n=3000):
-    if not path or not path.exists():
-        return None, None
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except:
-        return None, None
-    evts = [e for l in lines[-n:] if (e := parse(l)) is not None]
-    s = {'sig': 0, 'skip': 0, 'trade': 0, 'round': 0, 'err': 0, 'state': 'start',
-         'sleep': 0, 'nc': '--:--', 'btc_p': None, 'eth_p': None,
-         'invested': 0, 'pnl': 0, 'reasons': {}, 'last_sig': [], 'last_skip': [], 'last_trade': [],
-         'time': datetime.now().strftime('%H:%M:%S'), 'n': len(lines)}
-    for e in evts:
-        t = e['type']
-        if t == 'signal':
-            s['sig'] += 1; s['last_sig'].append(e)
-            if e.get('coin') == 'BTC' and e.get('bp'): s['btc_p'] = e['bp']
-            if e.get('coin') == 'ETH' and e.get('bp'): s['eth_p'] = e['bp']
-        elif t == 'skip':
-            s['skip'] += 1; s['last_skip'].append(e)
-            rr = e.get('r', 'other'); s['reasons'][rr] = s['reasons'].get(rr, 0) + 1
-        elif t == 'trade':
-            s['trade'] += 1; s['last_trade'].append(e)
-            s['invested'] += e.get('amt', 0); s['pnl'] += e.get('pnl', 0)
-        elif t == 'active': s['state'] = 'active'; s['nc'] = e.get('nc', '--:--')
-        elif t == 'sleeping': s['state'] = 'sleeping'; s['sleep'] = e.get('sec', 0); s['nc'] = e.get('nc', '--:--')
-        elif t == 'closed': s['round'] += 1
-        elif t == 'err': s['err'] += 1
-    s['last_sig'] = s['last_sig'][-12:]
-    s['last_skip'] = s['last_skip'][-12:]
-    s['last_trade'] = s['last_trade'][-12:]
-    return lines, s
-
-RL = {'btc_low': 'BTC<0.94', 'eth_low': 'ETH<0.92', 'high': '>0.99',
-      'delta': 'δ<0.05%', 'conf': 'conf<30%', 'atr': 'ATR↑', 'other': '?'}
 
 # ===== BOT CONTROL HELPERS =====
 def write_control(cmd, mode=None, amount=None, settings=None):
@@ -221,6 +107,7 @@ def restart_bot(mode="dry-run", amount=10):
     time.sleep(1)
     return start_bot(mode, amount)
 
+# ===== DATA HELPERS — единый источник: signals.json =====
 def load_saved_signals():
     """Load all saved signals from signals.json."""
     try:
@@ -229,22 +116,153 @@ def load_saved_signals():
     except:
         return []
 
-def save_signal(signal_data):
-    """Append a signal to signals.json."""
+def build_dashboard_state():
+    """
+    Строим состояние Dashboard из signals.json (единый источник данных).
+    Возвращает dict с метриками, последними сигналами, скипами, трейдами.
+    """
     signals = load_saved_signals()
-    signals.append(signal_data)
-    # Keep last 10000 signals
-    signals = signals[-10000:]
+
+    # Разделяем на вошедшие и пропущенные
+    entered = [s for s in signals if s.get("entered")]
+    skipped = [s for s in signals if not s.get("entered")]
+
+    # Считаем invested и pnl из вошедших сигналов
+    settings = load_settings()
+    amount = settings.get("amount", 10)
+    total_invested = sum(s.get("amount", amount) for s in entered)
+    total_pnl = sum(s.get("pnl_expected", 0) for s in entered)
+
+    # Skip reasons breakdown
+    skip_reasons = {}
+    for s in skipped:
+        reason = s.get("reason", "other")
+        # Нормализуем причины
+        if "PM price <" in reason or "btc_low" in reason.lower():
+            key = "btc_low"
+        elif "PM price <" in reason or "eth_low" in reason.lower():
+            key = "eth_low"
+        elif "PM price >" in reason or ">0.99" in reason.lower():
+            key = "high"
+        elif "delta" in reason.lower():
+            key = "delta"
+        elif "confidence" in reason.lower():
+            key = "conf"
+        elif "atr" in reason.lower() or "ATR" in reason:
+            key = "atr"
+        else:
+            key = "other"
+        skip_reasons[key] = skip_reasons.get(key, 0) + 1
+
+    # Последние сигналы (любые, не только вошедшие)
+    last_signals = signals[-20:]
+    last_entered = entered[-12:]
+    last_skipped = skipped[-12:]
+
+    # Последние цены BTC/ETH
+    btc_price = None
+    eth_price = None
+    for s in reversed(signals):
+        if s.get("coin") == "BTC" and s.get("price"):
+            btc_price = s["price"]
+        if s.get("coin") == "ETH" and s.get("price"):
+            eth_price = s["price"]
+        if btc_price and eth_price:
+            break
+
+    # Последние цены PM для BTC/ETH
+    btc_pm = None
+    eth_pm = None
+    for s in reversed(signals):
+        if s.get("coin") == "BTC" and s.get("pm") and not btc_pm:
+            btc_pm = s
+        if s.get("coin") == "ETH" and s.get("pm") and not eth_pm:
+            eth_pm = s
+
+    return {
+        "total_signals": len(signals),
+        "total_entered": len(entered),
+        "total_skipped": len(skipped),
+        "invested": total_invested,
+        "pnl": total_pnl,
+        "btc_price": btc_price,
+        "eth_price": eth_price,
+        "btc_pm": btc_pm,
+        "eth_pm": eth_pm,
+        "skip_reasons": skip_reasons,
+        "last_signals": last_signals,
+        "last_entered": last_entered,
+        "last_skipped": last_skipped,
+        "btc_signals": [s for s in signals if s.get("coin") == "BTC"],
+        "eth_signals": [s for s in signals if s.get("coin") == "ETH"],
+        "btc_entered": [s for s in entered if s.get("coin") == "BTC"],
+        "eth_entered": [s for s in entered if s.get("coin") == "ETH"],
+        "time": datetime.now().strftime('%H:%M:%S'),
+    }
+
+# Парсинг логов только для статуса (active/sleeping) — не для статистики
+_P_STATE = {
+    "active": re.compile(r'Active window.*?close\s+([\d:]+)'),
+    "sleep":  re.compile(r'Sleeping\s+(\d+)s'),
+    "snc":    re.compile(r'next close\s+([\d:]+)'),
+    "closed": re.compile(r'Market closed'),
+}
+
+def parse_log_state(path):
+    """Парсим логи только для определения текущего состояния бота."""
+    if not path or not path.exists():
+        return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0}
     try:
-        SIGNALS_FILE.write_text(json.dumps(signals, indent=2))
-    except: pass
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except:
+        return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0}
+
+    state = {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0}
+    for line in lines[-200:]:  # последние 200 строк достаточно для статуса
+        if _P_STATE["active"].search(line):
+            state['state'] = 'active'
+            m = _P_STATE["active"].search(line)
+            if m: state['nc'] = m.group(1)
+        elif _P_STATE["sleep"].search(line):
+            state['state'] = 'sleeping'
+            m = _P_STATE["sleep"].search(line)
+            if m: state['sleep'] = int(m.group(1))
+            m3 = _P_STATE["snc"].search(line)
+            if m3: state['nc'] = m3.group(1)
+        elif _P_STATE["closed"].search(line):
+            state['round'] += 1
+        elif 'BINANCE ERROR' in line:
+            state['err'] += 1
+    return state
 
 def load_settings():
     """Load bot settings."""
     try:
         return json.loads((BOT_DIR / "settings.json").read_text())
     except:
-        return {
+        return get_default_settings()
+
+def get_default_settings():
+    """Возвращает дефолтные настройки бота."""
+    return {
+        "mode": "dry-run",
+        "amount": 10,
+        "min_confidence": 0.3,
+        "entry_min": 10,
+        "entry_max": 50,
+        "price_min_btc": 0.94,
+        "price_min_eth": 0.92,
+        "price_max": 0.99,
+        "delta_skip": 0.0005,
+        "atr_multiplier": 1.5,
+    }
+
+# Пресеты настроек для разных стратегий
+PRESETS = {
+    "default": {
+        "name": "📋 По умолчанию",
+        "desc": "Стандартные настройки — баланс риска и прибыли",
+        "settings": {
             "mode": "dry-run",
             "amount": 10,
             "min_confidence": 0.3,
@@ -256,21 +274,101 @@ def load_settings():
             "delta_skip": 0.0005,
             "atr_multiplier": 1.5,
         }
+    },
+    "conservative": {
+        "name": "🛡️ Консервативный",
+        "desc": "Меньше сделок, выше качество. Минимальный риск.",
+        "settings": {
+            "mode": "dry-run",
+            "amount": 5,
+            "min_confidence": 0.55,
+            "entry_min": 15,
+            "entry_max": 45,
+            "price_min_btc": 0.96,
+            "price_min_eth": 0.94,
+            "price_max": 0.99,
+            "delta_skip": 0.001,
+            "atr_multiplier": 2.0,
+        }
+    },
+    "balanced": {
+        "name": "⚖️ Сбалансированный",
+        "desc": "Оптимальный баланс частоты и качества сделок.",
+        "settings": {
+            "mode": "dry-run",
+            "amount": 10,
+            "min_confidence": 0.4,
+            "entry_min": 10,
+            "entry_max": 50,
+            "price_min_btc": 0.95,
+            "price_min_eth": 0.93,
+            "price_max": 0.99,
+            "delta_skip": 0.0007,
+            "atr_multiplier": 1.8,
+        }
+    },
+    "aggressive": {
+        "name": "🔥 Агрессивный",
+        "desc": "Больше сделок, выше риск. Для тестирования стратегии.",
+        "settings": {
+            "mode": "dry-run",
+            "amount": 20,
+            "min_confidence": 0.2,
+            "entry_min": 5,
+            "entry_max": 55,
+            "price_min_btc": 0.92,
+            "price_min_eth": 0.90,
+            "price_max": 0.99,
+            "delta_skip": 0.0003,
+            "atr_multiplier": 1.2,
+        }
+    },
+    "high_amount": {
+        "name": "💰 Крупные ставки",
+        "desc": "Больший размер ставки при стандартных параметрах.",
+        "settings": {
+            "mode": "dry-run",
+            "amount": 50,
+            "min_confidence": 0.4,
+            "entry_min": 10,
+            "entry_max": 50,
+            "price_min_btc": 0.94,
+            "price_min_eth": 0.92,
+            "price_max": 0.99,
+            "delta_skip": 0.0005,
+            "atr_multiplier": 1.5,
+        }
+    },
+}
 
 def save_settings(settings):
     try:
         (BOT_DIR / "settings.json").write_text(json.dumps(settings, indent=2))
     except: pass
 
-# ===== INIT =====
-log_path = Path(os.environ.get("BOT_LOG_FILE", str(DEFAULT_LOG)))
-_, S = parse_logs(log_path)
-if not S:
-    st.error(f"Cannot read `{log_path}`")
-    st.stop()
+def load_custom_presets():
+    """Загружает пользовательские пресеты из файла."""
+    try:
+        data = json.loads((BOT_DIR / "presets.json").read_text())
+        return data if isinstance(data, dict) else {}
+    except:
+        return {}
 
+def save_custom_presets(presets):
+    """Сохраняет пользовательские пресеты."""
+    try:
+        (BOT_DIR / "presets.json").write_text(json.dumps(presets, indent=2))
+    except: pass
+
+# ===== LABELS для skip reasons =====
+RL = {'btc_low': 'BTC<0.94', 'eth_low': 'ETH<0.92', 'high': '>0.99',
+      'delta': 'δ<0.05%', 'conf': 'conf<30%', 'atr': 'ATR↑', 'other': '?'}
+
+# ===== INIT =====
 settings = load_settings()
 bot_running = is_bot_running()
+D = build_dashboard_state()  # Dashboard state из signals.json
+L = parse_log_state(Path(os.environ.get("BOT_LOG_FILE", str(DEFAULT_LOG))))  # Log state только для статуса
 
 # ===== TABS =====
 tab_dashboard, tab_history, tab_stats, tab_settings = st.tabs(["📊 Dashboard", "📋 History", "📈 Statistics", "⚙️ Settings"])
@@ -317,28 +415,29 @@ with tab_dashboard:
 
     st.markdown("---")
 
-    # ---- STATUS BAR ----
-    ico = {'sleeping': '💤', 'active': '⚡', 'start': '🚀'}.get(S['state'], '⚪')
-    st.markdown(f"### {ico} {S['state'].upper()} — Next: {S['nc']} | Sleep: {S['sleep']}s")
+    # ---- STATUS BAR (из логов только состояние) ----
+    ico = {'sleeping': '💤', 'active': '⚡', 'start': '🚀'}.get(L['state'], '⚪')
+    st.markdown(f"### {ico} {L['state'].upper()} — Next: {L['nc']} | Sleep: {L['sleep']}s")
 
+    skip_rate = D['total_skipped'] / max(D['total_signals'], 1) * 100
     a1, a2, a3, a4, a5, a6 = st.columns(6)
-    a1.metric("Signals", S['sig'])
-    a2.metric("Rounds", S['round'])
-    a3.metric("Trades", S['trade'])
-    a4.metric("Binance", "❌ Err" if S['err'] else "✅ OK")
-    a5.metric("Skip Rate", f"{S['skip']/max(S['sig'],1)*100:.0f}%")
-    a6.metric("Updated", S['time'])
+    a1.metric("Signals", D['total_signals'])
+    a2.metric("Rounds", L['round'])
+    a3.metric("Entries", D['total_entered'])
+    a4.metric("Binance", "❌ Err" if L['err'] else "✅ OK")
+    a5.metric("Skip Rate", f"{skip_rate:.0f}%")
+    a6.metric("Updated", D['time'])
 
-    # ---- MONEY + PRICES ----
+    # ---- MONEY + PRICES (из signals.json — точные данные!) ----
     st.markdown("---")
     b1, b2, b3, b4 = st.columns(4)
-    b1.metric("Invested", f"${S['invested']:.1f}")
-    pnl_v = S['pnl']
+    b1.metric("Invested", f"${D['invested']:.2f}")
+    pnl_v = D['pnl']
     b2.metric("Expected PnL", f"${pnl_v:+.2f}",
                delta=f"{pnl_v:+.2f}",
                delta_color="normal" if pnl_v >= 0 else "inverse")
-    b3.metric("BTC", f"${S['btc_p']:.0f}" if S['btc_p'] else "—")
-    b4.metric("ETH", f"${S['eth_p']:.0f}" if S['eth_p'] else "—")
+    b3.metric("BTC", f"${D['btc_price']:.0f}" if D['btc_price'] else "—")
+    b4.metric("ETH", f"${D['eth_price']:.0f}" if D['eth_price'] else "—")
 
     # ---- PM PRICES + SKIP REASONS ----
     st.markdown("---")
@@ -346,64 +445,68 @@ with tab_dashboard:
     with c1:
         st.markdown("**Polymarket**")
         for sig, name, mn in [
-            (next((x for x in reversed(S['last_sig']) if x.get('coin') == 'BTC'), None), "BTC", 0.94),
-            (next((x for x in reversed(S['last_sig']) if x.get('coin') == 'ETH'), None), "ETH", 0.92),
+            (D['btc_pm'], "BTC", settings.get("price_min_btc", 0.94)),
+            (D['eth_pm'], "ETH", settings.get("price_min_eth", 0.92)),
         ]:
             if sig and sig.get('pm'):
                 p = sig['pm']
-                ok = mn <= p <= 0.99
+                ok = mn <= p <= settings.get("price_max", 0.99)
                 col = "#51cf66" if ok else "#ff6b6b"
                 lbl = "✓" if ok else "✗"
                 st.markdown(f'`{name}` <span style="color:{col};font-weight:bold">{p:.3f} {lbl}</span> '
-                            f'δ{sig.get("d", 0):.2f}% C{sig.get("c", 0)}%', unsafe_allow_html=True)
+                            f'δ{sig.get("delta", 0):.2f}% C{int(sig.get("confidence", 0)*100)}%',
+                            unsafe_allow_html=True)
             else:
                 st.markdown(f"`{name}` —")
     with c2:
-        if S['reasons']:
+        if D['skip_reasons']:
             st.markdown("**Why skipping**")
-            tot = S['skip']
-            for rr, cnt in sorted(S['reasons'].items(), key=lambda x: -x[1]):
+            tot = D['total_skipped']
+            for rr, cnt in sorted(D['skip_reasons'].items(), key=lambda x: -x[1]):
                 pct = cnt / max(tot, 1)
                 st.progress(pct, text=f"{RL.get(rr, rr)}: {cnt} ({pct*100:.0f}%)")
         else:
             st.caption("No skips")
 
-    # ---- TRADES + SKIP CHIPS (FIXED HTML) ----
-    if S['last_trade'] or S['last_skip']:
+    # ---- TRADES + SKIP CHIPS ----
+    if D['last_entered'] or D['last_skipped']:
         st.markdown("---")
         d1, d2 = st.columns(2)
         with d1:
-            if S['last_trade']:
-                st.markdown("**Trades**")
-                # FIX: Use st.html for proper rendering
+            if D['last_entered']:
+                st.markdown("**Last Entries**")
                 trade_html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">'
-                for x in reversed(S['last_trade'][-8:]):
-                    trade_html += f'<span class="trade-chip">{x.get("coin", "")} +${x.get("pnl", 0):.2f}</span>'
+                for x in reversed(D['last_entered'][-8:]):
+                    pnl = x.get("pnl_expected", 0)
+                    sign = "+" if pnl >= 0 else ""
+                    trade_html += f'<span class="trade-chip">{x.get("coin", "")} {sign}${pnl:.2f}</span>'
                 trade_html += '</div>'
                 st.markdown(trade_html, unsafe_allow_html=True)
         with d2:
-            if S['last_skip']:
-                st.markdown("**Last skips**")
+            if D['last_skipped']:
+                st.markdown("**Last Skips**")
                 skip_html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">'
-                for x in reversed(S['last_skip'][-12:]):
-                    skip_html += f'<span class="skip-chip">{x.get("coin", "")} {RL.get(x.get("r", ""), "?")}</span>'
+                for x in reversed(D['last_skipped'][-12:]):
+                    reason = x.get("reason", "?")[:20]
+                    skip_html += f'<span class="skip-chip">{x.get("coin", "")} {reason}</span>'
                 skip_html += '</div>'
                 st.markdown(skip_html, unsafe_allow_html=True)
 
     # ---- SIGNALS TABLE ----
-    if S['last_sig']:
-        with st.expander(f"📋 Last Signals ({len(S['last_sig'])})", expanded=False):
+    if D['last_signals']:
+        with st.expander(f"📋 Last Signals ({len(D['last_signals'])})", expanded=False):
             rows = []
-            for x in reversed(S['last_sig']):
+            for x in reversed(D['last_signals']):
                 rows.append({
                     "Coin": x.get('coin', ''),
                     "Side": x.get('side', ''),
                     "PM": f"{x.get('pm', 0):.3f}",
-                    "Δ%": f"{x.get('d', 0):.3f}",
-                    "Conf%": x.get('c', 0),
-                    "Time": f"{x.get('t', 0):.0f}s",
+                    "Δ%": f"{x.get('delta', 0):.3f}",
+                    "Conf%": f"{x.get('confidence', 0)*100:.0f}",
+                    "Price": f"{x.get('price', 0):.0f}",
+                    "Entered": "✅" if x.get("entered") else "❌",
                 })
-            st.dataframe(rows, use_container_width=True, hide_index=True, height=160)
+            st.dataframe(rows, use_container_width=True, hide_index=True, height=200)
 
 # ==========================================
 # TAB 2: HISTORY
@@ -462,20 +565,14 @@ with tab_history:
 # ==========================================
 with tab_stats:
     st.markdown("### 📈 Statistics")
+    st.caption("Данные из signals.json — синхронизированы с Dashboard")
 
-    all_signals = load_saved_signals()
-
-    if all_signals:
+    if D['total_signals'] > 0:
         s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Total Signals", len(all_signals))
-
-        btc_signals = [x for x in all_signals if x.get("coin") == "BTC"]
-        eth_signals = [x for x in all_signals if x.get("coin") == "ETH"]
-        s2.metric("BTC Signals", len(btc_signals))
-        s3.metric("ETH Signals", len(eth_signals))
-
-        entered = [x for x in all_signals if x.get("entered")]
-        s4.metric("Entries", len(entered))
+        s1.metric("Total Signals", D['total_signals'])
+        s2.metric("BTC Signals", len(D['btc_signals']))
+        s3.metric("ETH Signals", len(D['eth_signals']))
+        s4.metric("Entries", D['total_entered'])
 
         st.markdown("---")
 
@@ -483,39 +580,52 @@ with tab_stats:
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**BTC Stats**")
-            btc_entered = [x for x in btc_signals if x.get("entered")]
-            if btc_entered:
-                st.metric("Entries", len(btc_entered))
-                avg_conf = sum(x.get("confidence", 0) for x in btc_entered) / len(btc_entered)
+            if D['btc_entered']:
+                st.metric("Entries", len(D['btc_entered']))
+                avg_conf = sum(x.get("confidence", 0) for x in D['btc_entered']) / len(D['btc_entered'])
                 st.metric("Avg Confidence", f"{avg_conf:.0%}")
-                avg_delta = sum(x.get("delta", 0) for x in btc_entered) / len(btc_entered)
+                avg_delta = sum(x.get("delta", 0) for x in D['btc_entered']) / len(D['btc_entered'])
                 st.metric("Avg Delta", f"{avg_delta:.4f}%")
+                btc_pnl = sum(x.get("pnl_expected", 0) for x in D['btc_entered'])
+                st.metric("Total PnL", f"${btc_pnl:+.2f}", delta=f"{btc_pnl:+.2f}")
             else:
                 st.caption("No BTC entries yet")
 
         with col2:
             st.markdown("**ETH Stats**")
-            eth_entered = [x for x in eth_signals if x.get("entered")]
-            if eth_entered:
-                st.metric("Entries", len(eth_entered))
-                avg_conf = sum(x.get("confidence", 0) for x in eth_entered) / len(eth_entered)
+            if D['eth_entered']:
+                st.metric("Entries", len(D['eth_entered']))
+                avg_conf = sum(x.get("confidence", 0) for x in D['eth_entered']) / len(D['eth_entered'])
                 st.metric("Avg Confidence", f"{avg_conf:.0%}")
-                avg_delta = sum(x.get("delta", 0) for x in eth_entered) / len(eth_entered)
+                avg_delta = sum(x.get("delta", 0) for x in D['eth_entered']) / len(D['eth_entered'])
                 st.metric("Avg Delta", f"{avg_delta:.4f}%")
+                eth_pnl = sum(x.get("pnl_expected", 0) for x in D['eth_entered'])
+                st.metric("Total PnL", f"${eth_pnl:+.2f}", delta=f"{eth_pnl:+.2f}")
             else:
                 st.caption("No ETH entries yet")
 
         st.markdown("---")
 
         # Skip reasons breakdown
-        st.markdown("**Current Session Skip Reasons**")
-        if S['reasons']:
-            tot = S['skip']
-            for rr, cnt in sorted(S['reasons'].items(), key=lambda x: -x[1]):
+        st.markdown("**Skip Reasons Breakdown**")
+        if D['skip_reasons']:
+            tot = D['total_skipped']
+            for rr, cnt in sorted(D['skip_reasons'].items(), key=lambda x: -x[1]):
                 pct = cnt / max(tot, 1)
                 st.progress(pct, text=f"{RL.get(rr, rr)}: {cnt} ({pct*100:.0f}%)")
         else:
             st.caption("No skip data")
+
+        # Summary
+        st.markdown("---")
+        st.markdown("**Summary**")
+        su1, su2, su3 = st.columns(3)
+        su1.metric("Total Invested", f"${D['invested']:.2f}")
+        su2.metric("Total Expected PnL", f"${D['pnl']:+.2f}", delta=f"{D['pnl']:+.2f}")
+        if D['total_entered'] > 0:
+            su3.metric("Avg PnL per Trade", f"${D['pnl']/D['total_entered']:+.2f}")
+        else:
+            su3.metric("Avg PnL per Trade", "—")
 
         if st.button("🗑️ Reset Statistics"):
             SIGNALS_FILE.write_text("[]")
@@ -529,95 +639,189 @@ with tab_stats:
 with tab_settings:
     st.markdown("### ⚙️ Bot Settings")
 
+    # ===== PRESETS BAR =====
+    st.markdown("**📦 Быстрые пресеты**")
+    st.caption("Выберите готовую стратегию или настройте вручную")
+
+    custom_presets = load_custom_presets()
+    all_presets = {**PRESETS, **custom_presets}
+
+    # Колонки для пресетов
+    preset_cols = st.columns(5)
+    selected_preset = None
+
+    for i, (key, preset) in enumerate(all_presets.items()):
+        with preset_cols[i % 5]:
+            label = preset["name"]
+            is_current = all(v == settings.get(k) for k, v in preset["settings"].items())
+            btn_type = "primary" if is_current else "secondary"
+            if st.button(label, use_container_width=True, type=btn_type, key=f"preset_{key}"):
+                selected_preset = preset["settings"].copy()
+
+    if selected_preset:
+        settings.update(selected_preset)
+        st.success(f"✅ Применён пресет: {all_presets[[k for k, v in all_presets.items() if v['settings'] == selected_preset][0]]['name']}")
+        st.rerun()
+
+    # Описание выбранного пресета
+    st.markdown("---")
+    st.markdown("**Как работают пресеты:**")
+    desc_cols = st.columns(3)
+    with desc_cols[0]:
+        st.info("🛡️ **Консервативный**\n- Меньше сделок\n- Выше уверенность (55%)\n- Меньше размер ставки\n- Для минимального риска")
+    with desc_cols[1]:
+        st.info("⚖️ **Сбалансированный**\n- Среднее кол-во сделок\n- Уверенность 40%\n- Стандартный размер ставки\n- Оптимальный баланс")
+    with desc_cols[2]:
+        st.info("🔥 **Агрессивный**\n- Больше сделок\n- Ниже уверенность (20%)\n- Больше размер ставки\n- Для тестирования")
+
+    st.markdown("---")
+
+    # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
 
     s1, s2 = st.columns(2)
     with s1:
-        st.markdown("**Run Configuration**")
+        st.markdown("**🎮 Run Configuration**")
         new_settings["mode"] = st.selectbox(
-            "Mode",
+            "Режим работы",
             ["dry-run", "paper", "live"],
             index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")),
-            help="dry-run: real data no trades | paper: simulated | live: real funds"
+            help="dry-run: реальные данные без сделок | paper: симуляция | live: реальные деньги"
         )
         new_settings["amount"] = st.number_input(
-            "Amount per trade (USDC)",
+            "Размер ставки (USDC)",
             min_value=1.0, max_value=1000.0,
             value=float(settings.get("amount", 10)),
-            step=1.0
+            step=1.0,
+            help="Сколько USDC вкладывать в каждую сделку"
         )
 
     with s2:
-        st.markdown("**Entry Window**")
+        st.markdown("**⏱️ Окно входа**")
         new_settings["entry_min"] = st.number_input(
-            "Entry window min (seconds before close)",
+            "Мин. секунд до закрытия",
             min_value=1, max_value=120,
             value=int(settings.get("entry_min", 10)),
-            step=1
+            step=1,
+            help="Начинать искать вход не раньше чем за X сек до закрытия"
         )
         new_settings["entry_max"] = st.number_input(
-            "Entry window max (seconds before close)",
+            "Макс. секунд до закрытия",
             min_value=5, max_value=300,
             value=int(settings.get("entry_max", 50)),
-            step=5
+            step=5,
+            help="Перестать искать вход за X сек до закрытия"
         )
 
     st.markdown("---")
     s3, s4 = st.columns(2)
     with s3:
-        st.markdown("**Price Thresholds**")
+        st.markdown("**💲 Ценовые пороги**")
         new_settings["price_min_btc"] = st.number_input(
-            "BTC min price",
+            "BTC мин. цена Polymarket",
             min_value=0.50, max_value=1.0,
             value=float(settings.get("price_min_btc", 0.94)),
-            step=0.01, format="%.2f"
+            step=0.01, format="%.2f",
+            help="Не входить в BTC если цена < этого значения"
         )
         new_settings["price_min_eth"] = st.number_input(
-            "ETH min price",
+            "ETH мин. цена Polymarket",
             min_value=0.50, max_value=1.0,
             value=float(settings.get("price_min_eth", 0.92)),
-            step=0.01, format="%.2f"
+            step=0.01, format="%.2f",
+            help="Не входить в ETH если цена < этого значения"
         )
         new_settings["price_max"] = st.number_input(
-            "Max price (both)",
+            "Макс. цена (оба)",
             min_value=0.90, max_value=1.0,
             value=float(settings.get("price_max", 0.99)),
-            step=0.01, format="%.2f"
+            step=0.01, format="%.2f",
+            help="Не входить если цена > этого (мало профита)"
         )
 
     with s4:
-        st.markdown("**Signal Thresholds**")
+        st.markdown("**📊 Пороги сигналов**")
         new_settings["min_confidence"] = st.slider(
-            "Min confidence",
+            "Мин. уверенность",
             min_value=0.0, max_value=1.0,
             value=float(settings.get("min_confidence", 0.3)),
-            step=0.05
+            step=0.05,
+            help="Минимальная уверенность сигнала для входа (0-100%)"
         )
         new_settings["delta_skip"] = st.number_input(
-            "Delta skip (%)",
+            "Мин. дельта (%)",
             min_value=0.0001, max_value=0.01,
             value=float(settings.get("delta_skip", 0.0005)),
-            step=0.0001, format="%.4f"
+            step=0.0001, format="%.4f",
+            help="Пропускать сигнал если дельта цены < этого значения"
         )
         new_settings["atr_multiplier"] = st.number_input(
-            "ATR multiplier",
+            "ATR множитель",
             min_value=0.5, max_value=5.0,
             value=float(settings.get("atr_multiplier", 1.5)),
-            step=0.1
+            step=0.1,
+            help="Пропускать если волатильность > ATR × множитель"
         )
 
+    # ===== EXPLANATION =====
     st.markdown("---")
-    btn_cols = st.columns([1, 1, 3])
+    with st.expander("❓ Что означает каждый параметр?", expanded=False):
+        st.markdown("""
+        ### 🎮 Run Configuration
+        - **Режим**: dry-run (безопасно, реальные данные), paper (симуляция), live (реальные деньги!)
+        - **Размер ставки**: сколько USDC вкладывать в каждую сделку
+
+        ### ⏱️ Окно входа
+        - **Мин/Макс секунд**: бот ищет вход только в этом окне перед закрытием 5-мин свечи
+        - Пример: 10-50 сек = начинает искать за 50 сек, заканчивает за 10 сек
+
+        ### 💲 Ценовые пороги
+        - **BTC/ETH мин. цена**: не входить если цена Polymarket слишком низкая (мало профита)
+        - **Макс. цена**: не входить если цена слишком высокая (>0.99 = минимум профита)
+
+        ### 📊 Пороги сигналов
+        - **Мин. уверенность**: насколько бот должен быть уверен в сигнале (0.3 = 30%)
+        - **Мин. дельта**: минимальное изменение цены для входа (0.0005 = 0.05%)
+        - **ATR множитель**: фильтр волатильности (1.5 = пропускать если волатильность > 1.5× нормы)
+        """)
+
+    # ===== BUTTONS =====
+    st.markdown("---")
+    btn_cols = st.columns([1, 1, 1, 2])
+
     with btn_cols[0]:
-        if st.button("💾 Save Settings", type="primary", use_container_width=True):
+        if st.button("💾 Сохранить", type="primary", use_container_width=True):
             save_settings(new_settings)
-            st.success("Settings saved!")
-            st.rerun()
-    with btn_cols[1]:
-        if st.button("🔄 Save & Restart Bot", use_container_width=True):
-            save_settings(new_settings)
-            restart_bot(new_settings["mode"], new_settings["amount"])
-            st.success("Saved & restarted!")
+            st.success("✅ Настройки сохранены!")
             st.rerun()
 
-    st.caption("Changes are saved to `settings.json`. The bot reads settings on startup. Use 'Save & Restart Bot' to apply immediately.")
+    with btn_cols[1]:
+        if st.button("💾 Сохранить и рестарт", use_container_width=True):
+            save_settings(new_settings)
+            restart_bot(new_settings["mode"], new_settings["amount"])
+            st.success("✅ Сохранено и перезапущено!")
+            st.rerun()
+
+    with btn_cols[2]:
+        if st.button("🔄 Сбросить к дефолтным", use_container_width=True):
+            defaults = get_default_settings()
+            save_settings(defaults)
+            st.success("✅ Сброшено к настройкам по умолчанию!")
+            st.rerun()
+
+    with btn_cols[3]:
+        # Save custom preset
+        preset_name = st.text_input("Сохранить как пресет:", placeholder="Название пресета...", key="new_preset_name")
+        if preset_name and st.button("💾 Сохранить пресет", use_container_width=True):
+            custom = load_custom_presets()
+            preset_key = preset_name.lower().replace(" ", "_")
+            custom[preset_key] = {
+                "name": preset_name,
+                "desc": "Пользовательский пресет",
+                "settings": new_settings
+            }
+            save_custom_presets(custom)
+            st.success(f"✅ Пресет '{preset_name}' сохранён!")
+            st.rerun()
+
+    st.caption("Настройки сохраняются в `settings.json`. Бот читает их при запуске. Используйте 'Сохранить и рестарт' для немедленного применения.")

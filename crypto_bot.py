@@ -47,6 +47,16 @@ def load_settings():
     except:
         return {}
 
+def load_bot_settings():
+    """Загружает настройки из settings.json для CONFIG, fallback на дефолты."""
+    try:
+        s = json.loads(SETTINGS_FILE.read_text())
+        return s
+    except:
+        return {}
+
+_bot_settings = load_bot_settings()
+
 def get_setting(key, default):
     """Get a setting from file or return default."""
     s = load_settings()
@@ -78,33 +88,30 @@ def check_control():
         pass
     return None
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
+# ─── CONFIG (defaults, can be overridden by settings.json) ────────────────────
 GAMMA_API         = "https://gamma-api.polymarket.com"
 CLOB_API          = "https://clob.polymarket.com"
 BINANCE_API       = "https://api.binance.com"
 
-ENTRY_SECONDS_MAX = 50
-ENTRY_SECONDS_MIN = 10
-PRICE_MIN         = {          # minimum price per crypto — BTC stricter due to higher volatility
-    "BTC": 0.94,
-    "ETH": 0.92,
+ENTRY_SECONDS_MAX = _bot_settings.get("entry_max", 50)
+ENTRY_SECONDS_MIN = _bot_settings.get("entry_min", 10)
+PRICE_MIN         = {
+    "BTC": _bot_settings.get("price_min_btc", 0.94),
+    "ETH": _bot_settings.get("price_min_eth", 0.92),
 }
-PRICE_MAX         = 0.99   # maximum price — CLOB accepts up to 0.99
+PRICE_MAX         = _bot_settings.get("price_max", 0.99)
 
 WAKE_BEFORE       = 65
 POLL_INTERVAL     = 3
 
-# Window Delta thresholds (current price vs period-open price)
-DELTA_SKIP        = 0.0005  # < 0.05% → too close to the line, skip
-DELTA_WEAK        = 0.001   # 0.05–0.10% → weak signal
-DELTA_STRONG      = 0.002   # > 0.20% → strong signal
+DELTA_SKIP        = _bot_settings.get("delta_skip", 0.0005)
+DELTA_WEAK        = 0.001
+DELTA_STRONG      = 0.002
 
-# Minimum confidence to enter (0.0 – 1.0)
-MIN_CONFIDENCE    = 0.3
+MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 
-# ATR — volatility filter
-ATR_PERIODS       = 5     # last 5 periods of 5min
-ATR_MULTIPLIER    = 1.5   # if current range > 1.5x ATR → skip
+ATR_PERIODS       = 5
+ATR_MULTIPLIER    = _bot_settings.get("atr_multiplier", 1.5)
 
 # Binance symbols
 BINANCE_SYMBOLS = {
@@ -430,7 +437,8 @@ class CryptoBot:
         log(f"Markets: {', '.join(MARKETS.values())}")
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
-        log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}%")
+        log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | ATR: {ATR_MULTIPLIER}x")
+        log(f"Settings from: {'settings.json' if _bot_settings else 'defaults'}")
         log("=" * 60)
 
     def run(self):
@@ -618,8 +626,12 @@ class CryptoBot:
             return
 
         # Entry approved!
+        # Calculate expected PnL before saving
+        expected_pnl = (self.amount / market["winner_price"]) - self.amount
         signal_data["entered"] = True
         signal_data["reason"] = "all filters passed"
+        signal_data["amount"] = self.amount
+        signal_data["pnl_expected"] = expected_pnl
         save_signal(signal_data)
 
         self._enter(market, ta, seconds_left)
