@@ -422,6 +422,11 @@ class CryptoBot:
         self.proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
         self.running      = True  # Flag for control
 
+        # Банк (начальный капитал) и текущий баланс
+        settings = load_settings()
+        self.bank_start = float(settings.get("bank", 100.0))
+        self.bank_balance = self.bank_start
+
         # Write PID file
         try:
             PID_FILE.write_text(str(os.getpid()))
@@ -434,7 +439,7 @@ class CryptoBot:
         mode = "DRY RUN" if dry_run else ("PAPER" if paper else "🔴 LIVE")
         log("=" * 60)
         log(f"Crypto Up/Down Bot | {mode} | ${amount}/trade")
-        log(f"Markets: {', '.join(MARKETS.values())}")
+        log(f"Bank: ${self.bank_start:.2f} | Markets: {', '.join(MARKETS.values())}")
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | ATR: {ATR_MULTIPLIER}x")
@@ -501,6 +506,9 @@ class CryptoBot:
                 log("⏰ Market closed.")
                 for prefix in MARKETS:
                     self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
+                # Проверяем результат предыдущего раунда
+                prev_close = close_ts - 300
+                self._check_previous_round(prev_close)
                 break
 
             pending = [
@@ -674,6 +682,120 @@ class CryptoBot:
                 "timestamp":    ts_str(),
             })
             log(f"   ✅ Trade #{len(self.trades)} recorded [{crypto}]")
+
+    def _check_previous_round(self, close_ts: int):
+        """
+        Проверяет результаты предыдущего раунда на Polymarket.
+        Обновляет signals.json с результатами (win/loss, realized_pnl).
+        """
+        try:
+            # Ищем сигналы которые вошли в этом раунде
+            if not SIGNALS_FILE.exists():
+                return
+            signals = json.loads(SIGNALS_FILE.read_text())
+            if not isinstance(signals, list):
+                return
+
+            # Находим сигналы для этого раунда (close_ts)
+            round_slug_prefixes = list(MARKETS.keys())
+            updated = False
+
+            for i, sig in enumerate(signals):
+                if not sig.get("entered"):
+                    continue
+                # Проверяем принадлежность к раунду по timestamp (±5 мин)
+                sig_ts_str = sig.get("timestamp", "")
+                if not sig_ts_str:
+                    continue
+
+                # Парсим timestamp сигнала
+                try:
+                    sig_dt = datetime.strptime(sig_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                    sig_unix = int(sig_dt.timestamp())
+                except:
+                    continue
+
+                # Если сигнал был в пределах текущего раунда (±300 сек)
+                if abs(sig_unix - close_ts) > 300:
+                    continue
+
+                # Уже есть результат?
+                if "realized_pnl" in sig:
+                    continue
+
+                # Получаем результат с Polymarket
+                crypto = sig.get("coin", "")
+                side = sig.get("side", "")
+                if not crypto or not side:
+                    continue
+
+                # Определяем slug для этого раунда
+                prefix = "btc-updown-5m" if crypto == "BTC" else "eth-updown-5m"
+                start_ts = close_ts - 300
+                slug = f"{prefix}-{start_ts}"
+
+                # Запрашиваем результат с Gamma API
+                try:
+                    r = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=5)
+                    r.raise_for_status()
+                    data = r.json()
+                    if not data:
+                        continue
+                    event = data[0]
+                    markets = event.get("markets", [])
+                    if not markets:
+                        continue
+                    market = markets[0]
+                    outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+                    outcomes = json.loads(market.get("outcomes", "[]"))
+
+                    if len(outcome_prices) < 2 or len(outcomes) < 2:
+                        continue
+
+                    prices = [float(p) for p in outcome_prices]
+                    winner_idx = 0 if prices[0] >= prices[1] else 1
+                    winner = outcomes[winner_idx]
+                    loser = outcomes[1 - winner_idx]
+
+                    # Определяем win/loss
+                    won = (side == winner)
+                    entry_price = sig.get("pm", 0)
+                    trade_amount = sig.get("amount", self.amount)
+
+                    if won:
+                        # Выигрыш: payout = amount / entry_price
+                        payout = trade_amount / entry_price if entry_price > 0 else trade_amount
+                        realized_pnl = payout - trade_amount
+                        result = "WIN"
+                    else:
+                        # Проигрыш: теряем ставку
+                        realized_pnl = -trade_amount
+                        result = "LOSS"
+
+                    # Обновляем сигнал
+                    signals[i]["result"] = result
+                    signals[i]["won"] = won
+                    signals[i]["winner"] = winner
+                    signals[i]["realized_pnl"] = round(realized_pnl, 2)
+                    signals[i]["payout"] = round(payout if won else 0, 2)
+
+                    # Обновляем банк
+                    self.bank_balance += realized_pnl
+
+                    log(f"   🏁 [{crypto}] {result} | side={side} winner={winner} | "
+                        f"pnl=${realized_pnl:+.2f} | bank=${self.bank_balance:.2f}")
+
+                    updated = True
+                except Exception as e:
+                    log(f"   ⚠️  Result check failed for {slug}: {e}")
+                    continue
+
+            if updated:
+                signals = signals[-10000:]
+                SIGNALS_FILE.write_text(json.dumps(signals, indent=2))
+
+        except Exception as e:
+            log(f"   ⚠️  _check_previous_round error: {e}")
 
     def _print_summary(self):
         log("─" * 60)

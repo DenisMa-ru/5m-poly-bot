@@ -130,6 +130,7 @@ def build_dashboard_state():
     # Считаем invested и pnl из вошедших сигналов
     settings = load_settings()
     amount = settings.get("amount", 10)
+    bank_start = float(settings.get("bank", 100))
     total_invested = sum(s.get("amount", amount) for s in entered)
 
     # PnL: берём из signal data, или рассчитываем из pm цены для старых сигналов
@@ -141,6 +142,15 @@ def build_dashboard_state():
         elif s.get("pm") and s["pm"] > 0:
             trade_amount = s.get("amount", amount)
             total_pnl += (trade_amount / s["pm"]) - trade_amount
+
+    # Realized PnL — реальные результаты завершённых раундов
+    realized_pnl = sum(s.get("realized_pnl", 0) for s in entered if s.get("realized_pnl") is not None)
+    bank_current = bank_start + realized_pnl
+
+    # Win/Loss статистика
+    wins = [s for s in entered if s.get("won") == True]
+    losses = [s for s in entered if s.get("won") == False]
+    pending = [s for s in entered if "realized_pnl" not in s or s.get("realized_pnl") is None]
 
     # Skip reasons breakdown
     skip_reasons = {}
@@ -194,6 +204,12 @@ def build_dashboard_state():
         "total_skipped": len(skipped),
         "invested": total_invested,
         "pnl": total_pnl,
+        "realized_pnl": realized_pnl,
+        "bank_start": bank_start,
+        "bank_current": bank_current,
+        "wins": len(wins),
+        "losses": len(losses),
+        "pending": len(pending),
         "btc_price": btc_price,
         "eth_price": eth_price,
         "btc_pm": btc_pm,
@@ -254,6 +270,7 @@ def load_settings():
 def get_default_settings():
     """Возвращает дефолтные настройки бота."""
     return {
+        "bank": 100,
         "mode": "dry-run",
         "amount": 10,
         "min_confidence": 0.3,
@@ -272,6 +289,7 @@ PRESETS = {
         "name": "📋 По умолчанию",
         "desc": "Стандартные настройки — баланс риска и прибыли",
         "settings": {
+            "bank": 100,
             "mode": "dry-run",
             "amount": 10,
             "min_confidence": 0.3,
@@ -288,6 +306,7 @@ PRESETS = {
         "name": "🛡️ Консервативный",
         "desc": "Меньше сделок, выше качество. Минимальный риск.",
         "settings": {
+            "bank": 100,
             "mode": "dry-run",
             "amount": 5,
             "min_confidence": 0.55,
@@ -304,6 +323,7 @@ PRESETS = {
         "name": "⚖️ Сбалансированный",
         "desc": "Оптимальный баланс частоты и качества сделок.",
         "settings": {
+            "bank": 100,
             "mode": "dry-run",
             "amount": 10,
             "min_confidence": 0.4,
@@ -320,6 +340,7 @@ PRESETS = {
         "name": "🔥 Агрессивный",
         "desc": "Больше сделок, выше риск. Для тестирования стратегии.",
         "settings": {
+            "bank": 100,
             "mode": "dry-run",
             "amount": 20,
             "min_confidence": 0.2,
@@ -336,6 +357,7 @@ PRESETS = {
         "name": "💰 Крупные ставки",
         "desc": "Больший размер ставки при стандартных параметрах.",
         "settings": {
+            "bank": 500,
             "mode": "dry-run",
             "amount": 50,
             "min_confidence": 0.4,
@@ -437,16 +459,33 @@ with tab_dashboard:
     a5.metric("Skip Rate", f"{skip_rate:.0f}%")
     a6.metric("Updated", D['time'])
 
-    # ---- MONEY + PRICES (из signals.json — точные данные!) ----
+    # ---- BANK + REALIZED PNL ----
     st.markdown("---")
+    bank = D['bank_current']
+    bank_change = bank - D['bank_start']
+    bank_pct = (bank_change / D['bank_start'] * 100) if D['bank_start'] > 0 else 0
     b1, b2, b3, b4 = st.columns(4)
-    b1.metric("Invested", f"${D['invested']:.2f}")
-    pnl_v = D['pnl']
-    b2.metric("Expected PnL", f"${pnl_v:+.2f}",
-               delta=f"{pnl_v:+.2f}",
-               delta_color="normal" if pnl_v >= 0 else "inverse")
-    b3.metric("BTC", f"${D['btc_price']:.0f}" if D['btc_price'] else "—")
-    b4.metric("ETH", f"${D['eth_price']:.0f}" if D['eth_price'] else "—")
+    b1.metric("🏦 Банк", f"${bank:.2f}", delta=f"{bank_change:+.2f} ({bank_pct:+.1f}%)")
+    b2.metric("💰 Realized PnL", f"${D['realized_pnl']:+.2f}",
+               delta=f"{D['realized_pnl']:+.2f}",
+               delta_color="normal" if D['realized_pnl'] >= 0 else "inverse")
+    b3.metric("📊 Invested", f"${D['invested']:.2f}")
+    b4.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
+
+    # ---- WIN/LOSS + TIME ----
+    w1, w2, w3, w4 = st.columns(4)
+    win_rate = D['wins'] / max(D['wins'] + D['losses'], 1) * 100
+    w1.metric("✅ Wins", D['wins'])
+    w2.metric("❌ Losses", D['losses'])
+    w3.metric("🎯 Win Rate", f"{win_rate:.0f}%" if (D['wins'] + D['losses']) > 0 else "—")
+    w4.metric("⏳ Pending", D['pending'])
+
+    # ---- PRICES ----
+    st.markdown("---")
+    p1, p2, p3 = st.columns(3)
+    p1.metric("BTC", f"${D['btc_price']:.0f}" if D['btc_price'] else "—")
+    p2.metric("ETH", f"${D['eth_price']:.0f}" if D['eth_price'] else "—")
+    p3.metric("🕐 Время", D['time'])
 
     # ---- PM PRICES + SKIP REASONS ----
     st.markdown("---")
@@ -628,13 +667,41 @@ with tab_stats:
         # Summary
         st.markdown("---")
         st.markdown("**Summary**")
-        su1, su2, su3 = st.columns(3)
-        su1.metric("Total Invested", f"${D['invested']:.2f}")
-        su2.metric("Total Expected PnL", f"${D['pnl']:+.2f}", delta=f"{D['pnl']:+.2f}")
-        if D['total_entered'] > 0:
-            su3.metric("Avg PnL per Trade", f"${D['pnl']/D['total_entered']:+.2f}")
-        else:
-            su3.metric("Avg PnL per Trade", "—")
+        su1, su2, su3, su4 = st.columns(4)
+        su1.metric("🏦 Банк", f"${D['bank_current']:.2f}", delta=f"{D['bank_current']-D['bank_start']:+.2f}")
+        su2.metric("💰 Realized PnL", f"${D['realized_pnl']:+.2f}")
+        su3.metric("📊 Invested", f"${D['invested']:.2f}")
+        su4.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
+
+        # Win/Loss breakdown
+        st.markdown("---")
+        st.markdown("**Win/Loss Breakdown**")
+        wl1, wl2, wl3, wl4 = st.columns(4)
+        wl1.metric("✅ Wins", D['wins'])
+        wl2.metric("❌ Losses", D['losses'])
+        total_resolved = D['wins'] + D['losses']
+        win_rate = D['wins'] / max(total_resolved, 1) * 100
+        wl3.metric("🎯 Win Rate", f"{win_rate:.0f}%" if total_resolved > 0 else "—")
+        wl4.metric("⏳ Pending Results", D['pending'])
+
+        # Per-coin realized PnL
+        st.markdown("---")
+        st.markdown("**Realized PnL by Coin**")
+        rp1, rp2 = st.columns(2)
+        with rp1:
+            st.markdown("**BTC**")
+            btc_realized = sum(x.get("realized_pnl", 0) for x in D['btc_entered'] if x.get("realized_pnl") is not None)
+            btc_wins = len([x for x in D['btc_entered'] if x.get("won") == True])
+            btc_losses = len([x for x in D['btc_entered'] if x.get("won") == False])
+            st.metric("Realized PnL", f"${btc_realized:+.2f}")
+            st.caption(f"Wins: {btc_wins} | Losses: {btc_losses}")
+        with rp2:
+            st.markdown("**ETH**")
+            eth_realized = sum(x.get("realized_pnl", 0) for x in D['eth_entered'] if x.get("realized_pnl") is not None)
+            eth_wins = len([x for x in D['eth_entered'] if x.get("won") == True])
+            eth_losses = len([x for x in D['eth_entered'] if x.get("won") == False])
+            st.metric("Realized PnL", f"${eth_realized:+.2f}")
+            st.caption(f"Wins: {eth_wins} | Losses: {eth_losses}")
 
         if st.button("🗑️ Reset Statistics"):
             SIGNALS_FILE.write_text("[]")
@@ -691,6 +758,13 @@ with tab_settings:
     s1, s2 = st.columns(2)
     with s1:
         st.markdown("**🎮 Run Configuration**")
+        new_settings["bank"] = st.number_input(
+            "🏦 Начальный банк (USDC)",
+            min_value=10.0, max_value=100000.0,
+            value=float(settings.get("bank", 100)),
+            step=10.0,
+            help="Начальный капитал для ставок. Баланс обновляется по результатам раундов."
+        )
         new_settings["mode"] = st.selectbox(
             "Режим работы",
             ["dry-run", "paper", "live"],
@@ -796,7 +870,7 @@ with tab_settings:
 
     # ===== BUTTONS =====
     st.markdown("---")
-    btn_cols = st.columns([1, 1, 1, 2])
+    btn_cols = st.columns([1, 1, 1, 1])
 
     with btn_cols[0]:
         if st.button("💾 Сохранить", type="primary", use_container_width=True):
@@ -819,9 +893,20 @@ with tab_settings:
             st.rerun()
 
     with btn_cols[3]:
-        # Save custom preset
-        preset_name = st.text_input("Сохранить как пресет:", placeholder="Название пресета...", key="new_preset_name")
-        if preset_name and st.button("💾 Сохранить пресет", use_container_width=True):
+        if st.button("🏦 Сбросить банк", use_container_width=True):
+            s = load_settings()
+            s["bank"] = float(settings.get("bank", 100))
+            save_settings(s)
+            st.success(f"✅ Банк сброшен до ${s['bank']:.0f}!")
+            st.rerun()
+
+    # Save custom preset
+    st.markdown("---")
+    preset_cols = st.columns([2, 1])
+    with preset_cols[0]:
+        preset_name = st.text_input("Сохранить текущие настройки как пресет:", placeholder="Название пресета...", key="new_preset_name")
+    with preset_cols[1]:
+        if preset_name and st.button("💾 Сохранить пресет", use_container_width=True, type="secondary"):
             custom = load_custom_presets()
             preset_key = preset_name.lower().replace(" ", "_")
             custom[preset_key] = {
