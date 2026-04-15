@@ -632,9 +632,8 @@ class CryptoBot:
         expected_pct = expected_pnl / self.amount * 100
         crypto       = market["crypto"]
 
-        log(f"🟢 ENTERING [{crypto} {market['winner_side']}] {market['title'][:45]}")
-        log(f"   price={price:.3f} | time_left={seconds_left:.1f}s | "
-            f"invested=${self.amount:.2f} | expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
+        log(f"🟢 ENTERING [{crypto} {market['winner_side']}] invested=${self.amount:.2f} expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
+        log(f"   {market['title'][:60]} | price={price:.3f} | time_left={seconds_left:.1f}s")
         log(f"   Price:{ta.get('current_price',0):.2f} | "
             f"delta:{ta.get('delta_pct',0):.4f}% | "
             f"conf:{ta.get('confidence',0):.0%}")
