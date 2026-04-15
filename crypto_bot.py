@@ -549,6 +549,7 @@ class CryptoBot:
 
                 log(f"🎯 [{crypto}] {seconds_left:.1f}s | "
                     f"PM:{market['winner_side']}@{market['winner_price']:.3f} | "
+                    f"Price:{ta.get('current_price',0):.2f} | "
                     f"delta:{ta.get('delta_pct',0):.4f}% | "
                     f"conf:{ta.get('confidence',0):.0%} | "
                     f"{ta.get('reason','')[:50]}")
