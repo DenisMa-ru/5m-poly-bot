@@ -40,6 +40,20 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Realtime clock via JS
+st.markdown("""
+<script>
+function updateClock() {
+    const now = new Date();
+    const time = now.toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    const el = document.getElementById('live-clock');
+    if (el) el.textContent = time;
+}
+setInterval(updateClock, 1000);
+updateClock();
+</script>
+""", unsafe_allow_html=True)
+
 # ===== BOT CONTROL HELPERS =====
 def write_control(cmd, mode=None, amount=None, settings=None):
     """Write command to control file for the bot to read."""
@@ -439,14 +453,22 @@ with tab_dashboard:
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
 
-    status_text = f"{'🟢 Running' if bot_running else '🔴 Stopped'}"
-    ctrl_cols[4].markdown(f"**Status:** {status_text}  |  Mode: `{settings.get('mode', 'dry-run')}`  |  Amount: `${settings.get('amount', 10)}`")
+    status_text = f"{'🟢' if bot_running else '🔴'}"
+    bank = D['bank_current']
+    bank_change = bank - D['bank_start']
+    ctrl_cols[4].markdown(
+        f"{status_text} `{settings.get('mode', 'dry-run')}` | "
+        f"${settings.get('amount', 10)}/trade | "
+        f"🏦 **${bank:.0f}** ({bank_change:+.2f}) | "
+        f"🕐 `<span id='live-clock' style='font-family:monospace'>--:--:--</span>`",
+        unsafe_allow_html=True
+    )
 
     ctrl_cols[5].caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
 
     st.markdown("---")
 
-    # ---- STATUS BAR (из логов только состояние) ----
+    # ---- STATUS BAR ----
     ico = {'sleeping': '💤', 'active': '⚡', 'start': '🚀'}.get(L['state'], '⚪')
     st.markdown(f"### {ico} {L['state'].upper()} — Next: {L['nc']} | Sleep: {L['sleep']}s")
 
@@ -459,33 +481,30 @@ with tab_dashboard:
     a5.metric("Skip Rate", f"{skip_rate:.0f}%")
     a6.metric("Updated", D['time'])
 
-    # ---- BANK + REALIZED PNL ----
+    # ---- PNL + INVESTED ----
     st.markdown("---")
-    bank = D['bank_current']
-    bank_change = bank - D['bank_start']
-    bank_pct = (bank_change / D['bank_start'] * 100) if D['bank_start'] > 0 else 0
-    b1, b2, b3, b4 = st.columns(4)
-    b1.metric("🏦 Банк", f"${bank:.2f}", delta=f"{bank_change:+.2f} ({bank_pct:+.1f}%)")
-    b2.metric("💰 Realized PnL", f"${D['realized_pnl']:+.2f}",
-               delta=f"{D['realized_pnl']:+.2f}",
-               delta_color="normal" if D['realized_pnl'] >= 0 else "inverse")
-    b3.metric("📊 Invested", f"${D['invested']:.2f}")
-    b4.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
+    b1, b2, b3 = st.columns(3)
+    pnl_v = D['realized_pnl']
+    b1.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
+               delta=f"{pnl_v:+.2f}",
+               delta_color="normal" if pnl_v >= 0 else "inverse")
+    b2.metric("📊 Invested", f"${D['invested']:.2f}")
+    b3.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
 
-    # ---- WIN/LOSS + TIME ----
-    w1, w2, w3, w4 = st.columns(4)
-    win_rate = D['wins'] / max(D['wins'] + D['losses'], 1) * 100
-    w1.metric("✅ Wins", D['wins'])
-    w2.metric("❌ Losses", D['losses'])
-    w3.metric("🎯 Win Rate", f"{win_rate:.0f}%" if (D['wins'] + D['losses']) > 0 else "—")
-    w4.metric("⏳ Pending", D['pending'])
+    # ---- WIN/LOSS (only when resolved trades exist) ----
+    if D['wins'] > 0 or D['losses'] > 0:
+        w1, w2, w3, w4 = st.columns(4)
+        win_rate = D['wins'] / max(D['wins'] + D['losses'], 1) * 100
+        w1.metric("✅ Wins", D['wins'])
+        w2.metric("❌ Losses", D['losses'])
+        w3.metric("🎯 Win Rate", f"{win_rate:.0f}%")
+        w4.metric("⏳ Pending", D['pending'])
 
     # ---- PRICES ----
     st.markdown("---")
-    p1, p2, p3 = st.columns(3)
+    p1, p2 = st.columns(2)
     p1.metric("BTC", f"${D['btc_price']:.0f}" if D['btc_price'] else "—")
     p2.metric("ETH", f"${D['eth_price']:.0f}" if D['eth_price'] else "—")
-    p3.metric("🕐 Время", D['time'])
 
     # ---- PM PRICES + SKIP REASONS ----
     st.markdown("---")
