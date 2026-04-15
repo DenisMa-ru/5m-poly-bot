@@ -131,7 +131,16 @@ def build_dashboard_state():
     settings = load_settings()
     amount = settings.get("amount", 10)
     total_invested = sum(s.get("amount", amount) for s in entered)
-    total_pnl = sum(s.get("pnl_expected", 0) for s in entered)
+
+    # PnL: берём из signal data, или рассчитываем из pm цены для старых сигналов
+    # Формула: pnl = (amount / pm_price) - amount
+    total_pnl = 0
+    for s in entered:
+        if s.get("pnl_expected") is not None:
+            total_pnl += s["pnl_expected"]
+        elif s.get("pm") and s["pm"] > 0:
+            trade_amount = s.get("amount", amount)
+            total_pnl += (trade_amount / s["pm"]) - trade_amount
 
     # Skip reasons breakdown
     skip_reasons = {}
