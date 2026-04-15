@@ -11,6 +11,13 @@ env/
 logs/
 *.log
 
+# Bot runtime files
+bot.log
+control.json
+signals.json
+settings.json
+bot.pid
+
 # Python cache
 __pycache__/
 *.py[cod]

@@ -1,0 +1,17 @@
+[Unit]
+Description=5m Poly Bot — Crypto Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/5m-poly-bot
+Environment="PATH=/root/5m-poly-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/5m-poly-bot/.venv/bin/python /root/5m-poly-bot/crypto_bot.py --dry-run
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/5m-poly-bot/bot.log
+StandardError=append:/root/5m-poly-bot/bot.log
+
+[Install]
+WantedBy=multi-user.target

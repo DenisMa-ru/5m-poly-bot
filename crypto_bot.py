@@ -25,11 +25,60 @@ import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 import os
+import signal
+import sys
 
 load_dotenv()
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────────
+# ─── FILE PATHS ────────────────────────────────────────────────────────────────
+BOT_DIR = Path(__file__).parent
+CONTROL_FILE = BOT_DIR / "control.json"
+SIGNALS_FILE = BOT_DIR / "signals.json"
+SETTINGS_FILE = BOT_DIR / "settings.json"
+PID_FILE = BOT_DIR / "bot.pid"
+
+# ─── SETTINGS ──────────────────────────────────────────────────────────────────
+def load_settings():
+    """Load settings from settings.json, fallback to defaults."""
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except:
+        return {}
+
+def get_setting(key, default):
+    """Get a setting from file or return default."""
+    s = load_settings()
+    return s.get(key, default)
+
+# ─── SIGNAL SAVING ─────────────────────────────────────────────────────────────
+def save_signal(signal_data):
+    """Append a signal to signals.json for dashboard history."""
+    try:
+        signals = []
+        if SIGNALS_FILE.exists():
+            signals = json.loads(SIGNALS_FILE.read_text())
+            if not isinstance(signals, list):
+                signals = []
+        signals.append(signal_data)
+        signals = signals[-10000:]  # Keep last 10k
+        SIGNALS_FILE.write_text(json.dumps(signals, indent=2))
+    except Exception as e:
+        log(f"[SIGNAL SAVE ERROR] {e}")
+
+# ─── CONTROL FILE CHECK ────────────────────────────────────────────────────────
+def check_control():
+    """Check control.json for stop/restart commands. Returns command or None."""
+    try:
+        if CONTROL_FILE.exists():
+            data = json.loads(CONTROL_FILE.read_text())
+            return data.get("cmd")
+    except:
+        pass
+    return None
+
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
 GAMMA_API         = "https://gamma-api.polymarket.com"
 CLOB_API          = "https://clob.polymarket.com"
 BINANCE_API       = "https://api.binance.com"
@@ -364,6 +413,13 @@ class CryptoBot:
         self.trades       = []
         self.private_key  = os.getenv("POLY_PRIVATE_KEY", "")
         self.proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
+        self.running      = True  # Flag for control
+
+        # Write PID file
+        try:
+            PID_FILE.write_text(str(os.getpid()))
+        except:
+            pass
 
         if not paper and not dry_run and (not self.private_key or not self.proxy_wallet):
             raise ValueError("POLY_PRIVATE_KEY and POLY_PROXY_WALLET required in .env")
@@ -378,8 +434,19 @@ class CryptoBot:
         log("=" * 60)
 
     def run(self):
-        while True:
+        while self.running:
             try:
+                # Check for control commands
+                cmd = check_control()
+                if cmd == "stop":
+                    log("⏹️ Stop command received from dashboard")
+                    CONTROL_FILE.unlink(missing_ok=True)
+                    break
+                elif cmd == "restart":
+                    log("🔄 Restart command received from dashboard")
+                    CONTROL_FILE.unlink(missing_ok=True)
+                    log("Restarting...")
+
                 self._cycle()
             except KeyboardInterrupt:
                 log("Stopped.")
@@ -388,6 +455,15 @@ class CryptoBot:
             except Exception as e:
                 log(f"Error: {e}")
                 time.sleep(5)
+        self._cleanup()
+
+    def _cleanup(self):
+        """Clean up PID file on exit."""
+        try:
+            PID_FILE.unlink(missing_ok=True)
+        except:
+            pass
+        self._print_summary()
 
     def _cycle(self):
         close_ts   = next_close_ts()
@@ -487,20 +563,40 @@ class CryptoBot:
         crypto    = market["crypto"]
         price_min = PRICE_MIN.get(crypto, 0.92)
 
+        # Build signal data for saving
+        signal_data = {
+            "timestamp": ts_str(),
+            "coin": crypto,
+            "side": market["winner_side"],
+            "pm": market["winner_price"],
+            "delta": ta.get("delta_pct", 0),
+            "confidence": ta.get("confidence", 0),
+            "price": ta.get("current_price", 0),
+            "time_left": seconds_left,
+            "entered": False,
+            "reason": "",
+        }
+
         # Filter 1: minimum price per crypto
         if market["winner_price"] < price_min:
             log(f"   [{crypto}] SKIP — PM price {market['winner_price']:.3f} < {price_min}")
+            signal_data["reason"] = f"PM price < {price_min}"
+            save_signal(signal_data)
             return
 
         # Filter 1b: maximum price
         if market["winner_price"] > PRICE_MAX:
             log(f'   [{crypto}] SKIP — PM price {market["winner_price"]:.3f} > {PRICE_MAX} (minimal upside)')
+            signal_data["reason"] = f"PM price > {PRICE_MAX}"
+            save_signal(signal_data)
             return
 
         # Filter 2: minimum confidence
         confidence = ta.get("confidence", 0)
         if confidence < MIN_CONFIDENCE:
             log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
+            signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
+            save_signal(signal_data)
             return
 
         # Filter 3: direction must match between Binance and Polymarket
@@ -508,13 +604,22 @@ class CryptoBot:
         pm_side = market["winner_side"]
         if ta_dir and ta_dir != pm_side:
             log(f"   [{crypto}] SKIP — Binance says {ta_dir} but PM says {pm_side}")
+            signal_data["reason"] = f"direction mismatch: {ta_dir} vs {pm_side}"
+            save_signal(signal_data)
             return
 
         # Filter 4: minimum delta
         delta_pct = ta.get("delta_pct", 0)
         if delta_pct < DELTA_SKIP * 100:
             log(f"   [{crypto}] SKIP — delta {delta_pct:.4f}% too small")
+            signal_data["reason"] = f"delta {delta_pct:.4f}% too small"
+            save_signal(signal_data)
             return
+
+        # Entry approved!
+        signal_data["entered"] = True
+        signal_data["reason"] = "all filters passed"
+        save_signal(signal_data)
 
         self._enter(market, ta, seconds_left)
         entered_slugs.add(slug)

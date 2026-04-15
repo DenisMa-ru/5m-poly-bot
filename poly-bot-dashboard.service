@@ -1,0 +1,15 @@
+[Unit]
+Description=5m Poly Bot — Dashboard
+After=network.target poly-bot.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/5m-poly-bot
+Environment="PATH=/root/5m-poly-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/5m-poly-bot/.venv/bin/streamlit run /root/5m-poly-bot/dashboard.py --server.port 3001 --server.address 0.0.0.0 --server.headless true
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
