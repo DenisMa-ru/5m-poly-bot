@@ -40,20 +40,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Realtime clock via JS
-st.markdown("""
-<script>
-function updateClock() {
-    const now = new Date();
-    const time = now.toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    const el = document.getElementById('live-clock');
-    if (el) el.textContent = time;
-}
-setInterval(updateClock, 1000);
-updateClock();
-</script>
-""", unsafe_allow_html=True)
-
 # ===== BOT CONTROL HELPERS =====
 def write_control(cmd, mode=None, amount=None, settings=None):
     """Write command to control file for the bot to read."""
@@ -460,8 +446,7 @@ with tab_dashboard:
         f"{status_text} `{settings.get('mode', 'dry-run')}` | "
         f"${settings.get('amount', 10)}/trade | "
         f"🏦 **${bank:.0f}** ({bank_change:+.2f}) | "
-        f"🕐 `<span id='live-clock' style='font-family:monospace'>--:--:--</span>`",
-        unsafe_allow_html=True
+        f"🕐 `{D['time']}`"
     )
 
     ctrl_cols[5].caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
@@ -493,12 +478,11 @@ with tab_dashboard:
 
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
-        w1, w2, w3, w4 = st.columns(4)
+        w1, w2, w3 = st.columns(3)
         win_rate = D['wins'] / max(D['wins'] + D['losses'], 1) * 100
         w1.metric("✅ Wins", D['wins'])
         w2.metric("❌ Losses", D['losses'])
         w3.metric("🎯 Win Rate", f"{win_rate:.0f}%")
-        w4.metric("⏳ Pending", D['pending'])
 
     # ---- PRICES ----
     st.markdown("---")
