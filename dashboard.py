@@ -443,10 +443,9 @@ with tab_dashboard:
     bank = D['bank_current']
     bank_change = bank - D['bank_start']
     ctrl_cols[4].markdown(
-        f"{status_text} `{settings.get('mode', 'dry-run')}` | "
-        f"${settings.get('amount', 10)}/trade | "
-        f"🏦 **${bank:.0f}** ({bank_change:+.2f}) | "
-        f"🕐 `{D['time']}`"
+        f"{status_text} {settings.get('mode', 'dry-run')} | "
+        f"${settings.get('amount', 10):.0f}/trade | "
+        f"Bank ${bank:.0f} ({bank_change:+.2f})"
     )
 
     ctrl_cols[5].caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
@@ -716,19 +715,14 @@ with tab_stats:
 # TAB 4: SETTINGS
 # ==========================================
 with tab_settings:
-    st.markdown("### ⚙️ Bot Settings")
+    st.markdown("### ⚙️ Settings")
 
-    # ===== PRESETS BAR =====
-    st.markdown("**📦 Быстрые пресеты**")
-    st.caption("Выберите готовую стратегию или настройте вручную")
-
+    # ===== PRESETS BAR (компактно) =====
     custom_presets = load_custom_presets()
     all_presets = {**PRESETS, **custom_presets}
 
-    # Колонки для пресетов
     preset_cols = st.columns(5)
     selected_preset = None
-
     for i, (key, preset) in enumerate(all_presets.items()):
         with preset_cols[i % 5]:
             label = preset["name"]
@@ -742,134 +736,24 @@ with tab_settings:
         st.success(f"✅ Применён пресет: {all_presets[[k for k, v in all_presets.items() if v['settings'] == selected_preset][0]]['name']}")
         st.rerun()
 
-    # Описание выбранного пресета
-    st.markdown("---")
-    st.markdown("**Как работают пресеты:**")
-    desc_cols = st.columns(3)
-    with desc_cols[0]:
-        st.info("🛡️ **Консервативный**\n- Меньше сделок\n- Выше уверенность (55%)\n- Меньше размер ставки\n- Для минимального риска")
-    with desc_cols[1]:
-        st.info("⚖️ **Сбалансированный**\n- Среднее кол-во сделок\n- Уверенность 40%\n- Стандартный размер ставки\n- Оптимальный баланс")
-    with desc_cols[2]:
-        st.info("🔥 **Агрессивный**\n- Больше сделок\n- Ниже уверенность (20%)\n- Больше размер ставки\n- Для тестирования")
-
-    st.markdown("---")
-
     # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
 
     s1, s2 = st.columns(2)
     with s1:
-        st.markdown("**🎮 Run Configuration**")
-        new_settings["bank"] = st.number_input(
-            "🏦 Начальный банк (USDC)",
-            min_value=10.0, max_value=100000.0,
-            value=float(settings.get("bank", 100)),
-            step=10.0,
-            help="Начальный капитал для ставок. Баланс обновляется по результатам раундов."
-        )
-        new_settings["mode"] = st.selectbox(
-            "Режим работы",
-            ["dry-run", "paper", "live"],
-            index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")),
-            help="dry-run: реальные данные без сделок | paper: симуляция | live: реальные деньги"
-        )
-        new_settings["amount"] = st.number_input(
-            "Размер ставки (USDC)",
-            min_value=1.0, max_value=1000.0,
-            value=float(settings.get("amount", 10)),
-            step=1.0,
-            help="Сколько USDC вкладывать в каждую сделку"
-        )
+        new_settings["bank"] = st.number_input("Банк (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("bank", 100)), step=10.0)
+        new_settings["mode"] = st.selectbox("Режим", ["dry-run", "paper", "live"], index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")))
+        new_settings["amount"] = st.number_input("Ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
+        new_settings["entry_min"] = st.number_input("Вход мин (сек)", min_value=1, max_value=120, value=int(settings.get("entry_min", 10)), step=1)
+        new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 50)), step=5)
 
     with s2:
-        st.markdown("**⏱️ Окно входа**")
-        new_settings["entry_min"] = st.number_input(
-            "Мин. секунд до закрытия",
-            min_value=1, max_value=120,
-            value=int(settings.get("entry_min", 10)),
-            step=1,
-            help="Начинать искать вход не раньше чем за X сек до закрытия"
-        )
-        new_settings["entry_max"] = st.number_input(
-            "Макс. секунд до закрытия",
-            min_value=5, max_value=300,
-            value=int(settings.get("entry_max", 50)),
-            step=5,
-            help="Перестать искать вход за X сек до закрытия"
-        )
-
-    st.markdown("---")
-    s3, s4 = st.columns(2)
-    with s3:
-        st.markdown("**💲 Ценовые пороги**")
-        new_settings["price_min_btc"] = st.number_input(
-            "BTC мин. цена Polymarket",
-            min_value=0.50, max_value=1.0,
-            value=float(settings.get("price_min_btc", 0.94)),
-            step=0.01, format="%.2f",
-            help="Не входить в BTC если цена < этого значения"
-        )
-        new_settings["price_min_eth"] = st.number_input(
-            "ETH мин. цена Polymarket",
-            min_value=0.50, max_value=1.0,
-            value=float(settings.get("price_min_eth", 0.92)),
-            step=0.01, format="%.2f",
-            help="Не входить в ETH если цена < этого значения"
-        )
-        new_settings["price_max"] = st.number_input(
-            "Макс. цена (оба)",
-            min_value=0.90, max_value=1.0,
-            value=float(settings.get("price_max", 0.99)),
-            step=0.01, format="%.2f",
-            help="Не входить если цена > этого (мало профита)"
-        )
-
-    with s4:
-        st.markdown("**📊 Пороги сигналов**")
-        new_settings["min_confidence"] = st.slider(
-            "Мин. уверенность",
-            min_value=0.0, max_value=1.0,
-            value=float(settings.get("min_confidence", 0.3)),
-            step=0.05,
-            help="Минимальная уверенность сигнала для входа (0-100%)"
-        )
-        new_settings["delta_skip"] = st.number_input(
-            "Мин. дельта (%)",
-            min_value=0.0001, max_value=0.01,
-            value=float(settings.get("delta_skip", 0.0005)),
-            step=0.0001, format="%.4f",
-            help="Пропускать сигнал если дельта цены < этого значения"
-        )
-        new_settings["atr_multiplier"] = st.number_input(
-            "ATR множитель",
-            min_value=0.5, max_value=5.0,
-            value=float(settings.get("atr_multiplier", 1.5)),
-            step=0.1,
-            help="Пропускать если волатильность > ATR × множитель"
-        )
-
-    # ===== EXPLANATION =====
-    st.markdown("---")
-    with st.expander("❓ Что означает каждый параметр?", expanded=False):
-        st.markdown("""
-        ### 🎮 Run Configuration
-        - **Режим**: dry-run (безопасно, реальные данные), paper (симуляция), live (реальные деньги!)
-        - **Размер ставки**: сколько USDC вкладывать в каждую сделку
-
-        ### ⏱️ Окно входа
-        - **Мин/Макс секунд**: бот ищет вход только в этом окне перед закрытием 5-мин свечи
-        - Пример: 10-50 сек = начинает искать за 50 сек, заканчивает за 10 сек
-
-        ### 💲 Ценовые пороги
-        - **BTC/ETH мин. цена**: не входить если цена Polymarket слишком низкая (мало профита)
-        - **Макс. цена**: не входить если цена слишком высокая (>0.99 = минимум профита)
-
-        ### 📊 Пороги сигналов
-        - **Мин. уверенность**: насколько бот должен быть уверен в сигнале (0.3 = 30%)
-        - **Мин. дельта**: минимальное изменение цены для входа (0.0005 = 0.05%)
-        - **ATR множитель**: фильтр волатильности (1.5 = пропускать если волатильность > 1.5× нормы)
-        """)
+        new_settings["price_min_btc"] = st.number_input("BTC мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_btc", 0.94)), step=0.01, format="%.2f")
+        new_settings["price_min_eth"] = st.number_input("ETH мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_eth", 0.92)), step=0.01, format="%.2f")
+        new_settings["price_max"] = st.number_input("Макс цена", min_value=0.90, max_value=1.0, value=float(settings.get("price_max", 0.99)), step=0.01, format="%.2f")
+        new_settings["min_confidence"] = st.slider("Мин уверенность", min_value=0.0, max_value=1.0, value=float(settings.get("min_confidence", 0.3)), step=0.05)
+        new_settings["delta_skip"] = st.number_input("Мин дельта", min_value=0.0001, max_value=0.01, value=float(settings.get("delta_skip", 0.0005)), step=0.0001, format="%.4f")
+        new_settings["atr_multiplier"] = st.number_input("ATR множитель", min_value=0.5, max_value=5.0, value=float(settings.get("atr_multiplier", 1.5)), step=0.1)
 
     # ===== BUTTONS =====
     st.markdown("---")
