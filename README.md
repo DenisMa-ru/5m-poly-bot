@@ -43,10 +43,11 @@ The bot wakes up ~65 seconds before each market close and begins monitoring. It 
 | > 0.20% | 5 |
 | > 0.10% | 3 |
 | > 0.05% | 1 |
-| Momentum confirms | +2 |
-| **Max possible** | **9** |
+| Momentum confirms | +3 |
+| Higher timeframe trend confirms | +2 |
+| **Max possible** | **12** |
 
-Confidence = `abs(score) / 9.0`, capped at 100%.
+Confidence = `abs(score) / 12.0`, capped at 100%.
 
 ---
 

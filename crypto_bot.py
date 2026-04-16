@@ -44,7 +44,7 @@ def load_settings():
     """Load settings from settings.json, fallback to defaults."""
     try:
         return json.loads(SETTINGS_FILE.read_text())
-    except:
+    except Exception:
         return {}
 
 def load_bot_settings():
@@ -52,7 +52,7 @@ def load_bot_settings():
     try:
         s = json.loads(SETTINGS_FILE.read_text())
         return s
-    except:
+    except Exception:
         return {}
 
 _bot_settings = load_bot_settings()
@@ -84,7 +84,7 @@ def check_control():
         if CONTROL_FILE.exists():
             data = json.loads(CONTROL_FILE.read_text())
             return data.get("cmd")
-    except:
+    except Exception:
         pass
     return None
 
@@ -439,9 +439,22 @@ def get_clob_price(token_id: str) -> float:
 def execute_buy(token_id: str, amount_usdc: float, price: float,
                 private_key: str, proxy_wallet: str) -> bool:
     try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import OrderArgs
-        from py_clob_client.order_builder.constants import BUY
+        import importlib
+
+        if amount_usdc <= 0:
+            log("   ❌ BUY failed: amount_usdc must be > 0")
+            return False
+        if price <= 0:
+            log("   ❌ BUY failed: price must be > 0")
+            return False
+
+        client_module = importlib.import_module("py_clob_client.client")
+        clob_types_module = importlib.import_module("py_clob_client.clob_types")
+        constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+
+        ClobClient = client_module.ClobClient
+        OrderArgs = clob_types_module.OrderArgs
+        BUY = constants_module.BUY
 
         client = ClobClient(
             host=CLOB_API,
@@ -455,13 +468,19 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         taker_price = min(round(price + 0.01, 2), 0.99)  # multiple of 0.01, max 0.99
         size        = round(amount_usdc / price, 2)
 
+        if size <= 0:
+            log("   ❌ BUY failed: computed order size must be > 0")
+            return False
+
         resp = client.create_and_post_order(OrderArgs(
             token_id=token_id,
             price=taker_price,
             size=size,
             side=BUY,
         ))
-        log(f"   ✅ BUY OK: {resp.get('status')} | order {resp.get('orderID','')[:20]}...")
+        status = resp.get("status") if isinstance(resp, dict) else "ok"
+        order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+        log(f"   ✅ BUY OK: {status} | order {order_id[:20]}...")
         return True
     except Exception as e:
         log(f"   ❌ BUY failed: {e}")
@@ -488,7 +507,7 @@ class CryptoBot:
         # Write PID file
         try:
             PID_FILE.write_text(str(os.getpid()))
-        except:
+        except Exception:
             pass
 
         if not paper and not dry_run and (not self.private_key or not self.proxy_wallet):
@@ -532,7 +551,7 @@ class CryptoBot:
         """Clean up PID file on exit."""
         try:
             PID_FILE.unlink(missing_ok=True)
-        except:
+        except Exception:
             pass
         self._print_summary()
 
@@ -781,7 +800,7 @@ class CryptoBot:
                     try:
                         sig_dt = datetime.strptime(sig_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
                         sig_unix = int(sig_dt.timestamp())
-                    except:
+                    except Exception:
                         continue
 
                     # Старый формат: сделка обычно совершается в последние 10-50 секунд
