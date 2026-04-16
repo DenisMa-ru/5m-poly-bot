@@ -112,6 +112,9 @@ MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 
 ATR_PERIODS       = 5
 ATR_MULTIPLIER    = _bot_settings.get("atr_multiplier", 1.5)
+TREND_INTERVAL    = "15m"
+TREND_PERIODS     = 3
+TREND_BONUS       = 2
 
 # Binance symbols
 BINANCE_SYMBOLS = {
@@ -222,6 +225,40 @@ def get_atr(symbol: str, window_ts: int, periods: int = 5) -> float:
     except Exception:
         return 0.0
 
+def get_higher_timeframe_trend(symbol: str, interval: str = TREND_INTERVAL,
+                               periods: int = TREND_PERIODS) -> str | None:
+    """Simple higher timeframe trend confirmation from Binance candles."""
+    try:
+        candles = get_binance_candles(symbol, interval, periods)
+        if len(candles) < periods:
+            return None
+        first_open = float(candles[0][1])
+        last_close = float(candles[-1][4])
+        if last_close > first_open:
+            return "Up"
+        if last_close < first_open:
+            return "Down"
+        return None
+    except Exception:
+        return None
+
+def analyze_micro_momentum(candles: list) -> tuple[float, str]:
+    """Weighted 5-candle micro momentum. Newer candles have more weight."""
+    if len(candles) < 5:
+        return 0.0, "no data"
+
+    closes = [float(c[4]) for c in candles[-5:]]
+    changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    directions = [1 if change > 0 else (-1 if change < 0 else 0) for change in changes]
+    weights = [0.1, 0.2, 0.3, 0.4]
+    weighted_sum = sum(directions[i] * weights[i] for i in range(len(directions)))
+
+    if weighted_sum > 0:
+        return min(weighted_sum * 3, 3), f"Up ({min(weighted_sum * 3, 3):.1f})"
+    if weighted_sum < 0:
+        return max(weighted_sum * 3, -3), f"Down ({min(abs(weighted_sum) * 3, 3):.1f})"
+    return 0.0, "Flat (0.0)"
+
 def analyze(symbol: str, window_ts: int) -> dict:
     """
     Calculates a composite score based on:
@@ -291,24 +328,44 @@ def analyze(symbol: str, window_ts: int) -> dict:
 
     score = delta_weight if delta > 0 else -delta_weight
 
-    # 2. Micro momentum (last 2 1min candles)
-    # Momentum only reinforces the delta — never reverses it
-    candles = get_binance_candles(symbol, "1m", 3)
-    if len(candles) >= 2:
-        prev_close   = float(candles[-2][4])
-        last_close   = float(candles[-1][4])
-        momentum_up  = last_close > prev_close
-        # Only adds if momentum aligns with the delta direction
-        if (delta > 0 and momentum_up) or (delta < 0 and not momentum_up):
-            score += 2
-            momentum_str = f"↑ {last_close:.2f} (confirms)" if momentum_up else f"↓ {last_close:.2f} (confirms)"
-        else:
-            momentum_str = f"{'↑' if momentum_up else '↓'} {last_close:.2f} (contradicts, ignored)"
+    # 2. Weighted micro momentum (last 5 x 1m candles)
+    candles = get_binance_candles(symbol, "1m", 6)
+    momentum_weight, momentum_desc = analyze_micro_momentum(candles)
+    if (delta > 0 and momentum_weight > 0) or (delta < 0 and momentum_weight < 0):
+        score += abs(momentum_weight)
+        momentum_str = f"{momentum_desc} (confirms)"
+    elif momentum_weight != 0:
+        momentum_str = f"{momentum_desc} (contradicts, ignored)"
     else:
-        momentum_str = "no data"
+        momentum_str = momentum_desc
 
-    # Confidence (normalized over 9 = max possible)
-    confidence = min(abs(score) / 9.0, 1.0)
+    # 3. Higher timeframe trend confirmation.
+    # Stronger signals get a small bonus when the 15m context agrees.
+    higher_trend = get_higher_timeframe_trend(symbol)
+    if higher_trend and ((delta > 0 and higher_trend == "Up") or (delta < 0 and higher_trend == "Down")):
+        score += TREND_BONUS
+        trend_str = f"{higher_trend} (+{TREND_BONUS})"
+    elif higher_trend:
+        trend_str = f"{higher_trend} (contradicts)"
+        if abs(delta) < DELTA_STRONG:
+            return {
+                "confidence":    0,
+                "direction":     None,
+                "window_open":   window_open,
+                "current_price": current_price,
+                "delta_pct":     delta_pct,
+                "delta_weight":  delta_weight,
+                "momentum":      momentum_str,
+                "higher_trend":  trend_str,
+                "atr":           atr if 'atr' in locals() else 0,
+                "reason":        f"trend conflict on weak delta: {trend_str}",
+            }
+    else:
+        trend_str = "unknown"
+
+    # Confidence normalized over max score:
+    # delta 7 + momentum 3 + trend 2 = 12
+    confidence = min(abs(score) / 12.0, 1.0)
     direction  = "Up" if score > 0 else "Down"
 
     return {
@@ -320,8 +377,9 @@ def analyze(symbol: str, window_ts: int) -> dict:
         "delta_pct":     delta_pct,
         "delta_weight":  delta_weight,
         "momentum":      momentum_str,
+        "higher_trend":  trend_str,
         "atr":           atr if 'atr' in locals() else 0,
-        "reason":        f"delta={delta_pct:.4f}% ({delta_dir}, w={delta_weight}) momentum={momentum_str}",
+        "reason":        f"delta={delta_pct:.4f}% ({delta_dir}, w={delta_weight}) momentum={momentum_str} trend={trend_str}",
     }
 
 # ─── POLYMARKET API ────────────────────────────────────────────────────────────
@@ -506,9 +564,10 @@ class CryptoBot:
                 log("⏰ Market closed.")
                 for prefix in MARKETS:
                     self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
-                # Проверяем результат предыдущего раунда
-                prev_close = close_ts - 300
-                self._check_previous_round(prev_close)
+                # Проверяем результаты только что закрывшегося раунда.
+                # Раньше здесь использовался предыдущий close_ts, из-за чего
+                # сделки могли сверяться с неправильным рынком Polymarket.
+                self._check_previous_round(close_ts)
                 break
 
             pending = [
@@ -583,6 +642,9 @@ class CryptoBot:
         # Build signal data for saving
         signal_data = {
             "timestamp": ts_str(),
+            "market_slug": slug,
+            "market_close_ts": market.get("close_ts"),
+            "market_start_ts": market.get("close_ts", 0) - 300 if market.get("close_ts") else None,
             "coin": crypto,
             "side": market["winner_side"],
             "pm": market["winner_price"],
@@ -685,7 +747,7 @@ class CryptoBot:
 
     def _check_previous_round(self, close_ts: int):
         """
-        Проверяет результаты предыдущего раунда на Polymarket.
+        Проверяет результаты раунда, закрывшегося в close_ts, на Polymarket.
         Обновляет signals.json с результатами (win/loss, realized_pnl).
         """
         try:
@@ -696,32 +758,37 @@ class CryptoBot:
             if not isinstance(signals, list):
                 return
 
-            # Находим сигналы для этого раунда (close_ts)
-            round_slug_prefixes = list(MARKETS.keys())
             updated = False
 
             for i, sig in enumerate(signals):
                 if not sig.get("entered"):
                     continue
-                # Проверяем принадлежность к раунду по timestamp (±5 мин)
-                sig_ts_str = sig.get("timestamp", "")
-                if not sig_ts_str:
-                    continue
-
-                # Парсим timestamp сигнала
-                try:
-                    sig_dt = datetime.strptime(sig_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                    sig_unix = int(sig_dt.timestamp())
-                except:
-                    continue
-
-                # Если сигнал был в пределах текущего раунда (±300 сек)
-                if abs(sig_unix - close_ts) > 300:
-                    continue
 
                 # Уже есть результат?
                 if "realized_pnl" in sig:
                     continue
+
+                # Для новых сигналов используем точную привязку к market_close_ts.
+                sig_close_ts = sig.get("market_close_ts")
+                if sig_close_ts is not None:
+                    if sig_close_ts != close_ts:
+                        continue
+                else:
+                    # Fallback для старых записей без market_close_ts.
+                    sig_ts_str = sig.get("timestamp", "")
+                    if not sig_ts_str:
+                        continue
+                    try:
+                        sig_dt = datetime.strptime(sig_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        sig_unix = int(sig_dt.timestamp())
+                    except:
+                        continue
+
+                    # Старый формат: сделка обычно совершается в последние 10-50 секунд
+                    # перед close_ts, поэтому допускаем только окно непосредственно
+                    # перед закрытием этого конкретного раунда.
+                    if not (close_ts - 90 <= sig_unix <= close_ts):
+                        continue
 
                 # Получаем результат с Polymarket
                 crypto = sig.get("coin", "")
@@ -730,9 +797,11 @@ class CryptoBot:
                     continue
 
                 # Определяем slug для этого раунда
-                prefix = "btc-updown-5m" if crypto == "BTC" else "eth-updown-5m"
-                start_ts = close_ts - 300
-                slug = f"{prefix}-{start_ts}"
+                slug = sig.get("market_slug")
+                if not slug:
+                    prefix = "btc-updown-5m" if crypto == "BTC" else "eth-updown-5m"
+                    start_ts = close_ts - 300
+                    slug = f"{prefix}-{start_ts}"
 
                 # Запрашиваем результат с Gamma API
                 try:
@@ -742,6 +811,9 @@ class CryptoBot:
                     if not data:
                         continue
                     event = data[0]
+                    if event.get("active") and not event.get("closed"):
+                        # Рынок еще не финализирован, попробуем в следующем цикле.
+                        continue
                     markets = event.get("markets", [])
                     if not markets:
                         continue
