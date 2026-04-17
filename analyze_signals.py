@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -35,6 +36,15 @@ def fmt_money(value: float) -> str:
 
 def fmt_pct(value: float) -> str:
     return f"{value:.1f}%"
+
+
+def parse_ts(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def bucket_confidence(confidence: float) -> str:
@@ -92,6 +102,34 @@ def bucket_pm(pm_price: float) -> str:
     return ">=0.98"
 
 
+def bucket_expected_roi(signal: dict) -> str:
+    amount = float(signal.get("amount", 0) or 0)
+    pnl_expected = float(signal.get("pnl_expected", 0) or 0)
+    if amount <= 0:
+        return "unknown"
+
+    roi = pnl_expected / amount * 100
+    if roi < 2:
+        return "<2%"
+    if roi < 4:
+        return "2-3.9%"
+    if roi < 6:
+        return "4-5.9%"
+    if roi < 8:
+        return "6-7.9%"
+    return ">=8%"
+
+
+def bucket_hour(signal: dict) -> str:
+    dt = parse_ts(str(signal.get("timestamp", "")))
+    return dt.strftime("%H:00 UTC") if dt else "unknown"
+
+
+def bucket_weekday(signal: dict) -> str:
+    dt = parse_ts(str(signal.get("timestamp", "")))
+    return dt.strftime("%a") if dt else "unknown"
+
+
 def summarize_trades(trades: list[dict], key_fn) -> list[dict]:
     groups: dict[str, list[dict]] = defaultdict(list)
     for trade in trades:
@@ -100,12 +138,18 @@ def summarize_trades(trades: list[dict], key_fn) -> list[dict]:
     rows = []
     for key, items in groups.items():
         pnls = [float(item.get("realized_pnl", 0)) for item in items]
+        amounts = [float(item.get("amount", 0) or 0) for item in items]
+        expected_pnls = [float(item.get("pnl_expected", 0) or 0) for item in items]
         wins = sum(1 for item in items if item.get("won") is True)
         losses = sum(1 for item in items if item.get("won") is False)
         count = len(items)
         total_pnl = sum(pnls)
+        total_amount = sum(amounts)
+        total_expected = sum(expected_pnls)
         avg_pnl = total_pnl / count if count else 0.0
         win_rate = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+        roi = (total_pnl / total_amount * 100) if total_amount else 0.0
+        expected_roi = (total_expected / total_amount * 100) if total_amount else 0.0
         avg_conf = avg([float(item.get("confidence", 0)) * 100 for item in items])
         avg_delta = avg([float(item.get("delta", 0)) for item in items])
         avg_pm = avg([float(item.get("pm", 0)) for item in items])
@@ -118,7 +162,11 @@ def summarize_trades(trades: list[dict], key_fn) -> list[dict]:
             "losses": losses,
             "win_rate": win_rate,
             "total_pnl": total_pnl,
+            "total_expected": total_expected,
+            "total_amount": total_amount,
             "avg_pnl": avg_pnl,
+            "roi": roi,
+            "expected_roi": expected_roi,
             "avg_conf": avg_conf,
             "avg_delta": avg_delta,
             "avg_pm": avg_pm,
@@ -142,23 +190,30 @@ def print_table(title: str, rows: list[dict], top: int) -> None:
     for row in losers:
         print(
             f"  {row['key']:<12} trades={row['count']:<4} win_rate={fmt_pct(row['win_rate']):<7} "
-            f"total={fmt_money(row['total_pnl']):<10} avg={fmt_money(row['avg_pnl']):<9} "
-            f"conf={row['avg_conf']:.1f}% delta={row['avg_delta']:.3f}% pm={row['avg_pm']:.3f} t={row['avg_time']:.1f}s"
+            f"total={fmt_money(row['total_pnl']):<10} roi={fmt_pct(row['roi']):<7} "
+            f"exp={fmt_pct(row['expected_roi']):<7} conf={row['avg_conf']:.1f}% "
+            f"delta={row['avg_delta']:.3f}% pm={row['avg_pm']:.3f} t={row['avg_time']:.1f}s"
         )
 
     print("Best segments:")
     for row in winners:
         print(
             f"  {row['key']:<12} trades={row['count']:<4} win_rate={fmt_pct(row['win_rate']):<7} "
-            f"total={fmt_money(row['total_pnl']):<10} avg={fmt_money(row['avg_pnl']):<9} "
-            f"conf={row['avg_conf']:.1f}% delta={row['avg_delta']:.3f}% pm={row['avg_pm']:.3f} t={row['avg_time']:.1f}s"
+            f"total={fmt_money(row['total_pnl']):<10} roi={fmt_pct(row['roi']):<7} "
+            f"exp={fmt_pct(row['expected_roi']):<7} conf={row['avg_conf']:.1f}% "
+            f"delta={row['avg_delta']:.3f}% pm={row['avg_pm']:.3f} t={row['avg_time']:.1f}s"
         )
+
+
+def filter_rows(rows: list[dict], min_trades: int) -> list[dict]:
+    return [row for row in rows if row["count"] >= min_trades]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze bot signals.json history")
     parser.add_argument("--file", default=str(DEFAULT_FILE), help="Path to signals.json")
     parser.add_argument("--top", type=int, default=6, help="Number of best/worst rows to show")
+    parser.add_argument("--min-trades", type=int, default=3, help="Hide segment rows with fewer than this many settled trades")
     args = parser.parse_args()
 
     path = Path(args.file)
@@ -176,11 +231,15 @@ def main() -> int:
     wins = sum(1 for s in settled if s.get("won") is True)
     losses = sum(1 for s in settled if s.get("won") is False)
     total_pnl = sum(float(s.get("realized_pnl", 0)) for s in settled)
+    total_expected = sum(float(s.get("pnl_expected", 0) or 0) for s in settled)
+    total_amount = sum(float(s.get("amount", 0) or 0) for s in settled)
     avg_pm = avg([float(s.get("pm", 0)) for s in settled])
     avg_conf = avg([float(s.get("confidence", 0)) * 100 for s in settled])
     avg_delta = avg([float(s.get("delta", 0)) for s in settled])
     avg_time = avg([float(s.get("time_left", 0)) for s in settled])
     win_rate = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+    roi = (total_pnl / total_amount * 100) if total_amount else 0.0
+    expected_roi = (total_expected / total_amount * 100) if total_amount else 0.0
 
     print("=== OVERVIEW ===")
     print(f"signals:   {len(signals)}")
@@ -192,16 +251,21 @@ def main() -> int:
     print(f"losses:    {losses}")
     print(f"win rate:  {fmt_pct(win_rate)}")
     print(f"total pnl: {fmt_money(total_pnl)}")
+    print(f"real roi:  {fmt_pct(roi)}")
+    print(f"exp roi:   {fmt_pct(expected_roi)}")
     print(f"avg conf:  {avg_conf:.1f}%")
     print(f"avg delta: {avg_delta:.3f}%")
     print(f"avg pm:    {avg_pm:.3f}")
     print(f"avg time:  {avg_time:.1f}s")
 
-    print_table("By coin", summarize_trades(settled, lambda s: str(s.get("coin", "?"))), args.top)
-    print_table("By confidence", summarize_trades(settled, lambda s: bucket_confidence(float(s.get("confidence", 0)))), args.top)
-    print_table("By delta", summarize_trades(settled, lambda s: bucket_delta(float(s.get("delta", 0)))), args.top)
-    print_table("By time left", summarize_trades(settled, lambda s: bucket_time_left(float(s.get("time_left", 0)))), args.top)
-    print_table("By PM price", summarize_trades(settled, lambda s: bucket_pm(float(s.get("pm", 0)))), args.top)
+    print_table("By coin", filter_rows(summarize_trades(settled, lambda s: str(s.get("coin", "?"))), args.min_trades), args.top)
+    print_table("By confidence", filter_rows(summarize_trades(settled, lambda s: bucket_confidence(float(s.get("confidence", 0)))), args.min_trades), args.top)
+    print_table("By delta", filter_rows(summarize_trades(settled, lambda s: bucket_delta(float(s.get("delta", 0)))), args.min_trades), args.top)
+    print_table("By time left", filter_rows(summarize_trades(settled, lambda s: bucket_time_left(float(s.get("time_left", 0)))), args.min_trades), args.top)
+    print_table("By PM price", filter_rows(summarize_trades(settled, lambda s: bucket_pm(float(s.get("pm", 0)))), args.min_trades), args.top)
+    print_table("By expected ROI", filter_rows(summarize_trades(settled, bucket_expected_roi), args.min_trades), args.top)
+    print_table("By UTC hour", filter_rows(summarize_trades(settled, bucket_hour), args.min_trades), args.top)
+    print_table("By weekday", filter_rows(summarize_trades(settled, bucket_weekday), args.min_trades), args.top)
 
     print("\n=== SKIP REASONS ===")
     skip_reasons: dict[str, int] = defaultdict(int)
@@ -211,10 +275,12 @@ def main() -> int:
         print(f"  {count:<5} {reason}")
 
     print("\n=== QUICK TAKEAWAYS ===")
-    confidence_rows = summarize_trades(settled, lambda s: bucket_confidence(float(s.get("confidence", 0))))
-    delta_rows = summarize_trades(settled, lambda s: bucket_delta(float(s.get("delta", 0))))
-    time_rows = summarize_trades(settled, lambda s: bucket_time_left(float(s.get("time_left", 0))))
-    pm_rows = summarize_trades(settled, lambda s: bucket_pm(float(s.get("pm", 0))))
+    confidence_rows = filter_rows(summarize_trades(settled, lambda s: bucket_confidence(float(s.get("confidence", 0)))), args.min_trades)
+    delta_rows = filter_rows(summarize_trades(settled, lambda s: bucket_delta(float(s.get("delta", 0)))), args.min_trades)
+    time_rows = filter_rows(summarize_trades(settled, lambda s: bucket_time_left(float(s.get("time_left", 0)))), args.min_trades)
+    pm_rows = filter_rows(summarize_trades(settled, lambda s: bucket_pm(float(s.get("pm", 0)))), args.min_trades)
+    roi_rows = filter_rows(summarize_trades(settled, bucket_expected_roi), args.min_trades)
+    hour_rows = filter_rows(summarize_trades(settled, bucket_hour), args.min_trades)
 
     if confidence_rows:
         print(f"  weakest confidence bucket: {confidence_rows[0]['key']} {fmt_money(confidence_rows[0]['total_pnl'])}")
@@ -228,6 +294,27 @@ def main() -> int:
     if pm_rows:
         print(f"  worst PM bucket: {pm_rows[0]['key']} {fmt_money(pm_rows[0]['total_pnl'])}")
         print(f"  best PM bucket: {pm_rows[-1]['key']} {fmt_money(pm_rows[-1]['total_pnl'])}")
+    if roi_rows:
+        print(f"  weakest expected ROI bucket: {roi_rows[0]['key']} {fmt_money(roi_rows[0]['total_pnl'])}")
+        print(f"  strongest expected ROI bucket: {roi_rows[-1]['key']} {fmt_money(roi_rows[-1]['total_pnl'])}")
+    if hour_rows:
+        print(f"  worst UTC hour: {hour_rows[0]['key']} {fmt_money(hour_rows[0]['total_pnl'])}")
+        print(f"  best UTC hour: {hour_rows[-1]['key']} {fmt_money(hour_rows[-1]['total_pnl'])}")
+
+    print("\n=== NEXT ACTIONS ===")
+    if len(settled) < 30:
+        print("  Need more settled trades before tuning thresholds aggressively (<30 settled trades).")
+    elif total_pnl <= 0:
+        print("  Strategy is not yet profitable on settled trades; tighten filters before moving to paper/live.")
+    else:
+        print("  Settled trades are positive overall; compare best/worst buckets before changing thresholds.")
+
+    if expected_roi > 0 and roi < 0:
+        print("  Expected edge is positive but realized edge is negative: suspect slippage, noisy filters, or small sample size.")
+    if win_rate < 55 and settled:
+        print("  Win rate is weak for high-price PM entries; review PM price and confidence thresholds first.")
+    if pending:
+        print(f"  There are {len(pending)} pending entries; rerun later after those markets settle.")
 
     return 0
 
