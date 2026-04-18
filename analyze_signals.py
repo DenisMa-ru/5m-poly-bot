@@ -303,6 +303,12 @@ def run_grid_search(signals: list[dict], args) -> int:
         tested += 1
         selected = []
         for signal in resolved_signals:
+            pm = float(signal.get("pm", 0) or 0)
+            if pm < args.pm_floor:
+                continue
+            if pm > args.pm_ceiling:
+                continue
+
             if not eligible_by_filters(
                 signal,
                 min_confidence=conf,
@@ -320,17 +326,18 @@ def run_grid_search(signals: list[dict], args) -> int:
                 continue
 
             amount = float(signal.get("amount", args.default_amount) or args.default_amount)
-            selected.append((pnl, amount, bool(signal.get("won"))))
+            selected.append((pnl, amount, bool(signal.get("won")), pm))
 
         trades = len(selected)
         if trades < args.min_sim_trades:
             continue
 
-        total_pnl = sum(p for p, _, _ in selected)
-        total_amount = sum(a for _, a, _ in selected)
-        wins = sum(1 for _, _, won in selected if won)
+        total_pnl = sum(p for p, _, _, _ in selected)
+        total_amount = sum(a for _, a, _, _ in selected)
+        wins = sum(1 for _, _, won, _ in selected if won)
         win_rate = (wins / trades) * 100 if trades else 0.0
         roi = (total_pnl / total_amount) * 100 if total_amount else 0.0
+        avg_pm = sum(pm for _, _, _, pm in selected) / trades if trades else 0.0
 
         rows.append(
             {
@@ -339,6 +346,7 @@ def run_grid_search(signals: list[dict], args) -> int:
                 "win_rate": win_rate,
                 "total_pnl": total_pnl,
                 "roi": roi,
+                "avg_pm": avg_pm,
                 "conf": conf,
                 "delta_skip": delta_skip,
                 "price_min_btc": pmin_btc,
@@ -349,12 +357,22 @@ def run_grid_search(signals: list[dict], args) -> int:
             }
         )
 
-    rows.sort(key=lambda r: (r["roi"], r["total_pnl"], r["win_rate"], r["trades"]), reverse=True)
+    rows.sort(
+        key=lambda r: (
+            r["roi"],
+            r["total_pnl"],
+            r["win_rate"],
+            -abs(r["avg_pm"] - 0.5),
+            r["trades"],
+        ),
+        reverse=True,
+    )
 
     print("=== GRID SEARCH (counterfactual on resolved signals) ===")
     print(f"resolved signals: {len(resolved_signals)}")
     print(f"configs tested:   {tested}")
     print(f"configs kept:     {len(rows)} (min trades = {args.min_sim_trades})")
+    print(f"pm floor/ceiling: {args.pm_floor:.3f} .. {args.pm_ceiling:.3f}")
     if not rows:
         print("No configs satisfied min trade count. Reduce --min-sim-trades or widen grids.")
         return 0
@@ -363,7 +381,7 @@ def run_grid_search(signals: list[dict], args) -> int:
     for i, row in enumerate(rows[: args.top_configs], start=1):
         print(
             f"{i:>2}. trades={row['trades']:<4} win_rate={fmt_pct(row['win_rate']):<7} "
-            f"roi={fmt_pct(row['roi']):<7} total={fmt_money(row['total_pnl']):<10} | "
+            f"roi={fmt_pct(row['roi']):<7} total={fmt_money(row['total_pnl']):<10} avg_pm={row['avg_pm']:.3f} | "
             f"conf>={row['conf']:.2f} delta>={row['delta_skip']:.4f} "
             f"btc>={row['price_min_btc']:.2f} eth>={row['price_min_eth']:.2f} max<={row['price_max']:.2f} "
             f"time={row['entry_min']}-{row['entry_max']}s"
@@ -381,6 +399,8 @@ def main() -> int:
     parser.add_argument("--top-configs", type=int, default=10, help="Number of best configs to print in optimize mode")
     parser.add_argument("--min-sim-trades", type=int, default=30, help="Minimum simulated trade count per config in optimize mode")
     parser.add_argument("--default-amount", type=float, default=10.0, help="Fallback amount for signals without amount field")
+    parser.add_argument("--pm-floor", type=float, default=0.10, help="Ignore signals with PM price below this floor in optimize mode")
+    parser.add_argument("--pm-ceiling", type=float, default=0.99, help="Ignore signals with PM price above this ceiling in optimize mode")
     parser.add_argument("--conf-grid", default="0.45,0.50,0.55,0.60", help="Comma-separated confidence thresholds")
     parser.add_argument("--delta-grid", default="0.0008,0.0010,0.0012,0.0015", help="Comma-separated delta_skip thresholds")
     parser.add_argument("--price-min-btc-grid", default="0.82,0.86,0.90,0.94", help="Comma-separated BTC min prices")
