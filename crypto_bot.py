@@ -39,6 +39,53 @@ SIGNALS_FILE = BOT_DIR / "signals.json"
 SETTINGS_FILE = BOT_DIR / "settings.json"
 PID_FILE = BOT_DIR / "bot.pid"
 
+
+def atomic_write_text(path: Path, content: str):
+    """Atomically write text content to a file."""
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def load_signals_file() -> list:
+    """Load signals history safely, falling back to an empty list."""
+    if not SIGNALS_FILE.exists():
+        return []
+    try:
+        data = json.loads(SIGNALS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_signals_file(signals: list):
+    """Persist signals history atomically."""
+    atomic_write_text(SIGNALS_FILE, json.dumps(signals[-10000:], indent=2))
+
+
+def ensure_single_instance():
+    """Prevent multiple bot processes from running at the same time."""
+    if not PID_FILE.exists():
+        atomic_write_text(PID_FILE, str(os.getpid()))
+        return
+
+    try:
+        existing_pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        atomic_write_text(PID_FILE, str(os.getpid()))
+        return
+
+    if existing_pid == os.getpid():
+        return
+
+    try:
+        os.kill(existing_pid, 0)
+    except OSError:
+        atomic_write_text(PID_FILE, str(os.getpid()))
+        return
+
+    raise RuntimeError(f"Another bot process is already running with PID {existing_pid}")
+
 # ─── SETTINGS ──────────────────────────────────────────────────────────────────
 def load_settings():
     """Load settings from settings.json, fallback to defaults."""
@@ -66,14 +113,9 @@ def get_setting(key, default):
 def save_signal(signal_data):
     """Append a signal to signals.json for dashboard history."""
     try:
-        signals = []
-        if SIGNALS_FILE.exists():
-            signals = json.loads(SIGNALS_FILE.read_text())
-            if not isinstance(signals, list):
-                signals = []
+        signals = load_signals_file()
         signals.append(signal_data)
-        signals = signals[-10000:]  # Keep last 10k
-        SIGNALS_FILE.write_text(json.dumps(signals, indent=2))
+        save_signals_file(signals)
     except Exception as e:
         log(f"[SIGNAL SAVE ERROR] {e}")
 
@@ -504,11 +546,11 @@ class CryptoBot:
         self.bank_start = float(settings.get("bank", 100.0))
         self.bank_balance = self.bank_start
 
-        # Write PID file
+        # Prevent duplicate bot processes before continuing.
         try:
-            PID_FILE.write_text(str(os.getpid()))
-        except Exception:
-            pass
+            ensure_single_instance()
+        except Exception as e:
+            raise RuntimeError(f"Failed to acquire single-instance lock: {e}") from e
 
         if not paper and not dry_run and (not self.private_key or not self.proxy_wallet):
             raise ValueError("POLY_PRIVATE_KEY and POLY_PROXY_WALLET required in .env")
@@ -775,7 +817,7 @@ class CryptoBot:
             # Ищем сигналы этого раунда
             if not SIGNALS_FILE.exists():
                 return
-            signals = json.loads(SIGNALS_FILE.read_text())
+            signals = load_signals_file()
             if not isinstance(signals, list):
                 return
 
@@ -896,8 +938,7 @@ class CryptoBot:
                 updated = True
 
             if updated:
-                signals = signals[-10000:]
-                SIGNALS_FILE.write_text(json.dumps(signals, indent=2))
+                save_signals_file(signals)
 
         except Exception as e:
             log(f"   ⚠️  _check_previous_round error: {e}")
