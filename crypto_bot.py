@@ -766,7 +766,7 @@ class CryptoBot:
 
     def _check_previous_round(self, close_ts: int):
         """
-        Проверяет результаты раунда, закрывшегося в close_ts, на Polymarket.
+        Проверяет результаты сигналов из уже закрывшихся раундов на Polymarket.
         Обновляет signals.json с результатами:
           - для entered=True: фактический результат (WIN/LOSS, realized_pnl)
           - для entered=False: контрфактический pnl_if_entered для оффлайн-анализа
@@ -795,7 +795,9 @@ class CryptoBot:
                 # Для новых сигналов используем точную привязку к market_close_ts.
                 sig_close_ts = sig.get("market_close_ts")
                 if sig_close_ts is not None:
-                    if sig_close_ts != close_ts:
+                    # Проверяем все уже закрывшиеся и еще не резолвленные сигналы,
+                    # потому что Gamma может финализировать рынок не сразу.
+                    if sig_close_ts > close_ts:
                         continue
                 else:
                     # Fallback для старых записей без market_close_ts.
@@ -808,10 +810,9 @@ class CryptoBot:
                     except Exception:
                         continue
 
-                    # Старый формат: сделка обычно совершается в последние 10-50 секунд
-                    # перед close_ts, поэтому допускаем только окно непосредственно
-                    # перед закрытием этого конкретного раунда.
-                    if not (close_ts - 90 <= sig_unix <= close_ts):
+                    # Старый формат: берем только сигналы, которые точно относятся
+                    # к уже закрывшимся раундам на момент текущей проверки.
+                    if sig_unix > close_ts:
                         continue
 
                 # Получаем результат с Polymarket
