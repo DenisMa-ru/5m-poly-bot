@@ -4,7 +4,7 @@
 Запуск: streamlit run dashboard.py --server.port 3001 --server.address 0.0.0.0 --server.headless true
 """
 import streamlit as st
-import re, os, json, subprocess, signal, time
+import re, os, json
 from datetime import datetime
 from pathlib import Path
 
@@ -37,10 +37,25 @@ st.markdown("""
     .status-stopped { color: #ff6b6b; font-weight: bold; }
     .pm-ok { color: #51cf66; font-weight: bold; }
     .pm-bad { color: #ff6b6b; font-weight: bold; }
+    .safe-box {
+        padding: 0.85rem 1rem;
+        border: 1px solid #30363d;
+        border-radius: 10px;
+        background: #0d1117;
+        margin-bottom: 0.75rem;
+    }
+    .safe-box strong { color: #f0f6fc; }
 </style>
 """, unsafe_allow_html=True)
 
 # ===== BOT CONTROL HELPERS =====
+def atomic_write_text(path: Path, content: str):
+    """Atomically write text to a file to reduce corruption risk."""
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
 def write_control(cmd, mode=None, amount=None, settings=None):
     """Write command to control file for the bot to read."""
     data = {"cmd": cmd, "timestamp": datetime.now().isoformat()}
@@ -48,7 +63,7 @@ def write_control(cmd, mode=None, amount=None, settings=None):
     if amount: data["amount"] = amount
     if settings: data["settings"] = settings
     try:
-        CONTROL_FILE.write_text(json.dumps(data))
+        atomic_write_text(CONTROL_FILE, json.dumps(data))
     except: pass
 
 def get_control():
@@ -67,45 +82,6 @@ def is_bot_running():
         return True
     except:
         return False
-
-def start_bot(mode="dry-run", amount=10):
-    """Start the bot as a background process."""
-    if is_bot_running():
-        return False
-    try:
-        log_file = open(str(BOT_DIR / "bot.log"), "a")
-        proc = subprocess.Popen(
-            ["python3", str(BOT_SCRIPT), f"--{mode}", "--amount", str(amount)],
-            cwd=str(BOT_DIR),
-            stdout=log_file,
-            stderr=log_file,
-            start_new_session=True,
-        )
-        PID_FILE.write_text(str(proc.pid))
-        return True
-    except:
-        return False
-
-def stop_bot():
-    """Stop the bot process."""
-    if not PID_FILE.exists():
-        return True
-    try:
-        pid = int(PID_FILE.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        time.sleep(1)
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except: pass
-        PID_FILE.unlink(missing_ok=True)
-        return True
-    except:
-        return False
-
-def restart_bot(mode="dry-run", amount=10):
-    stop_bot()
-    time.sleep(1)
-    return start_bot(mode, amount)
 
 # ===== DATA HELPERS — единый источник: signals.json =====
 def load_saved_signals():
@@ -273,127 +249,24 @@ def get_default_settings():
         "bank": 100,
         "mode": "dry-run",
         "amount": 10,
-        "min_confidence": 0.3,
+        "min_confidence": 0.0,
         "entry_min": 10,
-        "entry_max": 50,
-        "price_min_btc": 0.94,
-        "price_min_eth": 0.92,
-        "price_max": 0.99,
-        "delta_skip": 0.0005,
+        "entry_max": 35,
+        "price_min_btc": 0.55,
+        "price_min_eth": 0.70,
+        "price_max": 0.70,
+        "delta_skip": 0.0,
         "atr_multiplier": 1.5,
     }
 
-# Пресеты настроек для разных стратегий
-PRESETS = {
-    "default": {
-        "name": "📋 По умолчанию",
-        "desc": "Стандартные настройки — баланс риска и прибыли",
-        "settings": {
-            "bank": 100,
-            "mode": "dry-run",
-            "amount": 10,
-            "min_confidence": 0.3,
-            "entry_min": 10,
-            "entry_max": 50,
-            "price_min_btc": 0.94,
-            "price_min_eth": 0.92,
-            "price_max": 0.99,
-            "delta_skip": 0.0005,
-            "atr_multiplier": 1.5,
-        }
-    },
-    "conservative": {
-        "name": "🛡️ Консервативный",
-        "desc": "Меньше сделок, выше качество. Минимальный риск.",
-        "settings": {
-            "bank": 100,
-            "mode": "dry-run",
-            "amount": 5,
-            "min_confidence": 0.55,
-            "entry_min": 15,
-            "entry_max": 45,
-            "price_min_btc": 0.96,
-            "price_min_eth": 0.94,
-            "price_max": 0.99,
-            "delta_skip": 0.001,
-            "atr_multiplier": 2.0,
-        }
-    },
-    "balanced": {
-        "name": "⚖️ Сбалансированный",
-        "desc": "Оптимальный баланс частоты и качества сделок.",
-        "settings": {
-            "bank": 100,
-            "mode": "dry-run",
-            "amount": 10,
-            "min_confidence": 0.4,
-            "entry_min": 10,
-            "entry_max": 50,
-            "price_min_btc": 0.95,
-            "price_min_eth": 0.93,
-            "price_max": 0.99,
-            "delta_skip": 0.0007,
-            "atr_multiplier": 1.8,
-        }
-    },
-    "aggressive": {
-        "name": "🔥 Агрессивный",
-        "desc": "Больше сделок, выше риск. Для тестирования стратегии.",
-        "settings": {
-            "bank": 100,
-            "mode": "dry-run",
-            "amount": 20,
-            "min_confidence": 0.2,
-            "entry_min": 5,
-            "entry_max": 55,
-            "price_min_btc": 0.92,
-            "price_min_eth": 0.90,
-            "price_max": 0.99,
-            "delta_skip": 0.0003,
-            "atr_multiplier": 1.2,
-        }
-    },
-    "high_amount": {
-        "name": "💰 Крупные ставки",
-        "desc": "Больший размер ставки при стандартных параметрах.",
-        "settings": {
-            "bank": 500,
-            "mode": "dry-run",
-            "amount": 50,
-            "min_confidence": 0.4,
-            "entry_min": 10,
-            "entry_max": 50,
-            "price_min_btc": 0.94,
-            "price_min_eth": 0.92,
-            "price_max": 0.99,
-            "delta_skip": 0.0005,
-            "atr_multiplier": 1.5,
-        }
-    },
-}
-
 def save_settings(settings):
     try:
-        (BOT_DIR / "settings.json").write_text(json.dumps(settings, indent=2))
-    except: pass
-
-def load_custom_presets():
-    """Загружает пользовательские пресеты из файла."""
-    try:
-        data = json.loads((BOT_DIR / "presets.json").read_text())
-        return data if isinstance(data, dict) else {}
-    except:
-        return {}
-
-def save_custom_presets(presets):
-    """Сохраняет пользовательские пресеты."""
-    try:
-        (BOT_DIR / "presets.json").write_text(json.dumps(presets, indent=2))
+        atomic_write_text(BOT_DIR / "settings.json", json.dumps(settings, indent=2))
     except: pass
 
 # ===== LABELS для skip reasons =====
-RL = {'btc_low': 'BTC<0.94', 'eth_low': 'ETH<0.92', 'high': '>0.99',
-      'delta': 'δ<0.05%', 'conf': 'conf<30%', 'atr': 'ATR↑', 'other': '?'}
+RL = {'btc_low': 'BTC below min', 'eth_low': 'ETH below min', 'high': 'Above max',
+      'delta': 'Delta too low', 'conf': 'Confidence too low', 'atr': 'ATR filter', 'other': '?'}
 
 # ===== INIT =====
 settings = load_settings()
@@ -409,46 +282,32 @@ tab_dashboard, tab_history, tab_stats, tab_settings = st.tabs(["📊 Dashboard",
 # ==========================================
 with tab_dashboard:
     # ---- CONTROL BAR ----
-    st.markdown("### 🎮 Bot Control")
-    ctrl_cols = st.columns([1, 1, 1, 1, 2, 1])
+    st.markdown("### 🎮 Bot Status")
+    ctrl_cols = st.columns([1, 4, 1])
 
     with ctrl_cols[0]:
-        if not bot_running:
-            if st.button("▶️ Start", use_container_width=True, type="primary"):
-                start_bot(settings.get("mode", "dry-run"), settings.get("amount", 10))
-                st.rerun()
-        else:
-            if st.button("▶️ Running", use_container_width=True, disabled=True):
-                pass
+        status_label = "🟢 Running" if bot_running else "🔴 Stopped"
+        st.button(status_label, use_container_width=True, disabled=True)
 
     with ctrl_cols[1]:
-        if bot_running:
-            if st.button("⏹️ Stop", use_container_width=True):
-                stop_bot()
-                st.rerun()
-        else:
-            if st.button("⏹️ Stopped", use_container_width=True, disabled=True):
-                pass
+        st.markdown(
+            "<div class='safe-box'><strong>Managed by systemd.</strong> "
+            "The dashboard is read-only for runtime control to avoid duplicate bot processes and broken signal history.</div>",
+            unsafe_allow_html=True,
+        )
 
     with ctrl_cols[2]:
-        if st.button("🔄 Restart", use_container_width=True):
-            restart_bot(settings.get("mode", "dry-run"), settings.get("amount", 10))
-            st.rerun()
-
-    with ctrl_cols[3]:
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
 
-    status_text = f"{'🟢' if bot_running else '🔴'}"
     bank = D['bank_current']
     bank_change = bank - D['bank_start']
-    ctrl_cols[4].markdown(
-        f"{status_text} {settings.get('mode', 'dry-run')} | "
+    st.caption(
+        f"{'🟢' if bot_running else '🔴'} {settings.get('mode', 'dry-run')} | "
         f"${settings.get('amount', 10):.0f}/trade | "
         f"Bank ${bank:.0f} ({bank_change:+.2f})"
     )
-
-    ctrl_cols[5].caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
+    st.caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
 
     st.markdown("---")
 
@@ -604,9 +463,7 @@ with tab_history:
         else:
             st.info("No signals match filter")
 
-        if st.button("🗑️ Clear History"):
-            SIGNALS_FILE.write_text("[]")
-            st.rerun()
+        st.caption("History reset is disabled in the dashboard to protect live runtime data.")
     else:
         st.info("No saved signals yet. Signals are saved when the bot processes them.")
 
@@ -705,9 +562,7 @@ with tab_stats:
             st.metric("Realized PnL", f"${eth_realized:+.2f}")
             st.caption(f"Wins: {eth_wins} | Losses: {eth_losses}")
 
-        if st.button("🗑️ Reset Statistics"):
-            SIGNALS_FILE.write_text("[]")
-            st.rerun()
+        st.caption("Statistics reset is disabled in the dashboard to protect live runtime data.")
     else:
         st.info("No statistics yet. Statistics are built from saved signals.")
 
@@ -716,25 +571,11 @@ with tab_stats:
 # ==========================================
 with tab_settings:
     st.markdown("### ⚙️ Settings")
-
-    # ===== PRESETS BAR (компактно) =====
-    custom_presets = load_custom_presets()
-    all_presets = {**PRESETS, **custom_presets}
-
-    preset_cols = st.columns(5)
-    selected_preset = None
-    for i, (key, preset) in enumerate(all_presets.items()):
-        with preset_cols[i % 5]:
-            label = preset["name"]
-            is_current = all(v == settings.get(k) for k, v in preset["settings"].items())
-            btn_type = "primary" if is_current else "secondary"
-            if st.button(label, use_container_width=True, type=btn_type, key=f"preset_{key}"):
-                selected_preset = preset["settings"].copy()
-
-    if selected_preset:
-        settings.update(selected_preset)
-        st.success(f"✅ Применён пресет: {all_presets[[k for k, v in all_presets.items() if v['settings'] == selected_preset][0]]['name']}")
-        st.rerun()
+    st.markdown(
+        "<div class='safe-box'><strong>Safe editing mode.</strong> "
+        "Only the active strategy parameters are shown here. Current tested values are also the dashboard defaults.</div>",
+        unsafe_allow_html=True,
+    )
 
     # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
@@ -745,64 +586,31 @@ with tab_settings:
         new_settings["mode"] = st.selectbox("Режим", ["dry-run", "paper", "live"], index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")))
         new_settings["amount"] = st.number_input("Ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
         new_settings["entry_min"] = st.number_input("Вход мин (сек)", min_value=1, max_value=120, value=int(settings.get("entry_min", 10)), step=1)
-        new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 50)), step=5)
+        new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 35)), step=5)
 
     with s2:
-        new_settings["price_min_btc"] = st.number_input("BTC мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_btc", 0.94)), step=0.01, format="%.2f")
-        new_settings["price_min_eth"] = st.number_input("ETH мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_eth", 0.92)), step=0.01, format="%.2f")
-        new_settings["price_max"] = st.number_input("Макс цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_max", 0.99)), step=0.01, format="%.2f")
-        new_settings["min_confidence"] = st.slider("Мин уверенность", min_value=0.0, max_value=1.0, value=float(settings.get("min_confidence", 0.3)), step=0.05)
-        new_settings["delta_skip"] = st.number_input("Мин дельта", min_value=0.0, max_value=0.01, value=float(settings.get("delta_skip", 0.0005)), step=0.0001, format="%.4f")
+        new_settings["price_min_btc"] = st.number_input("BTC мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_btc", 0.55)), step=0.01, format="%.2f")
+        new_settings["price_min_eth"] = st.number_input("ETH мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_eth", 0.70)), step=0.01, format="%.2f")
+        new_settings["price_max"] = st.number_input("Макс цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_max", 0.70)), step=0.01, format="%.2f")
+        new_settings["min_confidence"] = st.slider("Мин уверенность", min_value=0.0, max_value=1.0, value=float(settings.get("min_confidence", 0.0)), step=0.05)
+        new_settings["delta_skip"] = st.number_input("Мин дельта", min_value=0.0, max_value=0.01, value=float(settings.get("delta_skip", 0.0)), step=0.0001, format="%.4f")
         new_settings["atr_multiplier"] = st.number_input("ATR множитель", min_value=0.5, max_value=5.0, value=float(settings.get("atr_multiplier", 1.5)), step=0.1)
 
     # ===== BUTTONS =====
     st.markdown("---")
-    btn_cols = st.columns([1, 1, 1, 1])
+    btn_cols = st.columns([1, 1])
 
     with btn_cols[0]:
         if st.button("💾 Сохранить", type="primary", use_container_width=True):
             save_settings(new_settings)
-            st.success("✅ Настройки сохранены!")
+            st.success("✅ Настройки сохранены. Применение новых значений выполняйте через systemd restart.")
             st.rerun()
 
     with btn_cols[1]:
-        if st.button("💾 Сохранить и рестарт", use_container_width=True):
-            save_settings(new_settings)
-            restart_bot(new_settings["mode"], new_settings["amount"])
-            st.success("✅ Сохранено и перезапущено!")
-            st.rerun()
-
-    with btn_cols[2]:
         if st.button("🔄 Сбросить к дефолтным", use_container_width=True):
             defaults = get_default_settings()
             save_settings(defaults)
-            st.success("✅ Сброшено к настройкам по умолчанию!")
+            st.success("✅ Восстановлены безопасные дефолтные настройки текущей стратегии.")
             st.rerun()
 
-    with btn_cols[3]:
-        if st.button("🏦 Сбросить банк", use_container_width=True):
-            s = load_settings()
-            s["bank"] = float(settings.get("bank", 100))
-            save_settings(s)
-            st.success(f"✅ Банк сброшен до ${s['bank']:.0f}!")
-            st.rerun()
-
-    # Save custom preset
-    st.markdown("---")
-    preset_cols = st.columns([2, 1])
-    with preset_cols[0]:
-        preset_name = st.text_input("Сохранить текущие настройки как пресет:", placeholder="Название пресета...", key="new_preset_name")
-    with preset_cols[1]:
-        if preset_name and st.button("💾 Сохранить пресет", use_container_width=True, type="secondary"):
-            custom = load_custom_presets()
-            preset_key = preset_name.lower().replace(" ", "_")
-            custom[preset_key] = {
-                "name": preset_name,
-                "desc": "Пользовательский пресет",
-                "settings": new_settings
-            }
-            save_custom_presets(custom)
-            st.success(f"✅ Пресет '{preset_name}' сохранён!")
-            st.rerun()
-
-    st.caption("Настройки сохраняются в `settings.json`. Бот читает их при запуске. Используйте 'Сохранить и рестарт' для немедленного применения.")
+    st.caption("Настройки сохраняются в `settings.json` атомарно. Для применения используйте перезапуск сервиса через systemd, а не из dashboard.")
