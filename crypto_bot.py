@@ -767,10 +767,12 @@ class CryptoBot:
     def _check_previous_round(self, close_ts: int):
         """
         Проверяет результаты раунда, закрывшегося в close_ts, на Polymarket.
-        Обновляет signals.json с результатами (win/loss, realized_pnl).
+        Обновляет signals.json с результатами:
+          - для entered=True: фактический результат (WIN/LOSS, realized_pnl)
+          - для entered=False: контрфактический pnl_if_entered для оффлайн-анализа
         """
         try:
-            # Ищем сигналы которые вошли в этом раунде
+            # Ищем сигналы этого раунда
             if not SIGNALS_FILE.exists():
                 return
             signals = json.loads(SIGNALS_FILE.read_text())
@@ -780,11 +782,14 @@ class CryptoBot:
             updated = False
 
             for i, sig in enumerate(signals):
-                if not sig.get("entered"):
-                    continue
+                entered = bool(sig.get("entered"))
 
                 # Уже есть результат?
-                if "realized_pnl" in sig:
+                # - для entered сигналов достаточно realized_pnl
+                # - для skipped сигналов достаточно установленного winner/pnl_if_entered
+                if entered and "realized_pnl" in sig:
+                    continue
+                if (not entered) and ("winner" in sig and "pnl_if_entered" in sig):
                     continue
 
                 # Для новых сигналов используем точную привязку к market_close_ts.
@@ -847,39 +852,47 @@ class CryptoBot:
                     winner_idx = 0 if prices[0] >= prices[1] else 1
                     winner = outcomes[winner_idx]
                     loser = outcomes[1 - winner_idx]
-
-                    # Определяем win/loss
-                    won = (side == winner)
-                    entry_price = sig.get("pm", 0)
-                    trade_amount = sig.get("amount", self.amount)
-
-                    if won:
-                        # Выигрыш: payout = amount / entry_price
-                        payout = trade_amount / entry_price if entry_price > 0 else trade_amount
-                        realized_pnl = payout - trade_amount
-                        result = "WIN"
-                    else:
-                        # Проигрыш: теряем ставку
-                        realized_pnl = -trade_amount
-                        result = "LOSS"
-
-                    # Обновляем сигнал
-                    signals[i]["result"] = result
-                    signals[i]["won"] = won
-                    signals[i]["winner"] = winner
-                    signals[i]["realized_pnl"] = round(realized_pnl, 2)
-                    signals[i]["payout"] = round(payout if won else 0, 2)
-
-                    # Обновляем банк
-                    self.bank_balance += realized_pnl
-
-                    log(f"   🏁 [{crypto}] {result} | side={side} winner={winner} | "
-                        f"pnl=${realized_pnl:+.2f} | bank=${self.bank_balance:.2f}")
-
-                    updated = True
                 except Exception as e:
                     log(f"   ⚠️  Result check failed for {slug}: {e}")
                     continue
+
+                # Определяем win/loss
+                won = (side == winner)
+                entry_price = sig.get("pm", 0)
+                trade_amount = sig.get("amount", self.amount)
+
+                signals[i]["won"] = won
+                signals[i]["winner"] = winner
+                signals[i]["loser"] = loser
+                signals[i]["resolved_at"] = ts_str()
+
+                if won:
+                    # Выигрыш: payout = amount / entry_price
+                    payout = trade_amount / entry_price if entry_price > 0 else trade_amount
+                    pnl_if_entered = payout - trade_amount
+                    result = "WIN"
+                else:
+                    # Проигрыш: теряем ставку
+                    payout = 0
+                    pnl_if_entered = -trade_amount
+                    result = "LOSS"
+
+                # Поле для оффлайн-симуляций (даже если сигнал был skipped)
+                signals[i]["pnl_if_entered"] = round(pnl_if_entered, 2)
+
+                if entered:
+                    signals[i]["result"] = result
+                    signals[i]["realized_pnl"] = round(pnl_if_entered, 2)
+                    signals[i]["payout"] = round(payout, 2)
+
+                    # Обновляем банк только для реально entered сигналов
+                    self.bank_balance += pnl_if_entered
+                    log(f"   🏁 [{crypto}] {result} | side={side} winner={winner} | "
+                        f"pnl=${pnl_if_entered:+.2f} | bank=${self.bank_balance:.2f}")
+                else:
+                    signals[i]["counterfactual_result"] = result
+
+                updated = True
 
             if updated:
                 signals = signals[-10000:]
