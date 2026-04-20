@@ -556,6 +556,7 @@ class CryptoBot:
         settings = load_settings()
         self.bank_start = float(settings.get("bank", 100.0))
         self.bank_balance = self.bank_start
+        self.daily_loss_limit = float(settings.get("daily_loss_limit", 15.0))
 
         # Prevent duplicate bot processes before continuing.
         try:
@@ -573,8 +574,14 @@ class CryptoBot:
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | ATR: {ATR_MULTIPLIER}x")
+        log(f"Daily loss limit: ${self.daily_loss_limit:.2f}")
         log(f"Settings from: {'settings.json' if _bot_settings else 'defaults'}")
         log("=" * 60)
+
+    def _daily_loss_limit_hit(self) -> bool:
+        """Stop new entries once the configured daily loss limit is reached."""
+        realized_pnl = self.bank_balance - self.bank_start
+        return realized_pnl <= -abs(self.daily_loss_limit)
 
     def run(self):
         while self.running:
@@ -733,6 +740,12 @@ class CryptoBot:
             "entered": False,
             "reason": "",
         }
+
+        if self._daily_loss_limit_hit():
+            log(f"   [{crypto}] SKIP — daily loss limit reached (${self.daily_loss_limit:.2f})")
+            signal_data["reason"] = f"daily loss limit reached ({self.daily_loss_limit:.2f})"
+            save_signal(signal_data)
+            return
 
         # Filter 1: minimum price per crypto
         if market["winner_price"] < price_min:

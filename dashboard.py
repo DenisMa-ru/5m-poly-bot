@@ -250,6 +250,7 @@ def get_default_settings():
         "mode": "dry-run",
         "amount": 10,
         "enabled_coins": ["BTC"],
+        "daily_loss_limit": 15.0,
         "min_confidence": 0.0,
         "entry_min": 10,
         "entry_max": 35,
@@ -588,6 +589,7 @@ with tab_settings:
         new_settings["mode"] = st.selectbox("Режим", ["dry-run", "paper", "live"], index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")))
         new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
         new_settings["amount"] = st.number_input("Ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
+        new_settings["daily_loss_limit"] = st.number_input("Дневной стоп-лосс (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("daily_loss_limit", 15.0)), step=1.0)
         new_settings["entry_min"] = st.number_input("Вход мин (сек)", min_value=1, max_value=120, value=int(settings.get("entry_min", 10)), step=1)
         new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 35)), step=5)
 
