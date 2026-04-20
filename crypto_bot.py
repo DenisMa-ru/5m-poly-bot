@@ -557,6 +557,13 @@ class CryptoBot:
         self.bank_start = float(settings.get("bank", 100.0))
         self.bank_balance = self.bank_start
         self.daily_loss_limit = float(settings.get("daily_loss_limit", 15.0))
+        self.dynamic_sizing = bool(settings.get("dynamic_sizing", True))
+        self.dynamic_min_amount = float(settings.get("dynamic_min_amount", 5.0))
+        self.dynamic_max_amount = float(settings.get("dynamic_max_amount", 15.0))
+        self.dynamic_base_risk_pct = float(settings.get("dynamic_base_risk_pct", 0.05))
+        self.dynamic_step_bank_gain_pct = float(settings.get("dynamic_step_bank_gain_pct", 0.70))
+        self.dynamic_step_risk_pct = float(settings.get("dynamic_step_risk_pct", 0.01))
+        self.dynamic_max_risk_pct = float(settings.get("dynamic_max_risk_pct", 0.08))
 
         # Prevent duplicate bot processes before continuing.
         try:
@@ -575,6 +582,13 @@ class CryptoBot:
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | ATR: {ATR_MULTIPLIER}x")
         log(f"Daily loss limit: ${self.daily_loss_limit:.2f}")
+        if self.dynamic_sizing:
+            log(
+                "Dynamic sizing: "
+                f"{self.dynamic_base_risk_pct*100:.0f}% +{self.dynamic_step_risk_pct*100:.0f}% per "
+                f"+{self.dynamic_step_bank_gain_pct*100:.0f}% bank growth, "
+                f"max {self.dynamic_max_risk_pct*100:.0f}% | cap ${self.dynamic_max_amount:.2f}"
+            )
         log(f"Settings from: {'settings.json' if _bot_settings else 'defaults'}")
         log("=" * 60)
 
@@ -582,6 +596,26 @@ class CryptoBot:
         """Stop new entries once the configured daily loss limit is reached."""
         realized_pnl = self.bank_balance - self.bank_start
         return realized_pnl <= -abs(self.daily_loss_limit)
+
+    def _get_trade_amount(self) -> float:
+        """Return the current trade amount based on bank growth and sizing rules."""
+        if not self.dynamic_sizing:
+            return self.amount
+
+        growth = 0.0
+        if self.bank_start > 0:
+            growth = max((self.bank_balance - self.bank_start) / self.bank_start, 0.0)
+
+        steps = 0
+        if self.dynamic_step_bank_gain_pct > 0:
+            steps = int(growth / self.dynamic_step_bank_gain_pct)
+
+        risk_pct = min(
+            self.dynamic_base_risk_pct + (steps * self.dynamic_step_risk_pct),
+            self.dynamic_max_risk_pct,
+        )
+        sized_amount = self.bank_balance * risk_pct
+        return max(self.dynamic_min_amount, min(sized_amount, self.dynamic_max_amount))
 
     def run(self):
         while self.running:
@@ -723,6 +757,7 @@ class CryptoBot:
         slug      = market["slug"]
         crypto    = market["crypto"]
         price_min = PRICE_MIN.get(crypto, 0.92)
+        trade_amount = self._get_trade_amount()
 
         # Build signal data for saving
         signal_data = {
@@ -791,21 +826,22 @@ class CryptoBot:
         expected_pnl = (self.amount / market["winner_price"]) - self.amount
         signal_data["entered"] = True
         signal_data["reason"] = "all filters passed"
-        signal_data["amount"] = self.amount
+        signal_data["amount"] = trade_amount
+        expected_pnl = (trade_amount / market["winner_price"]) - trade_amount
         signal_data["pnl_expected"] = expected_pnl
         save_signal(signal_data)
 
-        self._enter(market, ta, seconds_left)
+        self._enter(market, ta, seconds_left, trade_amount)
         entered_slugs.add(slug)
         self.traded_slugs.add(slug)
 
-    def _enter(self, market: dict, ta: dict, seconds_left: float):
+    def _enter(self, market: dict, ta: dict, seconds_left: float, trade_amount: float):
         price        = market["winner_price"]
-        expected_pnl = (self.amount / price) - self.amount
-        expected_pct = expected_pnl / self.amount * 100
+        expected_pnl = (trade_amount / price) - trade_amount
+        expected_pct = expected_pnl / trade_amount * 100
         crypto       = market["crypto"]
 
-        log(f"🟢 ENTERING [{crypto} {market['winner_side']}] invested=${self.amount:.2f} expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
+        log(f"🟢 ENTERING [{crypto} {market['winner_side']}] invested=${trade_amount:.2f} expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
         log(f"   {market['title'][:60]} | price={price:.3f} | time_left={seconds_left:.1f}s")
         log(f"   Price:{ta.get('current_price',0):.2f} | "
             f"delta:{ta.get('delta_pct',0):.4f}% | "
@@ -817,7 +853,7 @@ class CryptoBot:
             executed = True
         else:
             executed = execute_buy(
-                market["winner_token"], self.amount, price,
+                market["winner_token"], trade_amount, price,
                 self.private_key, self.proxy_wallet
             )
 
@@ -827,7 +863,7 @@ class CryptoBot:
                 "title":        market["title"],
                 "side":         market["winner_side"],
                 "price_entry":  price,
-                "amount":       self.amount,
+                "amount":       trade_amount,
                 "seconds_left": seconds_left,
                 "pnl_expected": expected_pnl,
                 "delta_pct":    ta.get("delta_pct", 0),

@@ -247,13 +247,20 @@ def get_default_settings():
     """Возвращает дефолтные настройки бота."""
     return {
         "bank": 100,
-        "mode": "dry-run",
-        "amount": 10,
+        "mode": "live",
+        "amount": 5,
         "enabled_coins": ["BTC"],
-        "daily_loss_limit": 15.0,
+        "daily_loss_limit": 10.0,
+        "dynamic_sizing": True,
+        "dynamic_min_amount": 5.0,
+        "dynamic_max_amount": 15.0,
+        "dynamic_base_risk_pct": 0.05,
+        "dynamic_step_bank_gain_pct": 0.70,
+        "dynamic_step_risk_pct": 0.01,
+        "dynamic_max_risk_pct": 0.08,
         "min_confidence": 0.0,
         "entry_min": 10,
-        "entry_max": 35,
+        "entry_max": 30,
         "price_min_btc": 0.55,
         "price_min_eth": 0.70,
         "price_max": 0.70,
@@ -590,8 +597,9 @@ with tab_settings:
         new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
         new_settings["amount"] = st.number_input("Ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
         new_settings["daily_loss_limit"] = st.number_input("Дневной стоп-лосс (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("daily_loss_limit", 15.0)), step=1.0)
+        new_settings["dynamic_sizing"] = st.checkbox("Динамический размер ставки", value=bool(settings.get("dynamic_sizing", True)))
         new_settings["entry_min"] = st.number_input("Вход мин (сек)", min_value=1, max_value=120, value=int(settings.get("entry_min", 10)), step=1)
-        new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 35)), step=5)
+        new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 30)), step=5)
 
     with s2:
         new_settings["price_min_btc"] = st.number_input("BTC мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_btc", 0.55)), step=0.01, format="%.2f")
@@ -600,6 +608,12 @@ with tab_settings:
         new_settings["min_confidence"] = st.slider("Мин уверенность", min_value=0.0, max_value=1.0, value=float(settings.get("min_confidence", 0.0)), step=0.05)
         new_settings["delta_skip"] = st.number_input("Мин дельта", min_value=0.0, max_value=0.01, value=float(settings.get("delta_skip", 0.0)), step=0.0001, format="%.4f")
         new_settings["atr_multiplier"] = st.number_input("ATR множитель", min_value=0.5, max_value=5.0, value=float(settings.get("atr_multiplier", 1.5)), step=0.1)
+        new_settings["dynamic_min_amount"] = st.number_input("Мин ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_min_amount", 5.0)), step=1.0)
+        new_settings["dynamic_max_amount"] = st.number_input("Макс ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_max_amount", 15.0)), step=1.0)
+        new_settings["dynamic_base_risk_pct"] = st.slider("Базовый риск", min_value=0.01, max_value=0.10, value=float(settings.get("dynamic_base_risk_pct", 0.05)), step=0.01, format="%.2f")
+        new_settings["dynamic_step_bank_gain_pct"] = st.slider("Шаг роста банка", min_value=0.10, max_value=2.0, value=float(settings.get("dynamic_step_bank_gain_pct", 0.70)), step=0.05, format="%.2f")
+        new_settings["dynamic_step_risk_pct"] = st.slider("Прирост риска за шаг", min_value=0.0, max_value=0.05, value=float(settings.get("dynamic_step_risk_pct", 0.01)), step=0.01, format="%.2f")
+        new_settings["dynamic_max_risk_pct"] = st.slider("Макс риск", min_value=0.01, max_value=0.15, value=float(settings.get("dynamic_max_risk_pct", 0.08)), step=0.01, format="%.2f")
 
     # ===== BUTTONS =====
     st.markdown("---")
