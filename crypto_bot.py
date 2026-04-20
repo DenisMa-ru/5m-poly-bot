@@ -104,6 +104,15 @@ def load_bot_settings():
 
 _bot_settings = load_bot_settings()
 
+
+def get_enabled_coins(settings: dict) -> list[str]:
+    """Return validated enabled coins from settings."""
+    coins = settings.get("enabled_coins", ["BTC", "ETH"])
+    if not isinstance(coins, list):
+        return ["BTC", "ETH"]
+    valid = [coin for coin in coins if coin in BINANCE_SYMBOLS]
+    return valid or ["BTC", "ETH"]
+
 def get_setting(key, default):
     """Get a setting from file or return default."""
     s = load_settings()
@@ -168,6 +177,8 @@ MARKETS = {
     "btc-updown-5m": "BTC",
     "eth-updown-5m": "ETH",
 }
+ENABLED_COINS      = set(get_enabled_coins(_bot_settings))
+ACTIVE_MARKETS     = {prefix: coin for prefix, coin in MARKETS.items() if coin in ENABLED_COINS}
 
 # ─── UTILS ─────────────────────────────────────────────────────────────────────
 def ts_str():
@@ -558,7 +569,7 @@ class CryptoBot:
         mode = "DRY RUN" if dry_run else ("PAPER" if paper else "🔴 LIVE")
         log("=" * 60)
         log(f"Crypto Up/Down Bot | {mode} | ${amount}/trade")
-        log(f"Bank: ${self.bank_start:.2f} | Markets: {', '.join(MARKETS.values())}")
+        log(f"Bank: ${self.bank_start:.2f} | Markets: {', '.join(ACTIVE_MARKETS.values())}")
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | ATR: {ATR_MULTIPLIER}x")
@@ -598,6 +609,11 @@ class CryptoBot:
         self._print_summary()
 
     def _cycle(self):
+        if not ACTIVE_MARKETS:
+            log("No active markets configured. Sleeping.")
+            time.sleep(POLL_INTERVAL)
+            return
+
         close_ts   = next_close_ts()
         sleep_secs = close_ts - now_unix() - WAKE_BEFORE
 
@@ -609,7 +625,7 @@ class CryptoBot:
         if now_unix() >= close_ts + 5:
             log(f"⚠️  Arrived too late, skipping close "
                 f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%S')} UTC")
-            for prefix in MARKETS:
+            for prefix in ACTIVE_MARKETS:
                 self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
             return
 
@@ -623,7 +639,7 @@ class CryptoBot:
 
             if seconds_left <= 0:
                 log("⏰ Market closed.")
-                for prefix in MARKETS:
+                for prefix in ACTIVE_MARKETS:
                     self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
                 # Проверяем результаты только что закрывшегося раунда.
                 # Раньше здесь использовался предыдущий close_ts, из-за чего
@@ -633,6 +649,7 @@ class CryptoBot:
 
             pending = [
                 prefix for prefix in MARKETS
+                if prefix in ACTIVE_MARKETS
                 if f"{prefix}-{close_ts - 300}" not in self.traded_slugs
                 and f"{prefix}-{close_ts - 300}" not in entered_slugs
             ]

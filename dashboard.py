@@ -249,6 +249,7 @@ def get_default_settings():
         "bank": 100,
         "mode": "dry-run",
         "amount": 10,
+        "enabled_coins": ["BTC"],
         "min_confidence": 0.0,
         "entry_min": 10,
         "entry_max": 35,
@@ -307,6 +308,7 @@ with tab_dashboard:
         f"${settings.get('amount', 10):.0f}/trade | "
         f"Bank ${bank:.0f} ({bank_change:+.2f})"
     )
+    st.caption(f"Coins: {', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))}")
     st.caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
 
     st.markdown("---")
@@ -584,6 +586,7 @@ with tab_settings:
     with s1:
         new_settings["bank"] = st.number_input("Банк (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("bank", 100)), step=10.0)
         new_settings["mode"] = st.selectbox("Режим", ["dry-run", "paper", "live"], index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")))
+        new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
         new_settings["amount"] = st.number_input("Ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
         new_settings["entry_min"] = st.number_input("Вход мин (сек)", min_value=1, max_value=120, value=int(settings.get("entry_min", 10)), step=1)
         new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 35)), step=5)
