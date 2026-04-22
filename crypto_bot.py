@@ -821,21 +821,24 @@ class CryptoBot:
             save_signal(signal_data)
             return
 
-        # Entry approved!
-        # Calculate expected PnL before saving
-        expected_pnl = (self.amount / market["winner_price"]) - self.amount
-        signal_data["entered"] = True
-        signal_data["reason"] = "all filters passed"
-        signal_data["amount"] = trade_amount
+        # Entry approved. Mark it as entered only after a successful execution.
         expected_pnl = (trade_amount / market["winner_price"]) - trade_amount
+        signal_data["amount"] = trade_amount
         signal_data["pnl_expected"] = expected_pnl
+
+        executed = self._enter(market, ta, seconds_left, trade_amount)
+        if executed:
+            signal_data["entered"] = True
+            signal_data["reason"] = "all filters passed"
+            entered_slugs.add(slug)
+            self.traded_slugs.add(slug)
+        else:
+            signal_data["entered"] = False
+            signal_data["reason"] = "execution failed"
+
         save_signal(signal_data)
 
-        self._enter(market, ta, seconds_left, trade_amount)
-        entered_slugs.add(slug)
-        self.traded_slugs.add(slug)
-
-    def _enter(self, market: dict, ta: dict, seconds_left: float, trade_amount: float):
+    def _enter(self, market: dict, ta: dict, seconds_left: float, trade_amount: float) -> bool:
         price        = market["winner_price"]
         expected_pnl = (trade_amount / price) - trade_amount
         expected_pct = expected_pnl / trade_amount * 100
@@ -871,6 +874,8 @@ class CryptoBot:
                 "timestamp":    ts_str(),
             })
             log(f"   ✅ Trade #{len(self.trades)} recorded [{crypto}]")
+
+        return executed
 
     def _check_previous_round(self, close_ts: int):
         """
