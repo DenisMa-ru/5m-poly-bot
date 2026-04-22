@@ -508,12 +508,17 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         ClobClient = client_module.ClobClient
         OrderArgs = clob_types_module.OrderArgs
         BUY = constants_module.BUY
+        signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
+        if signature_type_raw is not None:
+            signature_type = int(signature_type_raw)
+        else:
+            signature_type = 2 if proxy_wallet else 0
 
         client = ClobClient(
             host=CLOB_API,
             key=private_key,
             chain_id=137,
-            signature_type=1,
+            signature_type=signature_type,
             funder=proxy_wallet,
         )
         client.set_api_creds(client.create_or_derive_api_creds())
