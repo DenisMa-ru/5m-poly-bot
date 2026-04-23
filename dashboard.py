@@ -539,6 +539,8 @@ with tab_dashboard:
             st.rerun()
 
     account = D['account']
+    mode = settings.get('mode', 'dry-run')
+    is_live_mode = mode == 'live'
     cash = account.get('cash')
     portfolio = account.get('portfolio')
     spendable = account.get('spendable')
@@ -548,10 +550,8 @@ with tab_dashboard:
     net_result = portfolio - D['bank_start'] if portfolio is not None else None
     roi_pct = (net_result / D['bank_start'] * 100) if net_result is not None and D['bank_start'] else None
     summary_items = [
-        ("Mode", settings.get('mode', 'dry-run')),
+        ("Mode", mode),
         ("Trade", f"${settings.get('amount', 10):.0f}"),
-        ("Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—"),
-        ("Bot bank", f"${bank:.2f} ({bank_change:+.2f})"),
         ("Coins", ', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))),
         ("PID", PID_FILE.read_text().strip() if PID_FILE.exists() else '—'),
     ]
@@ -580,21 +580,44 @@ with tab_dashboard:
 
     # ---- MAIN MONEY METRICS ----
     st.markdown("---")
-    b1, b2, b3, b4, b5 = st.columns(5)
+    b1, b2, b3, b4, b5, b6 = st.columns(6)
     pnl_v = D['realized_pnl']
-    b1.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
+    b1.metric("🏁 Start Bank", f"${D['bank_start']:.2f}")
+    b2.metric(
+        "💵 Polymarket Cash" if is_live_mode else "💵 Polymarket Cash (ref)",
+        f"${cash:.2f}" if cash is not None else "—"
+    )
+    b3.metric(
+        "🧾 Polymarket Portfolio" if is_live_mode else "🧾 Polymarket Portfolio (ref)",
+        f"${portfolio:.2f}" if portfolio is not None else "—"
+    )
+    b4.metric(
+        "🤖 Strategy Bank" if not is_live_mode else "🤖 Strategy Bank",
+        f"${bank:.2f}",
+        delta=f"{bank_change:+.2f}",
+        delta_color="normal" if bank_change >= 0 else "inverse"
+    )
+    b5.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
                delta=f"{pnl_v:+.2f}",
                delta_color="normal" if pnl_v >= 0 else "inverse")
-    b2.metric("💵 Cash", f"${cash:.2f}" if cash is not None else "—")
-    b3.metric("🧾 Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—")
-    b4.metric("🏁 Start Bank", f"${D['bank_start']:.2f}")
-    b5.metric(
-        "📈 Portfolio vs Start",
+    b6.metric(
+        "📈 Portfolio vs Start" if is_live_mode else "📈 Portfolio vs Start (ref)",
         f"${net_result:+.2f}" if net_result is not None else "—",
         delta=f"{roi_pct:+.2f}%" if roi_pct is not None else None,
         delta_color="normal" if net_result is None or net_result >= 0 else "inverse",
     )
-    st.caption("Portfolio vs Start = current Polymarket portfolio minus the starting bank configured in Settings.")
+    st.caption(
+        "Live mode: Polymarket Cash/Portfolio are real wallet values; "
+        "Strategy Bank and Realized PnL come from resolved bot signals. "
+        "Portfolio vs Start = current Polymarket portfolio minus the starting bank from Settings."
+        if is_live_mode else
+        "Paper / dry-run mode: Strategy Bank and Realized PnL are simulated from bot signals. "
+        "Polymarket Cash/Portfolio are shown only as reference and are not changed by simulated trades."
+    )
+
+    m1, m2 = st.columns(2)
+    m1.metric("💸 Spendable", f"${spendable:.2f}" if spendable is not None else "—")
+    m2.metric("🎁 Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—")
 
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
