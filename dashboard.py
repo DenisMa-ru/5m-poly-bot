@@ -550,9 +550,6 @@ with tab_dashboard:
     summary_items = [
         ("Mode", settings.get('mode', 'dry-run')),
         ("Trade", f"${settings.get('amount', 10):.0f}"),
-        ("Cash", f"${cash:.2f}" if cash is not None else "—"),
-        ("Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—"),
-        ("Spendable", f"${spendable:.2f}" if spendable is not None else "—"),
         ("Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—"),
         ("Bot bank", f"${bank:.2f} ({bank_change:+.2f})"),
         ("Coins", ', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))),
@@ -581,7 +578,7 @@ with tab_dashboard:
     a5.metric("Skip Rate", f"{skip_rate:.0f}%")
     a6.metric("Updated", D['time'])
 
-    # ---- PNL + INVESTED ----
+    # ---- MAIN MONEY METRICS ----
     st.markdown("---")
     b1, b2, b3, b4, b5 = st.columns(5)
     pnl_v = D['realized_pnl']
@@ -590,13 +587,14 @@ with tab_dashboard:
                delta_color="normal" if pnl_v >= 0 else "inverse")
     b2.metric("💵 Cash", f"${cash:.2f}" if cash is not None else "—")
     b3.metric("🧾 Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—")
-    b4.metric("📊 Invested", f"${D['invested']:.2f}")
+    b4.metric("🏁 Start Bank", f"${D['bank_start']:.2f}")
     b5.metric(
-        "📌 Since Reset",
+        "📈 Portfolio vs Start",
         f"${net_result:+.2f}" if net_result is not None else "—",
         delta=f"{roi_pct:+.2f}%" if roi_pct is not None else None,
         delta_color="normal" if net_result is None or net_result >= 0 else "inverse",
     )
+    st.caption("Portfolio vs Start = current Polymarket portfolio minus the starting bank configured in Settings.")
 
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
