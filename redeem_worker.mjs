@@ -3,12 +3,16 @@ import 'dotenv/config';
 import {
   concat,
   createPublicClient,
+  encodeAbiParameters,
   encodeFunctionData,
   getAddress,
+  getCreate2Address,
+  hashTypedData,
   http,
   keccak256,
   toBytes,
   toHex,
+  zeroAddress,
   zeroHash,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -21,6 +25,8 @@ const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 const PROXY_FACTORY_ADDRESS = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052';
 const RELAY_HUB_ADDRESS = '0xD216153c06E857cD7f72665E0aF1d7D82172F494';
+const SAFE_FACTORY_ADDRESS = '0xaacfeea03eb1561c4e67d661e40682bd20e3541b';
+const SAFE_INIT_CODE_HASH = '0x2bce2127ff07fb632d16c8347c4ebf501f4841168bed00d9e6ef715ddb6fcecf';
 const DEFAULT_PROXY_GAS_LIMIT = 10_000_000n;
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 20;
@@ -157,6 +163,138 @@ function createProxyStructHash({ from, to, data, txFee, gasPrice, gasLimit, nonc
 
 async function createProxySignature(account, structHash) {
   return account.signMessage({ message: { raw: toBytes(structHash) } });
+}
+
+function deriveSafeWallet(ownerAddress) {
+  return getCreate2Address({
+    bytecodeHash: SAFE_INIT_CODE_HASH,
+    from: SAFE_FACTORY_ADDRESS,
+    salt: keccak256(encodeAbiParameters([{ name: 'address', type: 'address' }], [ownerAddress])),
+  });
+}
+
+function splitAndPackSig(signature) {
+  let sigV = Number.parseInt(signature.slice(-2), 16);
+  switch (sigV) {
+    case 0:
+    case 1:
+      sigV += 31;
+      break;
+    case 27:
+    case 28:
+      sigV += 4;
+      break;
+    default:
+      throw new Error(`Invalid signature v: ${sigV}`);
+  }
+
+  const adjustedSig = signature.slice(0, -2) + sigV.toString(16).padStart(2, '0');
+  const r = BigInt(`0x${adjustedSig.slice(2, 66)}`);
+  const s = BigInt(`0x${adjustedSig.slice(66, 130)}`);
+  const v = Number.parseInt(adjustedSig.slice(130, 132), 16);
+
+  return concat([
+    toHex(r, { size: 32 }),
+    toHex(s, { size: 32 }),
+    toHex(v, { size: 1 }),
+  ]);
+}
+
+function createSafeStructHash({ chainId, safeAddress, to, value, data, operation, safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, nonce }) {
+  return hashTypedData({
+    primaryType: 'SafeTx',
+    domain: {
+      chainId,
+      verifyingContract: safeAddress,
+    },
+    types: {
+      SafeTx: [
+        { name: 'to', type: 'address' },
+        { name: 'value', type: 'uint256' },
+        { name: 'data', type: 'bytes' },
+        { name: 'operation', type: 'uint8' },
+        { name: 'safeTxGas', type: 'uint256' },
+        { name: 'baseGas', type: 'uint256' },
+        { name: 'gasPrice', type: 'uint256' },
+        { name: 'gasToken', type: 'address' },
+        { name: 'refundReceiver', type: 'address' },
+        { name: 'nonce', type: 'uint256' },
+      ],
+    },
+    message: {
+      to,
+      value: BigInt(value),
+      data,
+      operation,
+      safeTxGas: BigInt(safeTxGas),
+      baseGas: BigInt(baseGas),
+      gasPrice: BigInt(gasPrice),
+      gasToken,
+      refundReceiver,
+      nonce: BigInt(nonce),
+    },
+  });
+}
+
+async function buildSafeRedeemRequest({ account, proxyWallet, ctfPositions, metadata }) {
+  if (ctfPositions.length !== 1) {
+    throw new Error('SAFE redeem currently supports one condition per submission');
+  }
+
+  const from = toAddress(account.address, 'signer address');
+  const safeAddress = deriveSafeWallet(from);
+  if (safeAddress.toLowerCase() !== proxyWallet.toLowerCase()) {
+    throw new Error(`SAFE address mismatch: env=${proxyWallet} derived=${safeAddress}`);
+  }
+
+  const noncePayload = await fetchRelayerJson(`/nonce?address=${from}&type=SAFE`);
+  const nonce = String(noncePayload.nonce);
+  const tx = buildCtfRedeemCall(ctfPositions[0].conditionId);
+  const safeTxGas = '0';
+  const baseGas = '0';
+  const gasPrice = '0';
+  const gasToken = zeroAddress;
+  const refundReceiver = zeroAddress;
+
+  const signature = await account.signMessage({
+    message: {
+      raw: toBytes(
+        createSafeStructHash({
+          chainId: 137,
+          safeAddress,
+          to: tx.to,
+          value: '0',
+          data: tx.data,
+          operation: 0,
+          safeTxGas,
+          baseGas,
+          gasPrice,
+          gasToken,
+          refundReceiver,
+          nonce,
+        })
+      ),
+    },
+  });
+
+  return {
+    from,
+    to: tx.to,
+    proxyWallet: safeAddress,
+    data: tx.data,
+    nonce,
+    signature: splitAndPackSig(signature),
+    signatureParams: {
+      gasPrice,
+      operation: '0',
+      safeTxnGas: safeTxGas,
+      baseGas,
+      gasToken,
+      refundReceiver,
+    },
+    type: 'SAFE',
+    metadata: metadata || '',
+  };
 }
 
 function createPublicPolygonClient() {
@@ -300,17 +438,25 @@ async function executeLiveCtfRedeem({ privateKey, proxyWallet, relayerApiKey, re
   const signerAddress = toAddress(account.address, 'POLY_PRIVATE_KEY address');
   const relayerOwnerAddress = toAddress(relayerApiKeyAddress, 'RELAYER_API_KEY_ADDRESS');
   const publicClient = createPublicPolygonClient();
+  const signatureType = getEnv('POLY_SIGNATURE_TYPE', '2').trim();
 
   const metadata = `redeem ${ctfPositions.length} CTF position(s)`;
-  const request = await buildProxyRedeemRequest({
-    account,
-    proxyWallet,
-    publicClient,
-    ctfPositions,
-    metadata,
-  });
+  const request = signatureType === '2'
+    ? await buildSafeRedeemRequest({
+        account,
+        proxyWallet,
+        ctfPositions,
+        metadata,
+      })
+    : await buildProxyRedeemRequest({
+        account,
+        proxyWallet,
+        publicClient,
+        ctfPositions,
+        metadata,
+      });
 
-  console.log(`Submitting PROXY redeem from signer ${signerAddress} for proxy ${request.proxyWallet}`);
+  console.log(`Submitting ${request.type} redeem from signer ${signerAddress} for proxy ${request.proxyWallet}`);
   console.log(`Relayer auth owner: ${relayerOwnerAddress}`);
   console.log(`Batch contains ${ctfPositions.length} condition(s)`);
 
