@@ -578,29 +578,36 @@ with tab_dashboard:
     a5.metric("Skip Rate", f"{skip_rate:.0f}%")
     a6.metric("Updated", D['time'])
 
-    # ---- MAIN MONEY METRICS ----
+    # ---- WALLET ----
     st.markdown("---")
-    b1, b2, b3, b4, b5, b6 = st.columns(6)
     pnl_v = D['realized_pnl']
-    b1.metric("🏁 Start Bank", f"${D['bank_start']:.2f}")
-    b2.metric(
+    st.markdown("#### Wallet")
+    w1, w2, w3, w4 = st.columns(4)
+    w1.metric(
         "💵 Polymarket Cash" if is_live_mode else "💵 Polymarket Cash (ref)",
         f"${cash:.2f}" if cash is not None else "—"
     )
-    b3.metric(
+    w2.metric(
         "🧾 Polymarket Portfolio" if is_live_mode else "🧾 Polymarket Portfolio (ref)",
         f"${portfolio:.2f}" if portfolio is not None else "—"
     )
-    b4.metric(
-        "🤖 Strategy Bank" if not is_live_mode else "🤖 Strategy Bank",
+    w3.metric("💸 Spendable", f"${spendable:.2f}" if spendable is not None else "—")
+    w4.metric("🎁 Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—")
+
+    # ---- STRATEGY ----
+    st.markdown("#### Strategy")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("🏁 Start Bank", f"${D['bank_start']:.2f}")
+    s2.metric(
+        "🤖 Strategy Bank",
         f"${bank:.2f}",
         delta=f"{bank_change:+.2f}",
         delta_color="normal" if bank_change >= 0 else "inverse"
     )
-    b5.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
-               delta=f"{pnl_v:+.2f}",
-               delta_color="normal" if pnl_v >= 0 else "inverse")
-    b6.metric(
+    s3.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
+              delta=f"{pnl_v:+.2f}",
+              delta_color="normal" if pnl_v >= 0 else "inverse")
+    s4.metric(
         "📈 Portfolio vs Start" if is_live_mode else "📈 Portfolio vs Start (ref)",
         f"${net_result:+.2f}" if net_result is not None else "—",
         delta=f"{roi_pct:+.2f}%" if roi_pct is not None else None,
@@ -615,17 +622,24 @@ with tab_dashboard:
         "Polymarket Cash/Portfolio are shown only as reference and are not changed by simulated trades."
     )
 
-    m1, m2 = st.columns(2)
-    m1.metric("💸 Spendable", f"${spendable:.2f}" if spendable is not None else "—")
-    m2.metric("🎁 Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—")
-
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
-        w1, w2, w3 = st.columns(3)
+        st.markdown("#### Strategy Quality")
+        q1, q2, q3 = st.columns(3)
         win_rate = D['wins'] / max(D['wins'] + D['losses'], 1) * 100
-        w1.metric("✅ Wins", D['wins'])
-        w2.metric("❌ Losses", D['losses'])
-        w3.metric("🎯 Win Rate", f"{win_rate:.0f}%")
+        q1.metric("✅ Wins", D['wins'])
+        q2.metric("❌ Losses", D['losses'])
+        q3.metric("🎯 Win Rate", f"{win_rate:.0f}%")
+
+    # ---- RUNTIME ----
+    st.markdown("---")
+    st.markdown("#### Runtime")
+    r1, r2, r3, r4, r5 = st.columns(5)
+    r1.metric("Mode", mode)
+    r2.metric("Trade Size", f"${settings.get('amount', 10):.0f}")
+    r3.metric("Coins", ', '.join(settings.get('enabled_coins', ['BTC', 'ETH'])))
+    r4.metric("PID", PID_FILE.read_text().strip() if PID_FILE.exists() else '—')
+    r5.metric("Updated", D['time'])
 
     # ---- PRICES ----
     st.markdown("---")
