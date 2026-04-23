@@ -1,0 +1,14 @@
+[Unit]
+Description=5m Poly Bot - Polymarket Auto Redeem
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/5m-poly-bot
+Environment="PATH=/root/5m-poly-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/bin/npm run redeem
+StandardOutput=append:/root/5m-poly-bot/redeem-worker.log
+StandardError=append:/root/5m-poly-bot/redeem-worker.log
+
