@@ -485,6 +485,8 @@ with tab_dashboard:
     redeemable = account.get('redeemable')
     bank = D['bank_current']
     bank_change = bank - D['bank_start']
+    net_result = portfolio - D['bank_start'] if portfolio is not None else None
+    roi_pct = (net_result / D['bank_start'] * 100) if net_result is not None and D['bank_start'] else None
     cash_text = f"Cash ${cash:.2f}" if cash is not None else "Cash —"
     portfolio_text = f"Portfolio ${portfolio:.2f}" if portfolio is not None else "Portfolio —"
     st.caption(
@@ -521,7 +523,7 @@ with tab_dashboard:
 
     # ---- PNL + INVESTED ----
     st.markdown("---")
-    b1, b2, b3, b4 = st.columns(4)
+    b1, b2, b3, b4, b5 = st.columns(5)
     pnl_v = D['realized_pnl']
     b1.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
                delta=f"{pnl_v:+.2f}",
@@ -529,6 +531,12 @@ with tab_dashboard:
     b2.metric("💵 Cash", f"${cash:.2f}" if cash is not None else "—")
     b3.metric("🧾 Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—")
     b4.metric("📊 Invested", f"${D['invested']:.2f}")
+    b5.metric(
+        "📌 Since Reset",
+        f"${net_result:+.2f}" if net_result is not None else "—",
+        delta=f"{roi_pct:+.2f}%" if roi_pct is not None else None,
+        delta_color="normal" if net_result is None or net_result >= 0 else "inverse",
+    )
 
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
