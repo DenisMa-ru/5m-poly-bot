@@ -5,8 +5,12 @@
 """
 import streamlit as st
 import re, os, json
+import requests
 from datetime import datetime
+from dotenv import load_dotenv
 from pathlib import Path
+
+load_dotenv()
 
 # ===== CONFIG =====
 DEFAULT_LOG = Path("/root/5m-poly-bot/bot.log")
@@ -15,6 +19,8 @@ SIGNALS_FILE = Path("/root/5m-poly-bot/signals.json")
 BOT_DIR = Path("/root/5m-poly-bot")
 BOT_SCRIPT = "crypto_bot.py"
 PID_FILE = Path("/root/5m-poly-bot/bot.pid")
+CLOB_API = "https://clob.polymarket.com"
+POLYMARKET_DATA_API = "https://data-api.polymarket.com"
 
 st.set_page_config(page_title="5m Poly Bot", page_icon="📈", layout="wide",
                     initial_sidebar_state="collapsed")
@@ -91,6 +97,166 @@ def load_saved_signals():
         return data if isinstance(data, list) else []
     except:
         return []
+
+
+def _safe_float(value):
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
+    """Return available collateral balance and allowance from Polymarket, if available."""
+    try:
+        import importlib
+
+        client_module = importlib.import_module("py_clob_client.client")
+        clob_types_module = importlib.import_module("py_clob_client.clob_types")
+
+        ClobClient = client_module.ClobClient
+        BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
+        AssetType = clob_types_module.AssetType
+
+        signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
+        if signature_type_raw is not None:
+            signature_type = int(signature_type_raw)
+        else:
+            signature_type = 2 if proxy_wallet else 0
+
+        client = ClobClient(
+            host=CLOB_API,
+            key=private_key,
+            chain_id=137,
+            signature_type=signature_type,
+            funder=proxy_wallet,
+        )
+        client.set_api_creds(client.create_or_derive_api_creds())
+
+        raw = client.get_balance_allowance(
+            params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+        if not isinstance(raw, dict):
+            return None, None
+
+        balance = _safe_float(raw.get("balance"))
+        allowance = _safe_float(raw.get("allowance"))
+
+        if allowance is None:
+            nested_allowances = raw.get("allowances") or raw.get("allowanceData") or {}
+            if isinstance(nested_allowances, dict):
+                values = [_safe_float(v) for v in nested_allowances.values()]
+                values = [v for v in values if v is not None]
+                if values:
+                    allowance = max(values)
+
+        return balance, allowance
+    except Exception:
+        return None, None
+
+
+def fetch_polymarket_account_state() -> dict:
+    """Fetch real Polymarket cash and portfolio values for dashboard display."""
+    private_key = os.getenv("POLY_PRIVATE_KEY", "")
+    proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
+    user_address = proxy_wallet or os.getenv("POLY_WALLET", "")
+
+    result = {
+        "cash": None,
+        "spendable": None,
+        "allowance": None,
+        "portfolio": None,
+        "redeemable": None,
+        "positions_value": None,
+        "open_positions": None,
+        "wallet": user_address or None,
+        "source_error": None,
+    }
+
+    if private_key:
+        cash, allowance = get_collateral_balance_allowance(private_key, proxy_wallet)
+        result["cash"] = cash
+        result["allowance"] = allowance
+        if cash is not None and allowance is not None:
+            result["spendable"] = min(cash, allowance)
+        elif cash is not None:
+            result["spendable"] = cash
+
+    if not user_address:
+        if not private_key:
+            result["source_error"] = "Missing POLY_PRIVATE_KEY/POLY_PROXY_WALLET"
+        else:
+            result["source_error"] = "Missing POLY_PROXY_WALLET"
+        return result
+
+    try:
+        value_resp = requests.get(
+            f"{POLYMARKET_DATA_API}/value",
+            params={"user": user_address},
+            timeout=5,
+        )
+        value_resp.raise_for_status()
+        payload = value_resp.json()
+        if isinstance(payload, dict):
+            for key in ("value", "currentValue", "portfolioValue", "totalValue"):
+                portfolio = _safe_float(payload.get(key))
+                if portfolio is not None:
+                    result["portfolio"] = portfolio
+                    break
+    except Exception as exc:
+        result["source_error"] = str(exc)
+
+    try:
+        positions_resp = requests.get(
+            f"{POLYMARKET_DATA_API}/positions",
+            params={"user": user_address, "sizeThreshold": 0},
+            timeout=5,
+        )
+        positions_resp.raise_for_status()
+        payload = positions_resp.json()
+        positions = payload if isinstance(payload, list) else payload.get("positions", []) if isinstance(payload, dict) else []
+
+        if isinstance(positions, list):
+            redeemable = 0.0
+            positions_value = 0.0
+            open_positions = 0
+            has_redeemable = False
+            has_positions_value = False
+
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+
+                current_value = _safe_float(pos.get("currentValue"))
+                if current_value is None:
+                    current_value = _safe_float(pos.get("value"))
+                if current_value is not None:
+                    positions_value += current_value
+                    if current_value > 0:
+                        open_positions += 1
+                    has_positions_value = True
+
+                redeem_value = _safe_float(pos.get("redeemable"))
+                if redeem_value is None:
+                    redeem_value = _safe_float(pos.get("redeemableValue"))
+                if redeem_value is not None:
+                    redeemable += redeem_value
+                    has_redeemable = True
+
+            if has_positions_value:
+                result["positions_value"] = positions_value
+                if result["portfolio"] is None:
+                    result["portfolio"] = positions_value
+            result["open_positions"] = open_positions
+            if has_redeemable:
+                result["redeemable"] = redeemable
+    except Exception as exc:
+        if result["source_error"] is None:
+            result["source_error"] = str(exc)
+
+    return result
 
 def build_dashboard_state():
     """
@@ -174,6 +340,8 @@ def build_dashboard_state():
         if s.get("coin") == "ETH" and s.get("pm") and not eth_pm:
             eth_pm = s
 
+    account_state = fetch_polymarket_account_state()
+
     return {
         "total_signals": len(signals),
         "total_entered": len(entered),
@@ -198,6 +366,7 @@ def build_dashboard_state():
         "eth_signals": [s for s in signals if s.get("coin") == "ETH"],
         "btc_entered": [s for s in entered if s.get("coin") == "BTC"],
         "eth_entered": [s for s in entered if s.get("coin") == "ETH"],
+        "account": account_state,
         "time": datetime.now().strftime('%H:%M:%S'),
     }
 
@@ -309,15 +478,31 @@ with tab_dashboard:
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
 
+    account = D['account']
+    cash = account.get('cash')
+    portfolio = account.get('portfolio')
+    spendable = account.get('spendable')
+    redeemable = account.get('redeemable')
     bank = D['bank_current']
     bank_change = bank - D['bank_start']
+    cash_text = f"Cash ${cash:.2f}" if cash is not None else "Cash —"
+    portfolio_text = f"Portfolio ${portfolio:.2f}" if portfolio is not None else "Portfolio —"
     st.caption(
         f"{'🟢' if bot_running else '🔴'} {settings.get('mode', 'dry-run')} | "
         f"${settings.get('amount', 10):.0f}/trade | "
-        f"Bank ${bank:.0f} ({bank_change:+.2f})"
+        f"{cash_text} | {portfolio_text}"
     )
+    extras = []
+    if spendable is not None:
+        extras.append(f"Spendable ${spendable:.2f}")
+    if redeemable is not None:
+        extras.append(f"Redeemable ${redeemable:.2f}")
+    extras.append(f"Bot bank ${bank:.2f} ({bank_change:+.2f})")
+    st.caption(" | ".join(extras))
     st.caption(f"Coins: {', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))}")
     st.caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
+    if account.get('source_error'):
+        st.caption(f"Polymarket sync note: {account['source_error']}")
 
     st.markdown("---")
 
@@ -336,13 +521,14 @@ with tab_dashboard:
 
     # ---- PNL + INVESTED ----
     st.markdown("---")
-    b1, b2, b3 = st.columns(3)
+    b1, b2, b3, b4 = st.columns(4)
     pnl_v = D['realized_pnl']
     b1.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
                delta=f"{pnl_v:+.2f}",
                delta_color="normal" if pnl_v >= 0 else "inverse")
-    b2.metric("📊 Invested", f"${D['invested']:.2f}")
-    b3.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
+    b2.metric("💵 Cash", f"${cash:.2f}" if cash is not None else "—")
+    b3.metric("🧾 Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—")
+    b4.metric("📊 Invested", f"${D['invested']:.2f}")
 
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
@@ -537,10 +723,16 @@ with tab_stats:
         st.markdown("---")
         st.markdown("**Summary**")
         su1, su2, su3, su4 = st.columns(4)
-        su1.metric("🏦 Банк", f"${D['bank_current']:.2f}", delta=f"{D['bank_current']-D['bank_start']:+.2f}")
-        su2.metric("💰 Realized PnL", f"${D['realized_pnl']:+.2f}")
-        su3.metric("📊 Invested", f"${D['invested']:.2f}")
-        su4.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
+        su1.metric("💵 Cash", f"${D['account']['cash']:.2f}" if D['account']['cash'] is not None else "—")
+        su2.metric("🧾 Portfolio", f"${D['account']['portfolio']:.2f}" if D['account']['portfolio'] is not None else "—")
+        su3.metric("🏦 Bot Bank", f"${D['bank_current']:.2f}", delta=f"{D['bank_current']-D['bank_start']:+.2f}")
+        su4.metric("💰 Realized PnL", f"${D['realized_pnl']:+.2f}")
+
+        su5, su6, su7, su8 = st.columns(4)
+        su5.metric("📊 Invested", f"${D['invested']:.2f}")
+        su6.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
+        su7.metric("🔓 Spendable", f"${D['account']['spendable']:.2f}" if D['account']['spendable'] is not None else "—")
+        su8.metric("🎟 Redeemable", f"${D['account']['redeemable']:.2f}" if D['account']['redeemable'] is not None else "—")
 
         # Win/Loss breakdown
         st.markdown("---")
