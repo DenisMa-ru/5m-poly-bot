@@ -544,6 +544,64 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         log(f"   ❌ BUY failed: {e}")
         return False
 
+
+def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
+    """Return available collateral balance/allowance from Polymarket, if available."""
+    try:
+        import importlib
+
+        client_module = importlib.import_module("py_clob_client.client")
+        clob_types_module = importlib.import_module("py_clob_client.clob_types")
+
+        ClobClient = client_module.ClobClient
+        BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
+        AssetType = clob_types_module.AssetType
+
+        signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
+        if signature_type_raw is not None:
+            signature_type = int(signature_type_raw)
+        else:
+            signature_type = 2 if proxy_wallet else 0
+
+        client = ClobClient(
+            host=CLOB_API,
+            key=private_key,
+            chain_id=137,
+            signature_type=signature_type,
+            funder=proxy_wallet,
+        )
+        client.set_api_creds(client.create_or_derive_api_creds())
+
+        raw = client.get_balance_allowance(
+            params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+
+        if not isinstance(raw, dict):
+            return None, None
+
+        def _to_float(value):
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except Exception:
+                return None
+
+        balance = _to_float(raw.get("balance"))
+        allowance = _to_float(raw.get("allowance"))
+
+        if allowance is None:
+            nested_allowances = raw.get("allowances") or raw.get("allowanceData") or {}
+            if isinstance(nested_allowances, dict):
+                values = [_to_float(v) for v in nested_allowances.values()]
+                values = [v for v in values if v is not None]
+                if values:
+                    allowance = max(values)
+
+        return balance, allowance
+    except Exception:
+        return None, None
+
 # ─── BOT ───────────────────────────────────────────────────────────────────────
 class CryptoBot:
 
@@ -779,6 +837,7 @@ class CryptoBot:
             "time_left": seconds_left,
             "entered": False,
             "reason": "",
+            "amount": trade_amount,
         }
 
         if self._daily_loss_limit_hit():
@@ -826,9 +885,23 @@ class CryptoBot:
             save_signal(signal_data)
             return
 
+        if not self.paper and not self.dry_run:
+            collateral_balance, collateral_allowance = get_collateral_balance_allowance(
+                self.private_key,
+                self.proxy_wallet,
+            )
+            spendable_limits = [v for v in (collateral_balance, collateral_allowance) if v is not None]
+            if spendable_limits and min(spendable_limits) + 1e-9 < trade_amount:
+                spendable = min(spendable_limits)
+                log(
+                    f"   [{crypto}] SKIP — insufficient collateral/allowance ${spendable:.2f} < ${trade_amount:.2f}"
+                )
+                signal_data["reason"] = f"insufficient collateral/allowance ({spendable:.2f} < {trade_amount:.2f})"
+                save_signal(signal_data)
+                return
+
         # Entry approved. Mark it as entered only after a successful execution.
         expected_pnl = (trade_amount / market["winner_price"]) - trade_amount
-        signal_data["amount"] = trade_amount
         signal_data["pnl_expected"] = expected_pnl
 
         executed = self._enter(market, ta, seconds_left, trade_amount)
