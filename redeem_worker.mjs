@@ -4,9 +4,7 @@ import {
   concat,
   createPublicClient,
   encodeFunctionData,
-  encodePacked,
   getAddress,
-  getCreate2Address,
   http,
   keccak256,
   toHex,
@@ -22,7 +20,6 @@ const CTF_ADDRESS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045';
 const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 const PROXY_FACTORY_ADDRESS = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052';
 const RELAY_HUB_ADDRESS = '0xD216153c06E857cD7f72665E0aF1d7D82172F494';
-const PROXY_INIT_CODE_HASH = '0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b';
 const DEFAULT_PROXY_GAS_LIMIT = 10_000_000n;
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_ATTEMPTS = 20;
@@ -115,14 +112,6 @@ function toAddress(value, name) {
   } catch {
     throw new Error(`Invalid ${name}: ${value}`);
   }
-}
-
-function deriveProxyWallet(ownerAddress) {
-  return getCreate2Address({
-    bytecodeHash: PROXY_INIT_CODE_HASH,
-    from: PROXY_FACTORY_ADDRESS,
-    salt: keccak256(encodePacked(['address'], [ownerAddress])),
-  });
 }
 
 function encodeProxyTransactionData(transactions) {
@@ -259,12 +248,11 @@ async function waitForRelayerTransaction(transactionId) {
   throw new Error(`Timed out waiting for relayer transaction ${transactionId}`);
 }
 
-async function buildProxyRedeemRequest({ account, publicClient, ctfPositions, metadata }) {
+async function buildProxyRedeemRequest({ account, proxyWallet, publicClient, ctfPositions, metadata }) {
   const from = toAddress(account.address, 'signer address');
   const relayPayload = await fetchProxyRelayPayload(from);
   const relayAddress = toAddress(relayPayload.address, 'relayer address');
   const nonce = String(relayPayload.nonce);
-  const proxyWallet = deriveProxyWallet(from);
 
   const calls = ctfPositions.map((pos) => buildCtfRedeemCall(pos.conditionId));
   const data = encodeProxyTransactionData(calls);
@@ -315,16 +303,11 @@ async function executeLiveCtfRedeem({ privateKey, proxyWallet, relayerApiKey, re
   const metadata = `redeem ${ctfPositions.length} CTF position(s)`;
   const request = await buildProxyRedeemRequest({
     account,
+    proxyWallet,
     publicClient,
     ctfPositions,
     metadata,
   });
-
-  if (request.proxyWallet !== proxyWallet) {
-    throw new Error(
-      `POLY_PROXY_WALLET mismatch: env=${proxyWallet} derived=${request.proxyWallet}. Refusing live redeem.`
-    );
-  }
 
   console.log(`Submitting PROXY redeem from signer ${signerAddress} for proxy ${request.proxyWallet}`);
   console.log(`Relayer auth owner: ${relayerOwnerAddress}`);
