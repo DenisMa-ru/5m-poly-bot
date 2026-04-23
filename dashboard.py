@@ -537,6 +537,7 @@ with tab_dashboard:
     with ctrl_cols[2]:
         if st.button("🔄 Refresh", use_container_width=True):
             st.rerun()
+        st.caption(f"Updated: {D['time']}")
 
     account = D['account']
     mode = settings.get('mode', 'dry-run')
@@ -630,16 +631,6 @@ with tab_dashboard:
         q1.metric("✅ Wins", D['wins'])
         q2.metric("❌ Losses", D['losses'])
         q3.metric("🎯 Win Rate", f"{win_rate:.0f}%")
-
-    # ---- RUNTIME ----
-    st.markdown("---")
-    st.markdown("#### Runtime")
-    r1, r2, r3, r4, r5 = st.columns(5)
-    r1.metric("Mode", mode)
-    r2.metric("Trade Size", f"${settings.get('amount', 10):.0f}")
-    r3.metric("Coins", ', '.join(settings.get('enabled_coins', ['BTC', 'ETH'])))
-    r4.metric("PID", PID_FILE.read_text().strip() if PID_FILE.exists() else '—')
-    r5.metric("Updated", D['time'])
 
     # ---- PRICES ----
     st.markdown("---")
