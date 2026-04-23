@@ -265,6 +265,10 @@ def fetch_polymarket_account_state() -> dict:
                 redeem_value = _normalize_usdc_amount(_safe_float(pos.get("redeemableValue")))
                 if redeem_value is None:
                     redeem_value = _normalize_usdc_amount(_safe_float(pos.get("redeemedValue")))
+                if redeem_value is None and pos.get("redeemable") is True:
+                    redeem_value = current_value
+                if redeem_value is None and pos.get("redeemable") is True:
+                    redeem_value = _normalize_usdc_amount(_safe_float(pos.get("size")))
                 if redeem_value is not None:
                     redeemable += redeem_value
                     has_redeemable = True
