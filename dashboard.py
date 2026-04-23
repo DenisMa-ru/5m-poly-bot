@@ -101,11 +101,33 @@ def load_saved_signals():
 
 def _safe_float(value):
     try:
+        if isinstance(value, bool):
+            return None
         if value is None or value == "":
             return None
         return float(value)
     except Exception:
         return None
+
+
+def _normalize_usdc_amount(value):
+    """Normalize raw USDC values when APIs return 6-decimal base units."""
+    if value is None:
+        return None
+    if abs(value) >= 100000:
+        return value / 1_000_000
+    return value
+
+
+def _looks_like_valid_portfolio(value, cash, positions_value):
+    if value is None:
+        return False
+    if cash is None and positions_value is None:
+        return value >= 0
+    expected_floor = max(cash or 0, 0)
+    expected_total = (cash or 0) + (positions_value or 0)
+    tolerance = 0.05
+    return value + tolerance >= expected_floor and value <= expected_total + tolerance
 
 
 def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
@@ -141,13 +163,13 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
         if not isinstance(raw, dict):
             return None, None
 
-        balance = _safe_float(raw.get("balance"))
-        allowance = _safe_float(raw.get("allowance"))
+        balance = _normalize_usdc_amount(_safe_float(raw.get("balance")))
+        allowance = _normalize_usdc_amount(_safe_float(raw.get("allowance")))
 
         if allowance is None:
             nested_allowances = raw.get("allowances") or raw.get("allowanceData") or {}
             if isinstance(nested_allowances, dict):
-                values = [_safe_float(v) for v in nested_allowances.values()]
+                values = [_normalize_usdc_amount(_safe_float(v)) for v in nested_allowances.values()]
                 values = [v for v in values if v is not None]
                 if values:
                     allowance = max(values)
@@ -191,6 +213,8 @@ def fetch_polymarket_account_state() -> dict:
             result["source_error"] = "Missing POLY_PROXY_WALLET"
         return result
 
+    portfolio_from_value = None
+
     try:
         value_resp = requests.get(
             f"{POLYMARKET_DATA_API}/value",
@@ -201,9 +225,9 @@ def fetch_polymarket_account_state() -> dict:
         payload = value_resp.json()
         if isinstance(payload, dict):
             for key in ("value", "currentValue", "portfolioValue", "totalValue"):
-                portfolio = _safe_float(payload.get(key))
+                portfolio = _normalize_usdc_amount(_safe_float(payload.get(key)))
                 if portfolio is not None:
-                    result["portfolio"] = portfolio
+                    portfolio_from_value = portfolio
                     break
     except Exception as exc:
         result["source_error"] = str(exc)
@@ -229,32 +253,43 @@ def fetch_polymarket_account_state() -> dict:
                 if not isinstance(pos, dict):
                     continue
 
-                current_value = _safe_float(pos.get("currentValue"))
+                current_value = _normalize_usdc_amount(_safe_float(pos.get("currentValue")))
                 if current_value is None:
-                    current_value = _safe_float(pos.get("value"))
+                    current_value = _normalize_usdc_amount(_safe_float(pos.get("value")))
                 if current_value is not None:
                     positions_value += current_value
                     if current_value > 0:
                         open_positions += 1
                     has_positions_value = True
 
-                redeem_value = _safe_float(pos.get("redeemable"))
+                redeem_value = _normalize_usdc_amount(_safe_float(pos.get("redeemableValue")))
                 if redeem_value is None:
-                    redeem_value = _safe_float(pos.get("redeemableValue"))
+                    redeem_value = _normalize_usdc_amount(_safe_float(pos.get("redeemedValue")))
                 if redeem_value is not None:
                     redeemable += redeem_value
                     has_redeemable = True
 
             if has_positions_value:
                 result["positions_value"] = positions_value
-                if result["portfolio"] is None:
-                    result["portfolio"] = positions_value
             result["open_positions"] = open_positions
             if has_redeemable:
                 result["redeemable"] = redeemable
     except Exception as exc:
         if result["source_error"] is None:
             result["source_error"] = str(exc)
+
+    positions_value = result["positions_value"]
+    fallback_portfolio = None
+    if result["cash"] is not None or positions_value is not None:
+        fallback_portfolio = (result["cash"] or 0) + (positions_value or 0)
+
+    if _looks_like_valid_portfolio(portfolio_from_value, result["cash"], positions_value):
+        result["portfolio"] = portfolio_from_value
+    else:
+        result["portfolio"] = fallback_portfolio
+
+    if result["redeemable"] is None:
+        result["redeemable"] = 0.0 if positions_value is not None else None
 
     return result
 
@@ -787,6 +822,18 @@ with tab_settings:
         unsafe_allow_html=True,
     )
 
+    settings_password = os.getenv("DASHBOARD_SETTINGS_PASSWORD", "")
+    settings_unlocked = not settings_password
+    if settings_password:
+        entered_password = st.text_input("Пароль для изменения настроек", type="password", key="settings_password_input")
+        settings_unlocked = entered_password == settings_password
+        if entered_password and not settings_unlocked:
+            st.error("Неверный пароль")
+        elif settings_unlocked:
+            st.success("Доступ к настройкам открыт")
+        else:
+            st.info("Для изменения настроек введите пароль")
+
     # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
 
@@ -821,15 +868,23 @@ with tab_settings:
 
     with btn_cols[0]:
         if st.button("💾 Сохранить", type="primary", use_container_width=True):
-            save_settings(new_settings)
-            st.success("✅ Настройки сохранены. Применение новых значений выполняйте через systemd restart.")
-            st.rerun()
+            if not settings_unlocked:
+                st.error("Введите правильный пароль для сохранения настроек")
+            else:
+                save_settings(new_settings)
+                st.success("✅ Настройки сохранены. Применение новых значений выполняйте через systemd restart.")
+                st.rerun()
 
     with btn_cols[1]:
         if st.button("🔄 Сбросить к дефолтным", use_container_width=True):
-            defaults = get_default_settings()
-            save_settings(defaults)
-            st.success("✅ Восстановлены безопасные дефолтные настройки текущей стратегии.")
-            st.rerun()
+            if not settings_unlocked:
+                st.error("Введите правильный пароль для сброса настроек")
+            else:
+                defaults = get_default_settings()
+                save_settings(defaults)
+                st.success("✅ Восстановлены безопасные дефолтные настройки текущей стратегии.")
+                st.rerun()
 
     st.caption("Настройки сохраняются в `settings.json` атомарно. Для применения используйте перезапуск сервиса через systemd, а не из dashboard.")
+    if not settings_password:
+        st.caption("Защита настроек не включена. Чтобы включить пароль, задайте переменную `DASHBOARD_SETTINGS_PASSWORD` в systemd service.")
