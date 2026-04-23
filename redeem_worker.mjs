@@ -7,6 +7,7 @@ import {
   getAddress,
   http,
   keccak256,
+  toBytes,
   toHex,
   zeroHash,
 } from 'viem';
@@ -155,7 +156,7 @@ function createProxyStructHash({ from, to, data, txFee, gasPrice, gasLimit, nonc
 }
 
 async function createProxySignature(account, structHash) {
-  return account.signMessage({ message: structHash });
+  return account.signMessage({ message: { raw: toBytes(structHash) } });
 }
 
 function createPublicPolygonClient() {
