@@ -824,15 +824,6 @@ with tab_settings:
 
     settings_password = os.getenv("DASHBOARD_SETTINGS_PASSWORD", "")
     settings_unlocked = not settings_password
-    if settings_password:
-        entered_password = st.text_input("Пароль для изменения настроек", type="password", key="settings_password_input")
-        settings_unlocked = entered_password == settings_password
-        if entered_password and not settings_unlocked:
-            st.error("Неверный пароль")
-        elif settings_unlocked:
-            st.success("Доступ к настройкам открыт")
-        else:
-            st.info("Для изменения настроек введите пароль")
 
     # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
@@ -864,6 +855,21 @@ with tab_settings:
 
     # ===== BUTTONS =====
     st.markdown("---")
+    if settings_password:
+        st.markdown("**Защита настроек**")
+        entered_password = st.text_input(
+            "Пароль для сохранения или сброса настроек",
+            type="password",
+            key="settings_password_input",
+        )
+        settings_unlocked = entered_password == settings_password
+        if entered_password and not settings_unlocked:
+            st.error("Неверный пароль")
+        elif settings_unlocked:
+            st.success("Доступ к настройкам открыт")
+        else:
+            st.info("Введите пароль и затем нажмите нужную кнопку ниже")
+
     btn_cols = st.columns([1, 1])
 
     with btn_cols[0]:

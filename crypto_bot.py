@@ -507,6 +507,8 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
 
         ClobClient = client_module.ClobClient
         OrderArgs = clob_types_module.OrderArgs
+        MarketOrderArgs = getattr(clob_types_module, "MarketOrderArgs", None)
+        OrderType = getattr(clob_types_module, "OrderType", None)
         BUY = constants_module.BUY
         signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
         if signature_type_raw is not None:
@@ -523,23 +525,38 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         )
         client.set_api_creds(client.create_or_derive_api_creds())
 
-        taker_price = min(round(price + 0.01, 2), 0.99)  # multiple of 0.01, max 0.99
-        size        = round(amount_usdc / price, 2)
+        resp = None
+        if MarketOrderArgs is not None and OrderType is not None:
+            market_order = client.create_market_order(MarketOrderArgs(
+                token_id=token_id,
+                amount=round(amount_usdc, 2),
+                side=BUY,
+                order_type=OrderType.FOK,
+            ))
+            resp = client.post_order(market_order, orderType=OrderType.FOK)
+        else:
+            taker_price = min(round(price + 0.01, 2), 0.99)  # multiple of 0.01, max 0.99
+            size = round(amount_usdc / price, 2)
 
-        if size <= 0:
-            log("   ❌ BUY failed: computed order size must be > 0")
-            return False
+            if size <= 0:
+                log("   ❌ BUY failed: computed order size must be > 0")
+                return False
 
-        resp = client.create_and_post_order(OrderArgs(
-            token_id=token_id,
-            price=taker_price,
-            size=size,
-            side=BUY,
-        ))
+            resp = client.create_and_post_order(OrderArgs(
+                token_id=token_id,
+                price=taker_price,
+                size=size,
+                side=BUY,
+            ))
+
         status = resp.get("status") if isinstance(resp, dict) else "ok"
         order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
-        log(f"   ✅ BUY OK: {status} | order {order_id[:20]}...")
-        return True
+        if status == "matched":
+            log(f"   ✅ BUY OK: {status} | order {order_id[:20]}...")
+            return True
+
+        log(f"   ❌ BUY not filled immediately: {status} | order {order_id[:20]}...")
+        return False
     except Exception as e:
         log(f"   ❌ BUY failed: {e}")
         return False
