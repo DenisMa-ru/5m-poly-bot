@@ -51,6 +51,27 @@ st.markdown("""
         margin-bottom: 0.75rem;
     }
     .safe-box strong { color: #f0f6fc; }
+    .summary-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin: 0.35rem 0 0.5rem;
+    }
+    .summary-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border: 1px solid #30363d;
+        border-radius: 999px;
+        background: #11161d;
+        color: #c9d1d9;
+        font-size: 0.9rem;
+        line-height: 1.2;
+        white-space: nowrap;
+    }
+    .summary-chip strong { color: #f0f6fc; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -526,22 +547,22 @@ with tab_dashboard:
     bank_change = bank - D['bank_start']
     net_result = portfolio - D['bank_start'] if portfolio is not None else None
     roi_pct = (net_result / D['bank_start'] * 100) if net_result is not None and D['bank_start'] else None
-    cash_text = f"Cash ${cash:.2f}" if cash is not None else "Cash —"
-    portfolio_text = f"Portfolio ${portfolio:.2f}" if portfolio is not None else "Portfolio —"
-    st.caption(
-        f"{'🟢' if bot_running else '🔴'} {settings.get('mode', 'dry-run')} | "
-        f"${settings.get('amount', 10):.0f}/trade | "
-        f"{cash_text} | {portfolio_text}"
-    )
-    extras = []
-    if spendable is not None:
-        extras.append(f"Spendable ${spendable:.2f}")
-    if redeemable is not None:
-        extras.append(f"Redeemable ${redeemable:.2f}")
-    extras.append(f"Bot bank ${bank:.2f} ({bank_change:+.2f})")
-    st.caption(" | ".join(extras))
-    st.caption(f"Coins: {', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))}")
-    st.caption(f"PID: {PID_FILE.read_text().strip() if PID_FILE.exists() else '—'}")
+    summary_items = [
+        ("Mode", settings.get('mode', 'dry-run')),
+        ("Trade", f"${settings.get('amount', 10):.0f}"),
+        ("Cash", f"${cash:.2f}" if cash is not None else "—"),
+        ("Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—"),
+        ("Spendable", f"${spendable:.2f}" if spendable is not None else "—"),
+        ("Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—"),
+        ("Bot bank", f"${bank:.2f} ({bank_change:+.2f})"),
+        ("Coins", ', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))),
+        ("PID", PID_FILE.read_text().strip() if PID_FILE.exists() else '—'),
+    ]
+    summary_html = '<div class="summary-bar">'
+    for label, value in summary_items:
+        summary_html += f'<span class="summary-chip"><strong>{label}</strong> {value}</span>'
+    summary_html += '</div>'
+    st.markdown(summary_html, unsafe_allow_html=True)
     if account.get('source_error'):
         st.caption(f"Polymarket sync note: {account['source_error']}")
 
