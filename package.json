@@ -1,0 +1,15 @@
+{
+  "name": "5m-poly-bot-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "redeem:dry-run": "node redeem_worker.mjs --dry-run",
+    "redeem": "node redeem_worker.mjs",
+    "redeem:one": "node redeem_worker.mjs --max-items=1"
+  },
+  "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.8",
+    "dotenv": "^16.4.5",
+    "viem": "^2.31.4"
+  }
+}
