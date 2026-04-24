@@ -157,6 +157,31 @@ def bucket_expected_roi(signal: dict) -> str:
     return ">=8%"
 
 
+def edge_proxy(signal: dict) -> float:
+    confidence = float(signal.get("confidence", 0) or 0)
+    pm = float(signal.get("pm", 0) or 0)
+    return (confidence - pm) * 100
+
+
+def bucket_edge_proxy(signal: dict) -> str:
+    edge = edge_proxy(signal)
+    if edge < -60:
+        return "<-60pp"
+    if edge < -40:
+        return "-60..-40pp"
+    if edge < -20:
+        return "-40..-20pp"
+    if edge < -10:
+        return "-20..-10pp"
+    if edge < 0:
+        return "-10..0pp"
+    if edge < 5:
+        return "0..5pp"
+    if edge < 10:
+        return "5..10pp"
+    return ">=10pp"
+
+
 def bucket_hour(signal: dict) -> str:
     dt = parse_ts(str(signal.get("timestamp", "")))
     return dt.strftime("%H:00 UTC") if dt else "unknown"
@@ -314,6 +339,75 @@ def print_confidence_diagnostics(settled: list[dict]) -> None:
         print("Confidence appears to be stored as a 0..1 ratio.")
     else:
         print("Confidence appears to be stored on a scale larger than 0..1; verify signal generation logic.")
+
+
+def filter_recent_signals(signals: list[dict], hours: float) -> list[dict]:
+    if hours <= 0:
+        return signals
+
+    latest_ts = max((parse_ts(str(signal.get("timestamp", ""))) for signal in signals), default=None)
+    if latest_ts is None:
+        return []
+
+    cutoff = latest_ts.timestamp() - (hours * 3600)
+    recent = []
+    for signal in signals:
+        dt = parse_ts(str(signal.get("timestamp", "")))
+        if dt and dt.timestamp() >= cutoff:
+            recent.append(signal)
+    return recent
+
+
+def print_recent_skip_report(signals: list[dict], hours: float) -> None:
+    recent = filter_recent_signals(signals, hours)
+    print(f"\n=== RECENT SIGNAL FLOW ({hours:g}h) ===")
+    if not recent:
+        print("No recent signals in that time window.")
+        return
+
+    entered = [signal for signal in recent if signal.get("entered")]
+    skipped = [signal for signal in recent if not signal.get("entered")]
+    settled = [signal for signal in entered if signal.get("realized_pnl") is not None]
+
+    print(f"signals: {len(recent)} | skipped: {len(skipped)} | entries: {len(entered)} | settled: {len(settled)}")
+
+    skip_reasons: dict[str, int] = defaultdict(int)
+    for signal in skipped:
+        skip_reasons[str(signal.get("reason", "other"))] += 1
+
+    print("Top skip reasons:")
+    if not skip_reasons:
+        print("  No skipped signals in this window")
+    else:
+        for reason, count in sorted(skip_reasons.items(), key=lambda item: item[1], reverse=True)[:12]:
+            share = count / len(skipped) * 100 if skipped else 0.0
+            print(f"  {count:<4} {fmt_pct(share):<7} {reason}")
+
+
+def print_edge_proxy_report(signals: list[dict], min_trades: int) -> None:
+    print("\n=== EDGE PROXY REPORT ===")
+    print("edge_proxy = confidence - PM price (percentage points).")
+    print("Use as a diagnostic only: current confidence is signal strength, not calibrated win probability.")
+
+    entered = [signal for signal in signals if signal.get("entered")]
+    settled = [signal for signal in entered if signal.get("realized_pnl") is not None]
+    if not settled:
+        print("No settled entered trades to analyze.")
+        return
+
+    rows = filter_rows(summarize_trades(settled, bucket_edge_proxy), min_trades)
+    if not rows:
+        print(f"No edge buckets with >= {min_trades} settled trades")
+        return
+
+    for row in rows:
+        matching = [signal for signal in settled if bucket_edge_proxy(signal) == row["key"]]
+        avg_edge = avg([edge_proxy(signal) for signal in matching])
+        print(
+            f"  {row['key']:<12} trades={row['count']:<3} win_rate={fmt_pct(row['win_rate']):<7} "
+            f"pnl={fmt_money(row['total_pnl']):<10} avg_edge={avg_edge:+.1f}pp "
+            f"pm={row['avg_pm']:.3f} conf={row['avg_conf']:.1f}%"
+        )
 
 
 def parse_grid(raw: str, cast):
@@ -501,6 +595,7 @@ def main() -> int:
     parser.add_argument("--file", default=str(DEFAULT_FILE), help="Path to signals.json")
     parser.add_argument("--top", type=int, default=6, help="Number of best/worst rows to show")
     parser.add_argument("--min-trades", type=int, default=3, help="Hide segment rows with fewer than this many settled trades")
+    parser.add_argument("--recent-hours", type=float, default=6.0, help="Recent time window for skip-flow diagnostics")
     parser.add_argument("--optimize", action="store_true", help="Run offline filter grid-search using resolved signals")
     parser.add_argument("--top-configs", type=int, default=10, help="Number of best configs to print in optimize mode")
     parser.add_argument("--min-sim-trades", type=int, default=30, help="Minimum simulated trade count per config in optimize mode")
@@ -572,6 +667,8 @@ def main() -> int:
     print_table("By weekday", filter_rows(summarize_trades(settled, bucket_weekday), args.min_trades), args.top)
     print_win_loss_profile(settled, args.min_trades)
     print_confidence_diagnostics(settled)
+    print_edge_proxy_report(signals, args.min_trades)
+    print_recent_skip_report(signals, args.recent_hours)
 
     print("\n=== SKIP REASONS ===")
     skip_reasons: dict[str, int] = defaultdict(int)
