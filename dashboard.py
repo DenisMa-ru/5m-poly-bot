@@ -491,7 +491,7 @@ def get_default_settings():
         "min_confidence": 0.0,
         "entry_min": 15,
         "entry_max": 20,
-        "price_min_btc": 0.55,
+        "price_min_btc": 0.45,
         "price_min_eth": 0.70,
         "price_max": 0.70,
         "delta_skip": 0.0,
@@ -893,8 +893,8 @@ with tab_settings:
         new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 30)), step=5)
 
     with s2:
-        new_settings["price_min_btc"] = st.number_input("BTC мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_btc", 0.55)), step=0.01, format="%.2f")
-        new_settings["price_min_eth"] = st.number_input("ETH мин цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_min_eth", 0.70)), step=0.01, format="%.2f")
+        new_settings["price_min_btc"] = st.number_input("BTC мин цена", min_value=0.01, max_value=1.0, value=float(settings.get("price_min_btc", 0.45)), step=0.01, format="%.2f")
+        new_settings["price_min_eth"] = st.number_input("ETH мин цена", min_value=0.01, max_value=1.0, value=float(settings.get("price_min_eth", 0.70)), step=0.01, format="%.2f")
         new_settings["price_max"] = st.number_input("Макс цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_max", 0.70)), step=0.01, format="%.2f")
         new_settings["min_confidence"] = st.slider("Мин уверенность", min_value=0.0, max_value=1.0, value=float(settings.get("min_confidence", 0.0)), step=0.05)
         new_settings["delta_skip"] = st.number_input("Мин дельта", min_value=0.0, max_value=0.01, value=float(settings.get("delta_skip", 0.0)), step=0.0001, format="%.4f")

@@ -656,8 +656,15 @@ class CryptoBot:
             raise ValueError("POLY_PRIVATE_KEY and POLY_PROXY_WALLET required in .env")
 
         mode = "DRY RUN" if dry_run else ("PAPER" if paper else "🔴 LIVE")
+        current_trade_amount = self._get_trade_amount()
         log("=" * 60)
-        log(f"Crypto Up/Down Bot | {mode} | ${amount}/trade")
+        if self.dynamic_sizing:
+            log(
+                f"Crypto Up/Down Bot | {mode} | base=${self.amount:.2f}/trade "
+                f"| current=${current_trade_amount:.2f}/trade"
+            )
+        else:
+            log(f"Crypto Up/Down Bot | {mode} | ${current_trade_amount:.2f}/trade")
         log(f"Bank: ${self.bank_start:.2f} | Markets: {', '.join(ACTIVE_MARKETS.values())}")
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
