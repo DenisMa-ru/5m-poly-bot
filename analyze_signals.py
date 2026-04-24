@@ -50,8 +50,16 @@ def parse_ts(value: str) -> datetime | None:
 
 def bucket_confidence(confidence: float) -> str:
     pct = confidence * 100
+    if pct < 5:
+        return "<5%"
+    if pct < 10:
+        return "5-9%"
+    if pct < 20:
+        return "10-19%"
+    if pct < 30:
+        return "20-29%"
     if pct < 40:
-        return "<40%"
+        return "30-39%"
     if pct < 50:
         return "40-49%"
     if pct < 60:
@@ -62,8 +70,18 @@ def bucket_confidence(confidence: float) -> str:
 
 
 def bucket_delta(delta_pct: float) -> str:
+    if delta_pct < 0.005:
+        return "<0.005%"
+    if delta_pct < 0.010:
+        return "0.005-0.009%"
+    if delta_pct < 0.020:
+        return "0.010-0.019%"
+    if delta_pct < 0.030:
+        return "0.020-0.029%"
+    if delta_pct < 0.050:
+        return "0.030-0.049%"
     if delta_pct < 0.10:
-        return "<0.10%"
+        return "0.050-0.099%"
     if delta_pct < 0.15:
         return "0.10-0.15%"
     if delta_pct < 0.20:
@@ -90,8 +108,26 @@ def bucket_time_left(time_left: float) -> str:
 
 
 def bucket_pm(pm_price: float) -> str:
+    if pm_price < 0.55:
+        return "<0.55"
+    if pm_price < 0.58:
+        return "0.55-0.579"
+    if pm_price < 0.60:
+        return "0.58-0.599"
+    if pm_price < 0.62:
+        return "0.60-0.619"
+    if pm_price < 0.64:
+        return "0.62-0.639"
+    if pm_price < 0.67:
+        return "0.64-0.669"
+    if pm_price < 0.70:
+        return "0.67-0.699"
+    if pm_price < 0.80:
+        return "0.70-0.799"
+    if pm_price < 0.90:
+        return "0.80-0.899"
     if pm_price < 0.94:
-        return "<0.94"
+        return "0.90-0.939"
     if pm_price < 0.95:
         return "0.94-0.949"
     if pm_price < 0.96:
@@ -259,6 +295,25 @@ def print_win_loss_profile(settled: list[dict], min_bucket_trades: int) -> None:
                 f"win_rate={fmt_pct(row['win_rate']):<7} pnl={fmt_money(row['total_pnl']):<10} "
                 f"winner_mix={fmt_pct(winner_share):<7} loser_mix={fmt_pct(loser_share):<7} edge={edge:+d}"
             )
+
+
+def print_confidence_diagnostics(settled: list[dict]) -> None:
+    print("\n=== CONFIDENCE DIAGNOSTICS ===")
+    values = [float(trade.get("confidence", 0) or 0) for trade in settled]
+    if not values:
+        print("No settled entries with confidence values.")
+        return
+
+    print(
+        f"raw min={min(values):.4f} avg={avg(values):.4f} max={max(values):.4f} "
+        f"| shown as {(avg(values) * 100):.1f}%"
+    )
+    if max(values) <= 0.2:
+        print("Confidence values are clustered very low (<= 0.20 raw); do not tighten this filter yet without more data.")
+    elif max(values) <= 1.0:
+        print("Confidence appears to be stored as a 0..1 ratio.")
+    else:
+        print("Confidence appears to be stored on a scale larger than 0..1; verify signal generation logic.")
 
 
 def parse_grid(raw: str, cast):
@@ -516,6 +571,7 @@ def main() -> int:
     print_table("By UTC hour", filter_rows(summarize_trades(settled, bucket_hour), args.min_trades), args.top)
     print_table("By weekday", filter_rows(summarize_trades(settled, bucket_weekday), args.min_trades), args.top)
     print_win_loss_profile(settled, args.min_trades)
+    print_confidence_diagnostics(settled)
 
     print("\n=== SKIP REASONS ===")
     skip_reasons: dict[str, int] = defaultdict(int)

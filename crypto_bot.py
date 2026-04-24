@@ -144,8 +144,8 @@ GAMMA_API         = "https://gamma-api.polymarket.com"
 CLOB_API          = "https://clob.polymarket.com"
 BINANCE_API       = "https://api.binance.com"
 
-ENTRY_SECONDS_MAX = _bot_settings.get("entry_max", 50)
-ENTRY_SECONDS_MIN = _bot_settings.get("entry_min", 10)
+ENTRY_SECONDS_MAX = _bot_settings.get("entry_max", 20)
+ENTRY_SECONDS_MIN = _bot_settings.get("entry_min", 15)
 PRICE_MIN         = {
     "BTC": _bot_settings.get("price_min_btc", 0.94),
     "ETH": _bot_settings.get("price_min_eth", 0.92),
