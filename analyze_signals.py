@@ -210,6 +210,57 @@ def filter_rows(rows: list[dict], min_trades: int) -> list[dict]:
     return [row for row in rows if row["count"] >= min_trades]
 
 
+def _metric_avg(trades: list[dict], key: str, scale: float = 1.0) -> float:
+    return avg([float(trade.get(key, 0) or 0) * scale for trade in trades])
+
+
+def print_win_loss_profile(settled: list[dict], min_bucket_trades: int) -> None:
+    print("\n=== LIVE TRADE BREAKDOWN ===")
+    if not settled:
+        print("No settled entered trades yet.")
+        return
+
+    winners = [trade for trade in settled if trade.get("won") is True]
+    losers = [trade for trade in settled if trade.get("won") is False]
+
+    def print_side(label: str, trades: list[dict]) -> None:
+        total_pnl = sum(float(trade.get("realized_pnl", 0) or 0) for trade in trades)
+        total_amount = sum(float(trade.get("amount", 0) or 0) for trade in trades)
+        roi = (total_pnl / total_amount * 100) if total_amount else 0.0
+        print(
+            f"{label:<7} trades={len(trades):<3} total={fmt_money(total_pnl):<10} roi={fmt_pct(roi):<7} "
+            f"conf={_metric_avg(trades, 'confidence', 100):.1f}% delta={_metric_avg(trades, 'delta'):.3f}% "
+            f"pm={_metric_avg(trades, 'pm'):.3f} time={_metric_avg(trades, 'time_left'):.1f}s"
+        )
+
+    print_side("Winners", winners)
+    print_side("Losers", losers)
+
+    dimensions = [
+        ("Confidence", lambda trade: bucket_confidence(float(trade.get("confidence", 0) or 0))),
+        ("Delta", lambda trade: bucket_delta(float(trade.get("delta", 0) or 0))),
+        ("PM price", lambda trade: bucket_pm(float(trade.get("pm", 0) or 0))),
+        ("Time left", lambda trade: bucket_time_left(float(trade.get("time_left", 0) or 0))),
+    ]
+
+    for title, key_fn in dimensions:
+        print(f"\n{title} buckets:")
+        rows = filter_rows(summarize_trades(settled, key_fn), min_bucket_trades)
+        if not rows:
+            print(f"  No buckets with >= {min_bucket_trades} settled trades")
+            continue
+
+        for row in rows:
+            winner_share = (row["wins"] / len(winners) * 100) if winners else 0.0
+            loser_share = (row["losses"] / len(losers) * 100) if losers else 0.0
+            edge = row["wins"] - row["losses"]
+            print(
+                f"  {row['key']:<12} wins={row['wins']:<3} losses={row['losses']:<3} "
+                f"win_rate={fmt_pct(row['win_rate']):<7} pnl={fmt_money(row['total_pnl']):<10} "
+                f"winner_mix={fmt_pct(winner_share):<7} loser_mix={fmt_pct(loser_share):<7} edge={edge:+d}"
+            )
+
+
 def parse_grid(raw: str, cast):
     values = []
     for chunk in raw.split(","):
@@ -464,6 +515,7 @@ def main() -> int:
     print_table("By expected ROI", filter_rows(summarize_trades(settled, bucket_expected_roi), args.min_trades), args.top)
     print_table("By UTC hour", filter_rows(summarize_trades(settled, bucket_hour), args.min_trades), args.top)
     print_table("By weekday", filter_rows(summarize_trades(settled, bucket_weekday), args.min_trades), args.top)
+    print_win_loss_profile(settled, args.min_trades)
 
     print("\n=== SKIP REASONS ===")
     skip_reasons: dict[str, int] = defaultdict(int)
