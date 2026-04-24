@@ -480,6 +480,7 @@ def get_default_settings():
         "amount": 5,
         "enabled_coins": ["BTC"],
         "daily_loss_limit": 10.0,
+        "daily_loss_limit_pct": 0.20,
         "dynamic_sizing": True,
         "dynamic_min_amount": 5.0,
         "dynamic_max_amount": 15.0,
@@ -886,6 +887,7 @@ with tab_settings:
         new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
         new_settings["amount"] = st.number_input("Ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
         new_settings["daily_loss_limit"] = st.number_input("Дневной стоп-лосс (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("daily_loss_limit", 15.0)), step=1.0)
+        new_settings["daily_loss_limit_pct"] = st.slider("Дневной стоп-лосс (% от банка)", min_value=0.0, max_value=0.50, value=float(settings.get("daily_loss_limit_pct", 0.0)), step=0.05, format="%.2f")
         new_settings["dynamic_sizing"] = st.checkbox("Динамический размер ставки", value=bool(settings.get("dynamic_sizing", True)))
         new_settings["entry_min"] = st.number_input("Вход мин (сек)", min_value=1, max_value=120, value=int(settings.get("entry_min", 10)), step=1)
         new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 30)), step=5)

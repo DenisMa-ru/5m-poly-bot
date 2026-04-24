@@ -637,6 +637,7 @@ class CryptoBot:
         self.bank_start = float(settings.get("bank", 100.0))
         self.bank_balance = self.bank_start
         self.daily_loss_limit = float(settings.get("daily_loss_limit", 15.0))
+        self.daily_loss_limit_pct = float(settings.get("daily_loss_limit_pct", 0.0) or 0.0)
         self.dynamic_sizing = bool(settings.get("dynamic_sizing", True))
         self.dynamic_min_amount = float(settings.get("dynamic_min_amount", 5.0))
         self.dynamic_max_amount = float(settings.get("dynamic_max_amount", 15.0))
@@ -661,7 +662,14 @@ class CryptoBot:
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | ATR: {ATR_MULTIPLIER}x")
-        log(f"Daily loss limit: ${self.daily_loss_limit:.2f}")
+        if self.daily_loss_limit_pct > 0:
+            effective_loss_limit = self._effective_daily_loss_limit()
+            log(
+                f"Daily loss limit: ${effective_loss_limit:.2f} "
+                f"({self.daily_loss_limit_pct*100:.0f}% of bank, floor ${self.daily_loss_limit:.2f})"
+            )
+        else:
+            log(f"Daily loss limit: ${self.daily_loss_limit:.2f}")
         if self.dynamic_sizing:
             log(
                 "Dynamic sizing: "
@@ -675,7 +683,14 @@ class CryptoBot:
     def _daily_loss_limit_hit(self) -> bool:
         """Stop new entries once the configured daily loss limit is reached."""
         realized_pnl = self.bank_balance - self.bank_start
-        return realized_pnl <= -abs(self.daily_loss_limit)
+        return realized_pnl <= -abs(self._effective_daily_loss_limit())
+
+    def _effective_daily_loss_limit(self) -> float:
+        """Return the active daily loss limit, optionally scaled by starting bank."""
+        base_limit = abs(self.daily_loss_limit)
+        if self.daily_loss_limit_pct > 0 and self.bank_start > 0:
+            return min(base_limit, self.bank_start * self.daily_loss_limit_pct)
+        return base_limit
 
     def _get_trade_amount(self) -> float:
         """Return the current trade amount based on bank growth and sizing rules."""
