@@ -163,8 +163,27 @@ def edge_proxy(signal: dict) -> float:
     return (confidence - pm) * 100
 
 
+def model_edge(signal: dict) -> float | None:
+    if signal.get("edge") is not None:
+        return float(signal.get("edge", 0) or 0) * 100
+
+    model_prob = signal.get("model_prob")
+    market_prob = signal.get("market_prob")
+    if model_prob is not None and market_prob is not None:
+        return (float(model_prob or 0) - float(market_prob or 0)) * 100
+
+    return None
+
+
+def effective_edge(signal: dict) -> float:
+    edge = model_edge(signal)
+    if edge is not None:
+        return edge
+    return edge_proxy(signal)
+
+
 def bucket_edge_proxy(signal: dict) -> str:
-    edge = edge_proxy(signal)
+    edge = effective_edge(signal)
     if edge < -60:
         return "<-60pp"
     if edge < -40:
@@ -385,9 +404,13 @@ def print_recent_skip_report(signals: list[dict], hours: float) -> None:
 
 
 def print_edge_proxy_report(signals: list[dict], min_trades: int) -> None:
-    print("\n=== EDGE PROXY REPORT ===")
-    print("edge_proxy = confidence - PM price (percentage points).")
-    print("Use as a diagnostic only: current confidence is signal strength, not calibrated win probability.")
+    print("\n=== EDGE REPORT ===")
+    if any(signal.get("edge") is not None for signal in signals):
+        print("edge = model_prob - market_prob (percentage points).")
+        print("Model probability is a conservative fair-probability estimate derived from signal strength.")
+    else:
+        print("edge_proxy = confidence - PM price (percentage points).")
+        print("Use as a diagnostic only: current confidence is signal strength, not calibrated win probability.")
 
     entered = [signal for signal in signals if signal.get("entered")]
     settled = [signal for signal in entered if signal.get("realized_pnl") is not None]
@@ -402,11 +425,13 @@ def print_edge_proxy_report(signals: list[dict], min_trades: int) -> None:
 
     for row in rows:
         matching = [signal for signal in settled if bucket_edge_proxy(signal) == row["key"]]
-        avg_edge = avg([edge_proxy(signal) for signal in matching])
+        avg_edge = avg([effective_edge(signal) for signal in matching])
+        avg_model_prob = avg([float(signal.get("model_prob", 0) or 0) * 100 for signal in matching if signal.get("model_prob") is not None])
+        avg_market_prob = avg([float(signal.get("market_prob", signal.get("pm", 0)) or 0) * 100 for signal in matching])
         print(
             f"  {row['key']:<12} trades={row['count']:<3} win_rate={fmt_pct(row['win_rate']):<7} "
             f"pnl={fmt_money(row['total_pnl']):<10} avg_edge={avg_edge:+.1f}pp "
-            f"pm={row['avg_pm']:.3f} conf={row['avg_conf']:.1f}%"
+            f"model={avg_model_prob:.1f}% market={avg_market_prob:.1f}%"
         )
 
 
@@ -636,6 +661,8 @@ def main() -> int:
     avg_conf = avg([float(s.get("confidence", 0)) * 100 for s in settled])
     avg_delta = avg([float(s.get("delta", 0)) for s in settled])
     avg_time = avg([float(s.get("time_left", 0)) for s in settled])
+    avg_model_prob = avg([float(s.get("model_prob", 0) or 0) * 100 for s in settled if s.get("model_prob") is not None])
+    avg_edge_pp = avg([effective_edge(s) for s in settled])
     win_rate = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
     roi = (total_pnl / total_amount * 100) if total_amount else 0.0
     expected_roi = (total_expected / total_amount * 100) if total_amount else 0.0
@@ -656,6 +683,9 @@ def main() -> int:
     print(f"avg delta: {avg_delta:.3f}%")
     print(f"avg pm:    {avg_pm:.3f}")
     print(f"avg time:  {avg_time:.1f}s")
+    if any(s.get("model_prob") is not None for s in settled):
+        print(f"avg model: {avg_model_prob:.1f}%")
+        print(f"avg edge:  {avg_edge_pp:+.1f}pp")
 
     print_table("By coin", filter_rows(summarize_trades(settled, lambda s: str(s.get("coin", "?"))), args.min_trades), args.top)
     print_table("By confidence", filter_rows(summarize_trades(settled, lambda s: bucket_confidence(float(s.get("confidence", 0)))), args.min_trades), args.top)

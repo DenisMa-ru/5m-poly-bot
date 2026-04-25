@@ -435,6 +435,22 @@ def analyze(symbol: str, window_ts: int) -> dict:
         "reason":        f"delta={delta_pct:.4f}% ({delta_dir}, w={delta_weight}) momentum={momentum_str} trend={trend_str}",
     }
 
+
+def estimate_model_prob(direction: str | None, market_side: str, confidence: float) -> float:
+    """Estimate fair probability for the current PM side from signal direction strength.
+
+    This is intentionally conservative and diagnostic-first. The current bot does
+    not have a calibrated probability model yet, so we map signal strength into
+    a narrow probability band around 50%.
+    """
+    confidence = max(0.0, min(float(confidence or 0.0), 1.0))
+    edge_span = 0.18 * confidence
+    if direction == market_side:
+        return min(0.5 + edge_span, 0.99)
+    if direction and direction != market_side:
+        return max(0.5 - edge_span, 0.01)
+    return 0.5
+
 # ─── POLYMARKET API ────────────────────────────────────────────────────────────
 def get_market_for_close(slug_prefix: str, close_ts: int) -> dict | None:
     start_ts = close_ts - 300
@@ -860,6 +876,13 @@ class CryptoBot:
         crypto    = market["crypto"]
         price_min = PRICE_MIN.get(crypto, 0.92)
         trade_amount = self._get_trade_amount()
+        market_prob = float(market["winner_price"] or 0)
+        model_prob = estimate_model_prob(
+            ta.get("direction"),
+            market["winner_side"],
+            ta.get("confidence", 0),
+        )
+        edge = model_prob - market_prob
 
         # Build signal data for saving
         signal_data = {
@@ -872,6 +895,10 @@ class CryptoBot:
             "pm": market["winner_price"],
             "delta": ta.get("delta_pct", 0),
             "confidence": ta.get("confidence", 0),
+            "score": ta.get("score", 0),
+            "model_prob": model_prob,
+            "market_prob": market_prob,
+            "edge": edge,
             "price": ta.get("current_price", 0),
             "time_left": seconds_left,
             "entered": False,
@@ -960,12 +987,20 @@ class CryptoBot:
         expected_pnl = (trade_amount / price) - trade_amount
         expected_pct = expected_pnl / trade_amount * 100
         crypto       = market["crypto"]
+        market_prob  = float(price or 0)
+        model_prob   = estimate_model_prob(
+            ta.get("direction"),
+            market["winner_side"],
+            ta.get("confidence", 0),
+        )
+        edge         = model_prob - market_prob
 
         log(f"🟢 ENTERING [{crypto} {market['winner_side']}] invested=${trade_amount:.2f} expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
         log(f"   {market['title'][:60]} | price={price:.3f} | time_left={seconds_left:.1f}s")
         log(f"   Price:{ta.get('current_price',0):.2f} | "
             f"delta:{ta.get('delta_pct',0):.4f}% | "
-            f"conf:{ta.get('confidence',0):.0%}")
+            f"conf:{ta.get('confidence',0):.0%} | "
+            f"model={model_prob:.3f} market={market_prob:.3f} edge={edge:+.3f}")
 
         if self.paper or self.dry_run:
             mode = "📄 PAPER" if self.paper else "🔍 DRY RUN"
@@ -988,6 +1023,10 @@ class CryptoBot:
                 "pnl_expected": expected_pnl,
                 "delta_pct":    ta.get("delta_pct", 0),
                 "confidence":   ta.get("confidence", 0),
+                "score":        ta.get("score", 0),
+                "model_prob":   model_prob,
+                "market_prob":  market_prob,
+                "edge":         edge,
                 "timestamp":    ts_str(),
             })
             log(f"   ✅ Trade #{len(self.trades)} recorded [{crypto}]")
