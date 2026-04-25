@@ -437,20 +437,38 @@ def analyze(symbol: str, window_ts: int) -> dict:
     }
 
 
-def estimate_model_prob(direction: str | None, market_side: str, confidence: float) -> float:
-    """Estimate fair probability for the current PM side from signal direction strength.
+def estimate_model_prob(
+    direction: str | None,
+    market_side: str,
+    confidence: float,
+    market_prob: float,
+    score: float = 0,
+) -> float:
+    """Estimate fair probability for the current PM side.
 
-    This is intentionally conservative and diagnostic-first. The current bot does
-    not have a calibrated probability model yet, so we map signal strength into
-    a narrow probability band around 50%.
+    Use the live PM price as the baseline prior and apply only a small,
+    conservative signal-based adjustment. This keeps the metric diagnostic-first
+    until we have enough live data to calibrate a real probability model.
     """
+    market_prob = max(0.01, min(float(market_prob or 0.0), 0.99))
     confidence = max(0.0, min(float(confidence or 0.0), 1.0))
-    edge_span = 0.18 * confidence
-    if direction == market_side:
-        return min(0.5 + edge_span, 0.99)
-    if direction and direction != market_side:
-        return max(0.5 - edge_span, 0.01)
-    return 0.5
+    score = abs(float(score or 0.0))
+
+    if not direction:
+        return market_prob
+
+    alignment = 1.0 if direction == market_side else -1.0
+
+    # Confidence already compresses score into 0..1. Score adds a mild boost so
+    # weak 1-point deltas do not get the same adjustment as stronger composites.
+    strength = min(1.0, (confidence * 0.75) + (min(score, 12.0) / 12.0 * 0.25))
+
+    # Stronger priced favorites leave less room for an informational edge, while
+    # near-even markets can tolerate a slightly larger adjustment.
+    headroom = max(0.015, 0.08 - abs(market_prob - 0.5) * 0.12)
+    adjustment = strength * headroom * alignment
+
+    return max(0.01, min(market_prob + adjustment, 0.99))
 
 # ─── POLYMARKET API ────────────────────────────────────────────────────────────
 def get_market_for_close(slug_prefix: str, close_ts: int) -> dict | None:
@@ -885,6 +903,8 @@ class CryptoBot:
             ta.get("direction"),
             market["winner_side"],
             ta.get("confidence", 0),
+            market_prob,
+            ta.get("score", 0),
         )
         edge = model_prob - market_prob
 
@@ -1006,6 +1026,8 @@ class CryptoBot:
             ta.get("direction"),
             market["winner_side"],
             ta.get("confidence", 0),
+            market_prob,
+            ta.get("score", 0),
         )
         edge         = model_prob - market_prob
 

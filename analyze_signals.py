@@ -407,7 +407,7 @@ def print_edge_proxy_report(signals: list[dict], min_trades: int) -> None:
     print("\n=== EDGE REPORT ===")
     if any(signal.get("edge") is not None for signal in signals):
         print("edge = model_prob - market_prob (percentage points).")
-        print("Model probability is a conservative fair-probability estimate derived from signal strength.")
+        print("Model probability uses the live PM price as a baseline prior plus a small signal-strength adjustment.")
     else:
         print("edge_proxy = confidence - PM price (percentage points).")
         print("Use as a diagnostic only: current confidence is signal strength, not calibrated win probability.")
