@@ -160,6 +160,7 @@ DELTA_WEAK        = 0.001
 DELTA_STRONG      = 0.002
 
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
+MIN_EDGE          = float(_bot_settings.get("min_edge", -0.05) or -0.05)
 
 ATR_PERIODS       = 5
 ATR_MULTIPLIER    = _bot_settings.get("atr_multiplier", 1.5)
@@ -684,7 +685,10 @@ class CryptoBot:
         log(f"Bank: ${self.bank_start:.2f} | Markets: {', '.join(ACTIVE_MARKETS.values())}")
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
-        log(f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | ATR: {ATR_MULTIPLIER}x")
+        log(
+            f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | "
+            f"Min edge: {MIN_EDGE:+.3f} | ATR: {ATR_MULTIPLIER}x"
+        )
         if self.daily_loss_limit_pct > 0:
             effective_loss_limit = self._effective_daily_loss_limit()
             log(
@@ -931,6 +935,16 @@ class CryptoBot:
         if confidence < MIN_CONFIDENCE:
             log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
             signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
+            save_signal(signal_data)
+            return
+
+        # Filter 2b: minimum edge vs current PM price.
+        if edge < MIN_EDGE:
+            log(
+                f"   [{crypto}] SKIP — edge {edge:+.3f} < {MIN_EDGE:+.3f} "
+                f"(model={model_prob:.3f} market={market_prob:.3f})"
+            )
+            signal_data["reason"] = f"edge {edge:+.3f} < {MIN_EDGE:+.3f}"
             save_signal(signal_data)
             return
 

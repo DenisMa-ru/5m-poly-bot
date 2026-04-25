@@ -494,6 +494,7 @@ def get_default_settings():
         "price_min_btc": 0.45,
         "price_min_eth": 0.70,
         "price_max": 0.70,
+        "min_edge": -0.05,
         "delta_skip": 0.0,
         "atr_multiplier": 1.5,
     }
@@ -897,6 +898,7 @@ with tab_settings:
         new_settings["price_min_eth"] = st.number_input("ETH мин цена", min_value=0.01, max_value=1.0, value=float(settings.get("price_min_eth", 0.70)), step=0.01, format="%.2f")
         new_settings["price_max"] = st.number_input("Макс цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_max", 0.70)), step=0.01, format="%.2f")
         new_settings["min_confidence"] = st.slider("Мин уверенность", min_value=0.0, max_value=1.0, value=float(settings.get("min_confidence", 0.0)), step=0.05)
+        new_settings["min_edge"] = st.number_input("Мин edge", min_value=-0.50, max_value=0.50, value=float(settings.get("min_edge", -0.05)), step=0.01, format="%.2f")
         new_settings["delta_skip"] = st.number_input("Мин дельта", min_value=0.0, max_value=0.01, value=float(settings.get("delta_skip", 0.0)), step=0.0001, format="%.4f")
         new_settings["atr_multiplier"] = st.number_input("ATR множитель", min_value=0.5, max_value=5.0, value=float(settings.get("atr_multiplier", 1.5)), step=0.1)
         new_settings["dynamic_min_amount"] = st.number_input("Мин ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_min_amount", 5.0)), step=1.0)
