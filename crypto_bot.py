@@ -161,6 +161,7 @@ DELTA_STRONG      = 0.002
 
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 MIN_EDGE          = float(_bot_settings.get("min_edge", -0.05) or -0.05)
+INDICATOR_CONFIRM_MIN = float(_bot_settings.get("indicator_confirm_min", 0.0) or 0.0)
 
 ATR_PERIODS       = 5
 ATR_MULTIPLIER    = _bot_settings.get("atr_multiplier", 1.5)
@@ -313,6 +314,119 @@ def analyze_micro_momentum(candles: list) -> tuple[float, str]:
         return max(weighted_sum * 3, -3), f"Down ({min(abs(weighted_sum) * 3, 3):.1f})"
     return 0.0, "Flat (0.0)"
 
+
+def _ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    ema_values = [values[0]]
+    for value in values[1:]:
+        ema_values.append((value * alpha) + (ema_values[-1] * (1.0 - alpha)))
+    return ema_values
+
+
+def _sma(values: list[float], period: int) -> float | None:
+    if len(values) < period:
+        return None
+    sample = values[-period:]
+    return sum(sample) / period
+
+
+def _stddev(values: list[float], period: int) -> float | None:
+    mean = _sma(values, period)
+    if mean is None:
+        return None
+    sample = values[-period:]
+    variance = sum((value - mean) ** 2 for value in sample) / period
+    return variance ** 0.5
+
+
+def analyze_indicator_confirm(candles: list, direction: str | None) -> tuple[float, str]:
+    """Return a signed 0..1 confirmation score from 1m indicators.
+
+    This is a diagnostic/confirm layer, not a calibrated probability model.
+    It uses only already-closed 1m candles fetched from Binance, so there is no
+    TradingView-style lookahead behavior.
+    """
+    if not direction or len(candles) < 26:
+        return 0.0, "insufficient 1m data"
+
+    closes = [float(c[4]) for c in candles]
+    highs = [float(c[2]) for c in candles]
+    lows = [float(c[3]) for c in candles]
+    last_close = closes[-1]
+
+    bull_score = 0.0
+    bear_score = 0.0
+    reasons = []
+
+    # MACD histogram sign.
+    ema12 = _ema(closes, 12)
+    ema26 = _ema(closes, 26)
+    macd_line = [a - b for a, b in zip(ema12, ema26)]
+    signal_line = _ema(macd_line, 9)
+    macd_hist = macd_line[-1] - signal_line[-1]
+    if macd_hist > 0:
+        bull_score += 0.30
+        reasons.append("macd+0.30")
+    elif macd_hist < 0:
+        bear_score += 0.30
+        reasons.append("macd-0.30")
+
+    # RSI overbought/oversold.
+    gains = []
+    losses = []
+    for prev_close, close in zip(closes[-15:-1], closes[-14:]):
+        change = close - prev_close
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+    avg_gain = sum(gains) / len(gains) if gains else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    if avg_loss == 0:
+        rsi = 100.0 if avg_gain > 0 else 50.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+    if rsi < 30:
+        bull_score += 0.25
+        reasons.append("rsi+0.25")
+    elif rsi > 70:
+        bear_score += 0.25
+        reasons.append("rsi-0.25")
+
+    # Stochastic oscillator.
+    period_high = max(highs[-14:])
+    period_low = min(lows[-14:])
+    if period_high > period_low:
+        stoch_k = ((last_close - period_low) / (period_high - period_low)) * 100.0
+        if stoch_k < 20:
+            bull_score += 0.25
+            reasons.append("stoch+0.25")
+        elif stoch_k > 80:
+            bear_score += 0.25
+            reasons.append("stoch-0.25")
+
+    # Bollinger touch.
+    bb_mid = _sma(closes, 20)
+    bb_std = _stddev(closes, 20)
+    if bb_mid is not None and bb_std is not None:
+        bb_up = bb_mid + (bb_std * 2.0)
+        bb_low = bb_mid - (bb_std * 2.0)
+        if last_close <= bb_low:
+            bull_score += 0.20
+            reasons.append("bb+0.20")
+        elif last_close >= bb_up:
+            bear_score += 0.20
+            reasons.append("bb-0.20")
+
+    if direction == "Up":
+        support = bull_score - bear_score
+    else:
+        support = bear_score - bull_score
+
+    confirm_score = max(-1.0, min(support, 1.0))
+    return confirm_score, ", ".join(reasons) if reasons else "neutral"
+
 def analyze(symbol: str, window_ts: int) -> dict:
     """
     Calculates a composite score based on:
@@ -383,7 +497,7 @@ def analyze(symbol: str, window_ts: int) -> dict:
     score = delta_weight if delta > 0 else -delta_weight
 
     # 2. Weighted micro momentum (last 5 x 1m candles)
-    candles = get_binance_candles(symbol, "1m", 6)
+    candles = get_binance_candles(symbol, "1m", 30)
     momentum_weight, momentum_desc = analyze_micro_momentum(candles)
     if (delta > 0 and momentum_weight > 0) or (delta < 0 and momentum_weight < 0):
         score += abs(momentum_weight)
@@ -421,11 +535,14 @@ def analyze(symbol: str, window_ts: int) -> dict:
     # delta 7 + momentum 3 + trend 2 = 12
     confidence = min(abs(score) / 12.0, 1.0)
     direction  = "Up" if score > 0 else "Down"
+    indicator_confirm, indicator_reason = analyze_indicator_confirm(candles, direction)
 
     return {
         "score":         score,
         "confidence":    confidence,
         "direction":     direction,
+        "indicator_confirm": indicator_confirm,
+        "indicator_reason": indicator_reason,
         "window_open":   window_open,
         "current_price": current_price,
         "delta_pct":     delta_pct,
@@ -705,7 +822,7 @@ class CryptoBot:
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(
             f"Min delta: {DELTA_SKIP*100:.3f}% | Min confidence: {MIN_CONFIDENCE*100:.0f}% | "
-            f"Min edge: {MIN_EDGE:+.3f} | ATR: {ATR_MULTIPLIER}x"
+            f"Min edge: {MIN_EDGE:+.3f} | 1m confirm: {INDICATOR_CONFIRM_MIN:+.2f} | ATR: {ATR_MULTIPLIER}x"
         )
         if self.daily_loss_limit_pct > 0:
             effective_loss_limit = self._effective_daily_loss_limit()
@@ -920,6 +1037,8 @@ class CryptoBot:
             "delta": ta.get("delta_pct", 0),
             "confidence": ta.get("confidence", 0),
             "score": ta.get("score", 0),
+            "indicator_confirm": ta.get("indicator_confirm", 0),
+            "indicator_reason": ta.get("indicator_reason", ""),
             "model_prob": model_prob,
             "market_prob": market_prob,
             "edge": edge,
@@ -965,6 +1084,17 @@ class CryptoBot:
                 f"(model={model_prob:.3f} market={market_prob:.3f})"
             )
             signal_data["reason"] = f"edge {edge:+.3f} < {MIN_EDGE:+.3f}"
+            save_signal(signal_data)
+            return
+
+        # Filter 2c: optional 1m indicator confirmation.
+        indicator_confirm = float(ta.get("indicator_confirm", 0) or 0)
+        if indicator_confirm < INDICATOR_CONFIRM_MIN:
+            log(
+                f"   [{crypto}] SKIP — 1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f} "
+                f"({ta.get('indicator_reason', 'neutral')})"
+            )
+            signal_data["reason"] = f"1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f}"
             save_signal(signal_data)
             return
 
@@ -1036,6 +1166,7 @@ class CryptoBot:
         log(f"   Price:{ta.get('current_price',0):.2f} | "
             f"delta:{ta.get('delta_pct',0):.4f}% | "
             f"conf:{ta.get('confidence',0):.0%} | "
+            f"1m={ta.get('indicator_confirm',0):+.2f} | "
             f"model={model_prob:.3f} market={market_prob:.3f} edge={edge:+.3f}")
 
         if self.paper or self.dry_run:
@@ -1060,6 +1191,7 @@ class CryptoBot:
                 "delta_pct":    ta.get("delta_pct", 0),
                 "confidence":   ta.get("confidence", 0),
                 "score":        ta.get("score", 0),
+                "indicator_confirm": ta.get("indicator_confirm", 0),
                 "model_prob":   model_prob,
                 "market_prob":  market_prob,
                 "edge":         edge,

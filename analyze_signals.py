@@ -663,6 +663,7 @@ def main() -> int:
     avg_time = avg([float(s.get("time_left", 0)) for s in settled])
     avg_model_prob = avg([float(s.get("model_prob", 0) or 0) * 100 for s in settled if s.get("model_prob") is not None])
     avg_edge_pp = avg([effective_edge(s) for s in settled])
+    avg_indicator_confirm = avg([float(s.get("indicator_confirm", 0) or 0) for s in settled if s.get("indicator_confirm") is not None])
     win_rate = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
     roi = (total_pnl / total_amount * 100) if total_amount else 0.0
     expected_roi = (total_expected / total_amount * 100) if total_amount else 0.0
@@ -686,10 +687,13 @@ def main() -> int:
     if any(s.get("model_prob") is not None for s in settled):
         print(f"avg model: {avg_model_prob:.1f}%")
         print(f"avg edge:  {avg_edge_pp:+.1f}pp")
+    if any(s.get("indicator_confirm") is not None for s in settled):
+        print(f"avg 1m:    {avg_indicator_confirm:+.2f}")
 
     print_table("By coin", filter_rows(summarize_trades(settled, lambda s: str(s.get("coin", "?"))), args.min_trades), args.top)
     print_table("By confidence", filter_rows(summarize_trades(settled, lambda s: bucket_confidence(float(s.get("confidence", 0)))), args.min_trades), args.top)
     print_table("By delta", filter_rows(summarize_trades(settled, lambda s: bucket_delta(float(s.get("delta", 0)))), args.min_trades), args.top)
+    print_table("By 1m confirm", filter_rows(summarize_trades(settled, bucket_indicator_confirm), args.min_trades), args.top)
     print_table("By time left", filter_rows(summarize_trades(settled, lambda s: bucket_time_left(float(s.get("time_left", 0)))), args.min_trades), args.top)
     print_table("By PM price", filter_rows(summarize_trades(settled, lambda s: bucket_pm(float(s.get("pm", 0)))), args.min_trades), args.top)
     print_table("By expected ROI", filter_rows(summarize_trades(settled, bucket_expected_roi), args.min_trades), args.top)
@@ -698,6 +702,7 @@ def main() -> int:
     print_win_loss_profile(settled, args.min_trades)
     print_confidence_diagnostics(settled)
     print_edge_proxy_report(signals, args.min_trades)
+    print_indicator_confirm_report(signals, args.min_trades)
     print_recent_skip_report(signals, args.recent_hours)
 
     print("\n=== SKIP REASONS ===")
@@ -710,6 +715,7 @@ def main() -> int:
     print("\n=== QUICK TAKEAWAYS ===")
     confidence_rows = filter_rows(summarize_trades(settled, lambda s: bucket_confidence(float(s.get("confidence", 0)))), args.min_trades)
     delta_rows = filter_rows(summarize_trades(settled, lambda s: bucket_delta(float(s.get("delta", 0)))), args.min_trades)
+    confirm_rows = filter_rows(summarize_trades(settled, bucket_indicator_confirm), args.min_trades)
     time_rows = filter_rows(summarize_trades(settled, lambda s: bucket_time_left(float(s.get("time_left", 0)))), args.min_trades)
     pm_rows = filter_rows(summarize_trades(settled, lambda s: bucket_pm(float(s.get("pm", 0)))), args.min_trades)
     roi_rows = filter_rows(summarize_trades(settled, bucket_expected_roi), args.min_trades)
@@ -721,6 +727,9 @@ def main() -> int:
     if delta_rows:
         print(f"  weakest delta bucket: {delta_rows[0]['key']} {fmt_money(delta_rows[0]['total_pnl'])}")
         print(f"  strongest delta bucket: {delta_rows[-1]['key']} {fmt_money(delta_rows[-1]['total_pnl'])}")
+    if confirm_rows:
+        print(f"  weakest 1m confirm bucket: {confirm_rows[0]['key']} {fmt_money(confirm_rows[0]['total_pnl'])}")
+        print(f"  strongest 1m confirm bucket: {confirm_rows[-1]['key']} {fmt_money(confirm_rows[-1]['total_pnl'])}")
     if time_rows:
         print(f"  worst timing bucket: {time_rows[0]['key']} {fmt_money(time_rows[0]['total_pnl'])}")
         print(f"  best timing bucket: {time_rows[-1]['key']} {fmt_money(time_rows[-1]['total_pnl'])}")
