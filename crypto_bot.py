@@ -164,6 +164,12 @@ STRONG_OVERPRICE_CONFIDENCE_MIN = float(_bot_settings.get("strong_overprice_conf
 STRONG_OVERPRICE_EDGE_MIN = float(_bot_settings.get("strong_overprice_edge_min", -0.03) or -0.03)
 STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN = float(_bot_settings.get("strong_overprice_indicator_confirm_min", -0.05) or -0.05)
 STRONG_OVERPRICE_TIME_LEFT_MIN = float(_bot_settings.get("strong_overprice_time_left_min", 18) or 18)
+NORMAL_ZONE_MIN = float(_bot_settings.get("normal_zone_min", 0.60) or 0.60)
+NORMAL_ZONE_MAX = float(_bot_settings.get("normal_zone_max", 0.70) or 0.70)
+NORMAL_ZONE_DELTA_MIN = float(_bot_settings.get("normal_zone_delta_min_pct", 0.010) or 0.010)
+NORMAL_ZONE_TIME_LEFT_MIN = float(_bot_settings.get("normal_zone_time_left_min", 18) or 18)
+NORMAL_ZONE_EDGE_MIN = float(_bot_settings.get("normal_zone_edge_min", -0.05) or -0.05)
+NORMAL_ZONE_INDICATOR_CONFIRM_MIN = float(_bot_settings.get("normal_zone_indicator_confirm_min", -0.05) or -0.05)
 
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 MIN_EDGE          = float(_bot_settings.get("min_edge", -0.05) or -0.05)
@@ -1242,15 +1248,31 @@ class CryptoBot:
                 f"but strong setup override passed"
             )
 
+        normal_zone_live_pass = (
+            pm_price >= NORMAL_ZONE_MIN
+            and pm_price <= NORMAL_ZONE_MAX
+            and delta_pct >= NORMAL_ZONE_DELTA_MIN
+            and indicator_confirm >= NORMAL_ZONE_INDICATOR_CONFIRM_MIN
+            and edge >= NORMAL_ZONE_EDGE_MIN
+            and trend_aligned
+            and seconds_left >= NORMAL_ZONE_TIME_LEFT_MIN
+        )
+        if normal_zone_live_pass:
+            log(
+                f"   [{crypto}] ALLOW — normal zone live pass "
+                f"(pm={pm_price:.3f} delta={delta_pct:.4f}% edge={edge:+.3f} "
+                f"1m={indicator_confirm:+.2f} time_left={seconds_left:.1f}s)"
+            )
+
         # Filter 2: minimum confidence
-        if confidence < MIN_CONFIDENCE:
+        if confidence < MIN_CONFIDENCE and not normal_zone_live_pass:
             log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
             signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
             save_signal(signal_data)
             return
 
         # Filter 2b: minimum edge vs current PM price.
-        if edge < MIN_EDGE:
+        if edge < MIN_EDGE and not normal_zone_live_pass:
             log(
                 f"   [{crypto}] SKIP — edge {edge:+.3f} < {MIN_EDGE:+.3f} "
                 f"(model={model_prob:.3f} market={market_prob:.3f})"
@@ -1260,7 +1282,7 @@ class CryptoBot:
             return
 
         # Filter 2c: optional 1m indicator confirmation.
-        if indicator_confirm < INDICATOR_CONFIRM_MIN:
+        if indicator_confirm < INDICATOR_CONFIRM_MIN and not normal_zone_live_pass:
             log(
                 f"   [{crypto}] SKIP — 1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f} "
                 f"({ta.get('indicator_reason', 'neutral')})"
