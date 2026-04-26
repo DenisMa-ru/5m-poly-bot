@@ -232,6 +232,10 @@ def signal_tier_label(signal: dict) -> str:
     return str(signal.get("signal_tier", "unknown") or "unknown")
 
 
+def reason_label(signal: dict) -> str:
+    return str(signal.get("reason", "other") or "other")
+
+
 def combo_bucket(signal: dict, *parts) -> str:
     return " | ".join(part(signal) for part in parts)
 
@@ -552,6 +556,49 @@ def print_counterfactual_skip_report(signals: list[dict], min_trades: int) -> No
         )
 
 
+def print_skip_reason_counterfactual_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== SKIP REASON COUNTERFACTUALS ===")
+    skipped = [signal for signal in signals if not signal.get("entered")]
+    resolved = [signal for signal in skipped if signal.get("pnl_if_entered") is not None]
+    if not resolved:
+        print("No resolved skipped signals with pnl_if_entered yet.")
+        return
+
+    normalized = [
+        {
+            **signal,
+            "realized_pnl": float(signal.get("pnl_if_entered", 0) or 0),
+            "won": float(signal.get("pnl_if_entered", 0) or 0) > 0,
+        }
+        for signal in resolved
+    ]
+
+    reason_rows = filter_rows(summarize_trades(normalized, reason_label), min_trades)
+    print_table("By skip reason", reason_rows, top)
+
+    combo_rows = filter_rows(
+        summarize_trades(
+            normalized,
+            lambda signal: combo_bucket(signal, reason_label, signal_tier_label),
+        ),
+        min_trades,
+    )
+    print_table("By skip reason x tier", combo_rows, top)
+
+    trend_rows = filter_rows(
+        summarize_trades(
+            normalized,
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: "trend_conflict" if s.get("trend_conflict") else "trend_ok",
+                reason_label,
+            ),
+        ),
+        min_trades,
+    )
+    print_table("By trend flag x skip reason", trend_rows, top)
+
+
 def parse_grid(raw: str, cast):
     values = []
     for chunk in raw.split(","):
@@ -822,6 +869,7 @@ def main() -> int:
     print_indicator_confirm_report(signals, args.min_trades)
     print_combo_report(signals, args.min_trades, args.top)
     print_counterfactual_skip_report(signals, args.min_trades)
+    print_skip_reason_counterfactual_report(signals, args.min_trades, args.top)
     print_recent_skip_report(signals, args.recent_hours)
 
     print("\n=== SKIP REASONS ===")
