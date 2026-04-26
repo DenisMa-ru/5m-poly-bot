@@ -151,7 +151,7 @@ PRICE_MIN         = {
     "ETH": _bot_settings.get("price_min_eth", 0.92),
 }
 PRICE_MAX         = _bot_settings.get("price_max", 0.99)
-PRICE_MAX_STRONG  = float(_bot_settings.get("price_max_strong", max(float(PRICE_MAX), 0.74)) or max(float(PRICE_MAX), 0.74))
+PRICE_MAX_STRONG  = float(_bot_settings.get("price_max_strong", max(float(PRICE_MAX), 0.76)) or max(float(PRICE_MAX), 0.76))
 
 WAKE_BEFORE       = 65
 POLL_INTERVAL     = 3
@@ -160,8 +160,9 @@ DELTA_SKIP        = _bot_settings.get("delta_skip", 0.0005)
 DELTA_WEAK        = 0.001
 DELTA_STRONG      = 0.002
 STRONG_OVERPRICE_DELTA_MIN = float(_bot_settings.get("strong_overprice_delta_min_pct", 0.010) or 0.010)
-STRONG_OVERPRICE_CONFIDENCE_MIN = float(_bot_settings.get("strong_overprice_confidence_min", 0.03) or 0.03)
-STRONG_OVERPRICE_EDGE_MIN = float(_bot_settings.get("strong_overprice_edge_min", -0.02) or -0.02)
+STRONG_OVERPRICE_CONFIDENCE_MIN = float(_bot_settings.get("strong_overprice_confidence_min", 0.02) or 0.02)
+STRONG_OVERPRICE_EDGE_MIN = float(_bot_settings.get("strong_overprice_edge_min", -0.03) or -0.03)
+STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN = float(_bot_settings.get("strong_overprice_indicator_confirm_min", -0.05) or -0.05)
 STRONG_OVERPRICE_TIME_LEFT_MIN = float(_bot_settings.get("strong_overprice_time_left_min", 18) or 18)
 
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
@@ -1199,7 +1200,7 @@ class CryptoBot:
             pm_price <= PRICE_MAX_STRONG
             and delta_pct >= STRONG_OVERPRICE_DELTA_MIN
             and confidence >= STRONG_OVERPRICE_CONFIDENCE_MIN
-            and indicator_confirm >= 0.0
+            and indicator_confirm >= STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN
             and edge >= STRONG_OVERPRICE_EDGE_MIN
             and trend_aligned
             and seconds_left >= STRONG_OVERPRICE_TIME_LEFT_MIN
@@ -1210,6 +1211,7 @@ class CryptoBot:
                 f'   [{crypto}] SKIP — PM price {pm_price:.3f} > {PRICE_MAX} '
                 f'(minimal upside; strong override requires delta>={STRONG_OVERPRICE_DELTA_MIN:.3f}% '
                 f'conf>={STRONG_OVERPRICE_CONFIDENCE_MIN:.0%} edge>={STRONG_OVERPRICE_EDGE_MIN:+.3f} '
+                f'1m>={STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN:+.2f} '
                 f'time_left>={STRONG_OVERPRICE_TIME_LEFT_MIN:.0f}s trend_aligned)'
             )
             signal_data["reason"] = f"PM price > {ceiling:.2f}"
