@@ -460,12 +460,26 @@ def classify_signal_tier(
     if (
         pm_price >= 0.58
         and pm_price <= 0.70
-        and delta_pct >= 0.010
-        and confidence >= 0.05
-        and indicator_confirm >= 0.05
-        and edge >= -0.03
+        and delta_pct >= 0.008
+        and confidence >= 0.03
+        and indicator_confirm >= 0.0
+        and edge >= -0.04
     ):
         return "candidate", "usable but not elite"
+    if (
+        pm_price >= 0.60
+        and pm_price <= 0.70
+        and delta_pct >= 0.012
+        and indicator_confirm > 0
+    ):
+        return "candidate", "pm/delta ok but weak confidence"
+    if (
+        pm_price >= 0.58
+        and pm_price <= 0.68
+        and confidence >= 0.05
+        and edge >= -0.02
+    ):
+        return "candidate", "pm/conf ok but weak confirm"
     return "observe", "weak combined setup"
 
 def analyze(symbol: str, window_ts: int) -> dict:

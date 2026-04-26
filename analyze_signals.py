@@ -529,6 +529,27 @@ def print_combo_report(signals: list[dict], min_trades: int, top: int) -> None:
         print_table(title, rows, top)
 
 
+def print_signal_tier_reason_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== SIGNAL TIER REASONS ===")
+    skipped = [signal for signal in signals if not signal.get("entered")]
+    resolved = [signal for signal in skipped if signal.get("pnl_if_entered") is not None]
+    if not resolved:
+        print("No resolved skipped signals with pnl_if_entered yet.")
+        return
+
+    normalized = [
+        {
+            **signal,
+            "realized_pnl": float(signal.get("pnl_if_entered", 0) or 0),
+            "won": float(signal.get("pnl_if_entered", 0) or 0) > 0,
+        }
+        for signal in resolved
+    ]
+
+    rows = filter_rows(summarize_trades(normalized, signal_tier_reason_label), min_trades)
+    print_table("By signal_tier_reason", rows, top)
+
+
 def print_counterfactual_skip_report(signals: list[dict], min_trades: int) -> None:
     print("\n=== SKIPPED SIGNAL COUNTERFACTUALS ===")
     skipped = [signal for signal in signals if not signal.get("entered")]
@@ -876,6 +897,7 @@ def main() -> int:
     print_edge_proxy_report(signals, args.min_trades)
     print_indicator_confirm_report(signals, args.min_trades)
     print_combo_report(signals, args.min_trades, args.top)
+    print_signal_tier_reason_report(signals, args.min_trades, args.top)
     print_counterfactual_skip_report(signals, args.min_trades)
     print_skip_reason_counterfactual_report(signals, args.min_trades, args.top)
     print_recent_skip_report(signals, args.recent_hours)
