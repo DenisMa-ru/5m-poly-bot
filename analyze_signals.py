@@ -241,6 +241,11 @@ def indicator_reason_label(signal: dict) -> str:
     return reason if reason else "none"
 
 
+def in_normal_pm_zone(signal: dict) -> bool:
+    pm = float(signal.get("pm", 0) or 0)
+    return 0.58 <= pm <= 0.70
+
+
 def reason_label(signal: dict) -> str:
     return str(signal.get("reason", "other") or "other")
 
@@ -530,6 +535,69 @@ def print_indicator_reason_report(signals: list[dict], min_trades: int, top: int
         min_trades,
     )
     print_table("By PM x indicator_reason", pm_reason_rows, top)
+
+
+def print_normal_pm_zone_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== NORMAL PM ZONE ONLY (0.58-0.70) ===")
+    skipped = [signal for signal in signals if not signal.get("entered")]
+    resolved = [signal for signal in skipped if signal.get("pnl_if_entered") is not None and in_normal_pm_zone(signal)]
+    if not resolved:
+        print("No resolved skipped signals in PM 0.58-0.70 yet.")
+        return
+
+    normalized = [
+        {
+            **signal,
+            "realized_pnl": float(signal.get("pnl_if_entered", 0) or 0),
+            "won": float(signal.get("pnl_if_entered", 0) or 0) > 0,
+        }
+        for signal in resolved
+    ]
+
+    reports = [
+        ("By indicator_reason", indicator_reason_label),
+        ("By delta", lambda signal: bucket_delta(float(signal.get("delta", 0) or 0))),
+        ("By trend_conflict", lambda signal: "trend_conflict" if signal.get("trend_conflict") else "trend_ok"),
+        ("By signal_tier_reason", signal_tier_reason_label),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(normalized, key_fn), min_trades)
+        print_table(title, rows, top)
+
+
+def print_execution_failed_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== EXECUTION FAILED PROFILE ===")
+    failed = [signal for signal in signals if str(signal.get("reason", "")) == "execution failed"]
+    resolved = [signal for signal in failed if signal.get("pnl_if_entered") is not None]
+    if not resolved:
+        print("No resolved execution-failed signals yet.")
+        return
+
+    normalized = [
+        {
+            **signal,
+            "realized_pnl": float(signal.get("pnl_if_entered", 0) or 0),
+            "won": float(signal.get("pnl_if_entered", 0) or 0) > 0,
+        }
+        for signal in resolved
+    ]
+
+    total = sum(float(signal.get("realized_pnl", 0) or 0) for signal in normalized)
+    wins = sum(1 for signal in normalized if signal.get("won") is True)
+    losses = sum(1 for signal in normalized if signal.get("won") is False)
+    print(f"trades={len(normalized)} | would_win={wins} | would_lose={losses} | total_if_entered={fmt_money(total)}")
+
+    reports = [
+        ("By PM price", lambda signal: bucket_pm(float(signal.get("pm", 0) or 0))),
+        ("By delta", lambda signal: bucket_delta(float(signal.get("delta", 0) or 0))),
+        ("By indicator_reason", indicator_reason_label),
+        ("By time left", lambda signal: bucket_time_left(float(signal.get("time_left", 0) or 0))),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(normalized, key_fn), min_trades)
+        print_table(title, rows, top)
 
 
 def print_combo_report(signals: list[dict], min_trades: int, top: int) -> None:
@@ -932,6 +1000,8 @@ def main() -> int:
     print_edge_proxy_report(signals, args.min_trades)
     print_indicator_confirm_report(signals, args.min_trades)
     print_indicator_reason_report(signals, args.min_trades, args.top)
+    print_normal_pm_zone_report(signals, args.min_trades, args.top)
+    print_execution_failed_report(signals, args.min_trades, args.top)
     print_combo_report(signals, args.min_trades, args.top)
     print_signal_tier_reason_report(signals, args.min_trades, args.top)
     print_counterfactual_skip_report(signals, args.min_trades)
