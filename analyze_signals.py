@@ -236,6 +236,11 @@ def signal_tier_reason_label(signal: dict) -> str:
     return str(signal.get("signal_tier_reason", "unknown") or "unknown")
 
 
+def indicator_reason_label(signal: dict) -> str:
+    reason = str(signal.get("indicator_reason", "") or "")
+    return reason if reason else "none"
+
+
 def reason_label(signal: dict) -> str:
     return str(signal.get("reason", "other") or "other")
 
@@ -495,6 +500,36 @@ def print_indicator_confirm_report(signals: list[dict], min_trades: int) -> None
             f"pnl={fmt_money(row['total_pnl']):<10} avg_1m={avg_confirm:+.2f} "
             f"conf={avg_conf:.1f}% pm={avg_pm:.3f}"
         )
+
+
+def print_indicator_reason_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== INDICATOR REASONS ===")
+    skipped = [signal for signal in signals if not signal.get("entered")]
+    resolved = [signal for signal in skipped if signal.get("pnl_if_entered") is not None]
+    if not resolved:
+        print("No resolved skipped signals with pnl_if_entered yet.")
+        return
+
+    normalized = [
+        {
+            **signal,
+            "realized_pnl": float(signal.get("pnl_if_entered", 0) or 0),
+            "won": float(signal.get("pnl_if_entered", 0) or 0) > 0,
+        }
+        for signal in resolved
+    ]
+
+    reason_rows = filter_rows(summarize_trades(normalized, indicator_reason_label), min_trades)
+    print_table("By indicator_reason", reason_rows, top)
+
+    pm_reason_rows = filter_rows(
+        summarize_trades(
+            normalized,
+            lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), indicator_reason_label),
+        ),
+        min_trades,
+    )
+    print_table("By PM x indicator_reason", pm_reason_rows, top)
 
 
 def print_combo_report(signals: list[dict], min_trades: int, top: int) -> None:
@@ -896,6 +931,7 @@ def main() -> int:
     print_confidence_diagnostics(settled)
     print_edge_proxy_report(signals, args.min_trades)
     print_indicator_confirm_report(signals, args.min_trades)
+    print_indicator_reason_report(signals, args.min_trades, args.top)
     print_combo_report(signals, args.min_trades, args.top)
     print_signal_tier_reason_report(signals, args.min_trades, args.top)
     print_counterfactual_skip_report(signals, args.min_trades)
