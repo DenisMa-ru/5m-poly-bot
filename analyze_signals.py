@@ -201,6 +201,23 @@ def bucket_edge_proxy(signal: dict) -> str:
     return ">=10pp"
 
 
+def bucket_indicator_confirm(signal: dict) -> str:
+    confirm = float(signal.get("indicator_confirm", 0) or 0)
+    if confirm < -0.50:
+        return "<-0.50"
+    if confirm < -0.20:
+        return "-0.50..-0.20"
+    if confirm < 0.0:
+        return "-0.20..0.00"
+    if confirm < 0.10:
+        return "0.00..0.09"
+    if confirm < 0.25:
+        return "0.10..0.24"
+    if confirm < 0.50:
+        return "0.25..0.49"
+    return ">=0.50"
+
+
 def bucket_hour(signal: dict) -> str:
     dt = parse_ts(str(signal.get("timestamp", "")))
     return dt.strftime("%H:00 UTC") if dt else "unknown"
