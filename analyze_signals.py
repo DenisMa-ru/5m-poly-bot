@@ -452,6 +452,35 @@ def print_edge_proxy_report(signals: list[dict], min_trades: int) -> None:
         )
 
 
+def print_indicator_confirm_report(signals: list[dict], min_trades: int) -> None:
+    print("\n=== 1M CONFIRM REPORT ===")
+    entered = [signal for signal in signals if signal.get("entered")]
+    settled = [signal for signal in entered if signal.get("realized_pnl") is not None]
+    if not settled:
+        print("No settled entered trades to analyze.")
+        return
+
+    if not any(signal.get("indicator_confirm") is not None for signal in settled):
+        print("No settled trades contain 1m confirm data yet.")
+        return
+
+    rows = filter_rows(summarize_trades(settled, bucket_indicator_confirm), min_trades)
+    if not rows:
+        print(f"No 1m confirm buckets with >= {min_trades} settled trades")
+        return
+
+    for row in rows:
+        matching = [signal for signal in settled if bucket_indicator_confirm(signal) == row["key"]]
+        avg_confirm = avg([float(signal.get("indicator_confirm", 0) or 0) for signal in matching])
+        avg_conf = avg([float(signal.get("confidence", 0) or 0) * 100 for signal in matching])
+        avg_pm = avg([float(signal.get("pm", 0) or 0) for signal in matching])
+        print(
+            f"  {row['key']:<12} trades={row['count']:<3} win_rate={fmt_pct(row['win_rate']):<7} "
+            f"pnl={fmt_money(row['total_pnl']):<10} avg_1m={avg_confirm:+.2f} "
+            f"conf={avg_conf:.1f}% pm={avg_pm:.3f}"
+        )
+
+
 def parse_grid(raw: str, cast):
     values = []
     for chunk in raw.split(","):
