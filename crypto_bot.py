@@ -151,6 +151,7 @@ PRICE_MIN         = {
     "ETH": _bot_settings.get("price_min_eth", 0.92),
 }
 PRICE_MAX         = _bot_settings.get("price_max", 0.99)
+PRICE_MAX_STRONG  = float(_bot_settings.get("price_max_strong", max(float(PRICE_MAX), 0.74)) or max(float(PRICE_MAX), 0.74))
 
 WAKE_BEFORE       = 65
 POLL_INTERVAL     = 3
@@ -158,6 +159,10 @@ POLL_INTERVAL     = 3
 DELTA_SKIP        = _bot_settings.get("delta_skip", 0.0005)
 DELTA_WEAK        = 0.001
 DELTA_STRONG      = 0.002
+STRONG_OVERPRICE_DELTA_MIN = float(_bot_settings.get("strong_overprice_delta_min_pct", 0.010) or 0.010)
+STRONG_OVERPRICE_CONFIDENCE_MIN = float(_bot_settings.get("strong_overprice_confidence_min", 0.03) or 0.03)
+STRONG_OVERPRICE_EDGE_MIN = float(_bot_settings.get("strong_overprice_edge_min", -0.02) or -0.02)
+STRONG_OVERPRICE_TIME_LEFT_MIN = float(_bot_settings.get("strong_overprice_time_left_min", 18) or 18)
 
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 MIN_EDGE          = float(_bot_settings.get("min_edge", -0.05) or -0.05)
@@ -1185,15 +1190,38 @@ class CryptoBot:
             save_signal(signal_data)
             return
 
-        # Filter 1b: maximum price
-        if market["winner_price"] > PRICE_MAX:
-            log(f'   [{crypto}] SKIP — PM price {market["winner_price"]:.3f} > {PRICE_MAX} (minimal upside)')
-            signal_data["reason"] = f"PM price > {PRICE_MAX}"
+        # Filter 1b: maximum price, with a narrow exception for stronger setups.
+        confidence = float(ta.get("confidence", 0) or 0)
+        indicator_confirm = float(ta.get("indicator_confirm", 0) or 0)
+        delta_pct = float(ta.get("delta_pct", 0) or 0)
+        pm_price = float(market["winner_price"] or 0)
+        strong_overprice_ok = (
+            pm_price <= PRICE_MAX_STRONG
+            and delta_pct >= STRONG_OVERPRICE_DELTA_MIN
+            and confidence >= STRONG_OVERPRICE_CONFIDENCE_MIN
+            and indicator_confirm >= 0.0
+            and edge >= STRONG_OVERPRICE_EDGE_MIN
+            and trend_aligned
+            and seconds_left >= STRONG_OVERPRICE_TIME_LEFT_MIN
+        )
+        if pm_price > PRICE_MAX and not strong_overprice_ok:
+            ceiling = PRICE_MAX_STRONG if pm_price <= PRICE_MAX_STRONG else PRICE_MAX
+            log(
+                f'   [{crypto}] SKIP — PM price {pm_price:.3f} > {PRICE_MAX} '
+                f'(minimal upside; strong override requires delta>={STRONG_OVERPRICE_DELTA_MIN:.3f}% '
+                f'conf>={STRONG_OVERPRICE_CONFIDENCE_MIN:.0%} edge>={STRONG_OVERPRICE_EDGE_MIN:+.3f} '
+                f'time_left>={STRONG_OVERPRICE_TIME_LEFT_MIN:.0f}s trend_aligned)'
+            )
+            signal_data["reason"] = f"PM price > {ceiling:.2f}"
             save_signal(signal_data)
             return
+        if pm_price > PRICE_MAX:
+            log(
+                f"   [{crypto}] ALLOW — PM price {pm_price:.3f} above base max {PRICE_MAX} "
+                f"but strong setup override passed"
+            )
 
         # Filter 2: minimum confidence
-        confidence = ta.get("confidence", 0)
         if confidence < MIN_CONFIDENCE:
             log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
             signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
@@ -1211,7 +1239,6 @@ class CryptoBot:
             return
 
         # Filter 2c: optional 1m indicator confirmation.
-        indicator_confirm = float(ta.get("indicator_confirm", 0) or 0)
         if indicator_confirm < INDICATOR_CONFIRM_MIN:
             log(
                 f"   [{crypto}] SKIP — 1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f} "
@@ -1231,7 +1258,6 @@ class CryptoBot:
             return
 
         # Filter 4: minimum delta
-        delta_pct = ta.get("delta_pct", 0)
         if delta_pct < DELTA_SKIP * 100:
             log(f"   [{crypto}] SKIP — delta {delta_pct:.4f}% too small")
             signal_data["reason"] = f"delta {delta_pct:.4f}% too small"
