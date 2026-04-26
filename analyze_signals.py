@@ -589,6 +589,15 @@ def print_execution_failed_report(signals: list[dict], min_trades: int, top: int
     print(f"trades={len(normalized)} | would_win={wins} | would_lose={losses} | total_if_entered={fmt_money(total)}")
 
     reports = [
+        ("By failure type", lambda signal: str(signal.get("execution_failure_type", "") or "unknown")),
+        (
+            "By failure type x order status",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: str(s.get("execution_failure_type", "") or "unknown"),
+                lambda s: str(s.get("execution_order_status", "") or "none"),
+            ),
+        ),
         ("By PM price", lambda signal: bucket_pm(float(signal.get("pm", 0) or 0))),
         ("By delta", lambda signal: bucket_delta(float(signal.get("delta", 0) or 0))),
         ("By indicator_reason", indicator_reason_label),

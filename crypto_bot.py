@@ -716,16 +716,29 @@ def get_clob_price(token_id: str) -> float:
         return 0.0
 
 def execute_buy(token_id: str, amount_usdc: float, price: float,
-                private_key: str, proxy_wallet: str) -> bool:
+                private_key: str, proxy_wallet: str) -> dict:
+    result = {
+        "ok": False,
+        "failure_type": "unknown",
+        "detail": "",
+        "order_status": "",
+        "order_id": "",
+        "size": None,
+        "taker_price": None,
+    }
     try:
         import importlib
 
         if amount_usdc <= 0:
-            log("   ❌ BUY failed: amount_usdc must be > 0")
-            return False
+            result["failure_type"] = "invalid_amount"
+            result["detail"] = f"amount_usdc must be > 0 (got {amount_usdc})"
+            log(f"   ❌ BUY failed [{result['failure_type']}]: {result['detail']}")
+            return result
         if price <= 0:
-            log("   ❌ BUY failed: price must be > 0")
-            return False
+            result["failure_type"] = "invalid_price"
+            result["detail"] = f"price must be > 0 (got {price})"
+            log(f"   ❌ BUY failed [{result['failure_type']}]: {result['detail']}")
+            return result
 
         client_module = importlib.import_module("py_clob_client.client")
         clob_types_module = importlib.import_module("py_clob_client.clob_types")
@@ -763,10 +776,14 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         else:
             taker_price = min(round(price + 0.01, 2), 0.99)  # multiple of 0.01, max 0.99
             size = round(amount_usdc / price, 2)
+            result["taker_price"] = taker_price
+            result["size"] = size
 
             if size <= 0:
-                log("   ❌ BUY failed: computed order size must be > 0")
-                return False
+                result["failure_type"] = "invalid_size"
+                result["detail"] = f"computed order size must be > 0 (got {size})"
+                log(f"   ❌ BUY failed [{result['failure_type']}]: {result['detail']}")
+                return result
 
             resp = client.create_and_post_order(OrderArgs(
                 token_id=token_id,
@@ -777,15 +794,26 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
 
         status = resp.get("status") if isinstance(resp, dict) else "ok"
         order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+        result["order_status"] = str(status or "")
+        result["order_id"] = str(order_id or "")
         if status == "matched":
-            log(f"   ✅ BUY OK: {status} | order {order_id[:20]}...")
-            return True
+            result["ok"] = True
+            result["failure_type"] = ""
+            log(f"   ✅ BUY OK: {status} | order {str(order_id)[:20]}...")
+            return result
 
-        log(f"   ❌ BUY not filled immediately: {status} | order {order_id[:20]}...")
-        return False
+        result["failure_type"] = "not_filled_immediately"
+        result["detail"] = f"status={status}"
+        log(
+            f"   ❌ BUY not filled immediately [{result['failure_type']}]: "
+            f"{status} | order {str(order_id)[:20]}..."
+        )
+        return result
     except Exception as e:
-        log(f"   ❌ BUY failed: {e}")
-        return False
+        result["failure_type"] = "exception"
+        result["detail"] = str(e)
+        log(f"   ❌ BUY failed [{result['failure_type']}]: {e}")
+        return result
 
 
 def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
@@ -1138,6 +1166,10 @@ class CryptoBot:
             "entered": False,
             "reason": "",
             "amount": trade_amount,
+            "execution_failure_type": "",
+            "execution_failure_detail": "",
+            "execution_order_status": "",
+            "execution_order_id": "",
         }
 
         if self._daily_loss_limit_hit():
@@ -1225,8 +1257,15 @@ class CryptoBot:
         expected_pnl = (trade_amount / market["winner_price"]) - trade_amount
         signal_data["pnl_expected"] = expected_pnl
 
-        executed = self._enter(market, ta, seconds_left, trade_amount)
-        if executed:
+        execution = self._enter(
+            market,
+            ta,
+            seconds_left,
+            trade_amount,
+            signal_tier,
+            signal_tier_reason,
+        )
+        if execution.get("ok"):
             signal_data["entered"] = True
             signal_data["reason"] = "all filters passed"
             entered_slugs.add(slug)
@@ -1234,10 +1273,26 @@ class CryptoBot:
         else:
             signal_data["entered"] = False
             signal_data["reason"] = "execution failed"
+            signal_data["execution_failure_type"] = str(execution.get("failure_type", "") or "unknown")
+            signal_data["execution_failure_detail"] = str(execution.get("detail", "") or "")
+            signal_data["execution_order_status"] = str(execution.get("order_status", "") or "")
+            signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
+            if execution.get("size") is not None:
+                signal_data["execution_size"] = execution.get("size")
+            if execution.get("taker_price") is not None:
+                signal_data["execution_taker_price"] = execution.get("taker_price")
 
         save_signal(signal_data)
 
-    def _enter(self, market: dict, ta: dict, seconds_left: float, trade_amount: float) -> bool:
+    def _enter(
+        self,
+        market: dict,
+        ta: dict,
+        seconds_left: float,
+        trade_amount: float,
+        signal_tier: str,
+        signal_tier_reason: str,
+    ) -> dict:
         price        = market["winner_price"]
         expected_pnl = (trade_amount / price) - trade_amount
         expected_pct = expected_pnl / trade_amount * 100
@@ -1263,14 +1318,20 @@ class CryptoBot:
         if self.paper or self.dry_run:
             mode = "📄 PAPER" if self.paper else "🔍 DRY RUN"
             log(f"   {mode} — not executed on chain")
-            executed = True
+            execution = {
+                "ok": True,
+                "failure_type": "",
+                "detail": mode,
+                "order_status": "paper",
+                "order_id": "",
+            }
         else:
-            executed = execute_buy(
+            execution = execute_buy(
                 market["winner_token"], trade_amount, price,
                 self.private_key, self.proxy_wallet
             )
 
-        if executed:
+        if execution.get("ok"):
             self.trades.append({
                 "crypto":       crypto,
                 "title":        market["title"],
@@ -1292,7 +1353,7 @@ class CryptoBot:
             })
             log(f"   ✅ Trade #{len(self.trades)} recorded [{crypto}]")
 
-        return executed
+        return execution
 
     def _check_previous_round(self, close_ts: int):
         """
