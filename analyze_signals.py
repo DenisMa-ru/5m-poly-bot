@@ -232,6 +232,10 @@ def signal_tier_label(signal: dict) -> str:
     return str(signal.get("signal_tier", "unknown") or "unknown")
 
 
+def signal_tier_reason_label(signal: dict) -> str:
+    return str(signal.get("signal_tier_reason", "unknown") or "unknown")
+
+
 def reason_label(signal: dict) -> str:
     return str(signal.get("reason", "other") or "other")
 
@@ -513,6 +517,10 @@ def print_combo_report(signals: list[dict], min_trades: int, top: int) -> None:
         (
             "Tier x trend",
             lambda signal: combo_bucket(signal, signal_tier_label, lambda s: "trend_conflict" if s.get("trend_conflict") else "trend_ok"),
+        ),
+        (
+            "Tier x tier-reason",
+            lambda signal: combo_bucket(signal, signal_tier_label, signal_tier_reason_label),
         ),
     ]
 

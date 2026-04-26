@@ -433,26 +433,40 @@ def classify_signal_tier(
     delta_pct: float,
     confidence: float,
     indicator_confirm: float,
+    edge: float,
+    time_left: float,
     trend_aligned: bool,
-) -> str:
+) -> tuple[str, str]:
     """Classify the observed setup quality for later offline analysis."""
+    if time_left < ENTRY_SECONDS_MIN or time_left > ENTRY_SECONDS_MAX:
+        return "observe", "outside entry window"
+    if pm_price < 0.58:
+        return "observe", "pm too cheap"
+    if pm_price > 0.72:
+        return "observe", "pm too expensive"
+    if trend_aligned is False and indicator_confirm <= 0:
+        return "observe", "no trend or 1m support"
+
     if (
         pm_price >= 0.60
-        and pm_price <= 0.70
-        and delta_pct >= 0.012
-        and confidence >= 0.08
-        and indicator_confirm >= 0.10
+        and pm_price <= 0.68
+        and delta_pct >= 0.015
+        and confidence >= 0.10
+        and indicator_confirm >= 0.15
+        and edge >= -0.01
         and trend_aligned
     ):
-        return "trade"
+        return "trade", "aligned pm/delta/confirm"
     if (
         pm_price >= 0.58
-        and pm_price <= 0.72
-        and delta_pct >= 0.008
-        and indicator_confirm >= 0.0
+        and pm_price <= 0.70
+        and delta_pct >= 0.010
+        and confidence >= 0.05
+        and indicator_confirm >= 0.05
+        and edge >= -0.03
     ):
-        return "candidate"
-    return "observe"
+        return "candidate", "usable but not elite"
+    return "observe", "weak combined setup"
 
 def analyze(symbol: str, window_ts: int) -> dict:
     """
@@ -569,11 +583,13 @@ def analyze(symbol: str, window_ts: int) -> dict:
     confidence = min(abs(score) / 12.0, 1.0)
     direction  = "Up" if score > 0 else "Down"
     indicator_confirm, indicator_reason = analyze_indicator_confirm(candles, direction)
-    signal_tier = classify_signal_tier(
-        pm_price=0.0,
+    signal_tier, signal_tier_reason = classify_signal_tier(
+        pm_price=0.65,
         delta_pct=delta_pct,
         confidence=confidence,
         indicator_confirm=indicator_confirm,
+        edge=0.0,
+        time_left=ENTRY_SECONDS_MIN,
         trend_aligned=trend_aligned,
     )
 
@@ -592,6 +608,7 @@ def analyze(symbol: str, window_ts: int) -> dict:
         "trend_aligned": trend_aligned,
         "trend_conflict": trend_conflict,
         "signal_tier":   signal_tier,
+        "signal_tier_reason": signal_tier_reason,
         "atr":           atr if 'atr' in locals() else 0,
         "reason":        f"delta={delta_pct:.4f}% ({delta_dir}, w={delta_weight}) momentum={momentum_str} trend={trend_str}",
     }
@@ -1069,11 +1086,13 @@ class CryptoBot:
         edge = model_prob - market_prob
         trend_aligned = bool(ta.get("trend_aligned"))
         trend_conflict = bool(ta.get("trend_conflict"))
-        signal_tier = classify_signal_tier(
+        signal_tier, signal_tier_reason = classify_signal_tier(
             pm_price=market_prob,
             delta_pct=float(ta.get("delta_pct", 0) or 0),
             confidence=float(ta.get("confidence", 0) or 0),
             indicator_confirm=float(ta.get("indicator_confirm", 0) or 0),
+            edge=float(edge or 0),
+            time_left=float(seconds_left or 0),
             trend_aligned=trend_aligned,
         )
 
@@ -1096,6 +1115,7 @@ class CryptoBot:
             "trend_aligned": trend_aligned,
             "trend_conflict": trend_conflict,
             "signal_tier": signal_tier,
+            "signal_tier_reason": signal_tier_reason,
             "model_prob": model_prob,
             "market_prob": market_prob,
             "edge": edge,
@@ -1250,6 +1270,7 @@ class CryptoBot:
                 "score":        ta.get("score", 0),
                 "indicator_confirm": ta.get("indicator_confirm", 0),
                 "signal_tier":  signal_tier,
+                "signal_tier_reason": signal_tier_reason,
                 "model_prob":   model_prob,
                 "market_prob":  market_prob,
                 "edge":         edge,
