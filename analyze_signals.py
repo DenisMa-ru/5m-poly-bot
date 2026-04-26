@@ -228,6 +228,14 @@ def bucket_weekday(signal: dict) -> str:
     return dt.strftime("%a") if dt else "unknown"
 
 
+def signal_tier_label(signal: dict) -> str:
+    return str(signal.get("signal_tier", "unknown") or "unknown")
+
+
+def combo_bucket(signal: dict, *parts) -> str:
+    return " | ".join(part(signal) for part in parts)
+
+
 def summarize_trades(trades: list[dict], key_fn) -> list[dict]:
     groups: dict[str, list[dict]] = defaultdict(list)
     for trade in trades:
@@ -478,6 +486,69 @@ def print_indicator_confirm_report(signals: list[dict], min_trades: int) -> None
             f"  {row['key']:<12} trades={row['count']:<3} win_rate={fmt_pct(row['win_rate']):<7} "
             f"pnl={fmt_money(row['total_pnl']):<10} avg_1m={avg_confirm:+.2f} "
             f"conf={avg_conf:.1f}% pm={avg_pm:.3f}"
+        )
+
+
+def print_combo_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== SETUP COMBOS ===")
+    entered = [signal for signal in signals if signal.get("entered")]
+    settled = [signal for signal in entered if signal.get("realized_pnl") is not None]
+    if not settled:
+        print("No settled entered trades to analyze.")
+        return
+
+    reports = [
+        (
+            "PM x 1m confirm",
+            lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), bucket_indicator_confirm),
+        ),
+        (
+            "PM x delta",
+            lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), lambda s: bucket_delta(float(s.get("delta", 0) or 0))),
+        ),
+        (
+            "Tier x trend",
+            lambda signal: combo_bucket(signal, signal_tier_label, lambda s: "trend_conflict" if s.get("trend_conflict") else "trend_ok"),
+        ),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(settled, key_fn), min_trades)
+        print_table(title, rows, top)
+
+
+def print_counterfactual_skip_report(signals: list[dict], min_trades: int) -> None:
+    print("\n=== SKIPPED SIGNAL COUNTERFACTUALS ===")
+    skipped = [signal for signal in signals if not signal.get("entered")]
+    resolved = [signal for signal in skipped if signal.get("pnl_if_entered") is not None]
+    if not resolved:
+        print("No resolved skipped signals with pnl_if_entered yet.")
+        return
+
+    wins = sum(1 for signal in resolved if float(signal.get("pnl_if_entered", 0) or 0) > 0)
+    losses = sum(1 for signal in resolved if float(signal.get("pnl_if_entered", 0) or 0) < 0)
+    total = sum(float(signal.get("pnl_if_entered", 0) or 0) for signal in resolved)
+    print(f"resolved skipped: {len(resolved)} | would_win: {wins} | would_lose: {losses} | total_if_entered: {fmt_money(total)}")
+
+    rows = filter_rows(summarize_trades(
+        [
+            {
+                **signal,
+                "realized_pnl": float(signal.get("pnl_if_entered", 0) or 0),
+                "won": float(signal.get("pnl_if_entered", 0) or 0) > 0,
+            }
+            for signal in resolved
+        ],
+        signal_tier_label,
+    ), min_trades)
+    if not rows:
+        print(f"No skipped tiers with >= {min_trades} resolved signals")
+        return
+
+    for row in rows:
+        print(
+            f"  {row['key']:<12} trades={row['count']:<4} would_win_rate={fmt_pct(row['win_rate']):<7} "
+            f"would_pnl={fmt_money(row['total_pnl']):<10} avg_pm={row['avg_pm']:.3f} avg_delta={row['avg_delta']:.3f}%"
         )
 
 
@@ -749,6 +820,8 @@ def main() -> int:
     print_confidence_diagnostics(settled)
     print_edge_proxy_report(signals, args.min_trades)
     print_indicator_confirm_report(signals, args.min_trades)
+    print_combo_report(signals, args.min_trades, args.top)
+    print_counterfactual_skip_report(signals, args.min_trades)
     print_recent_skip_report(signals, args.recent_hours)
 
     print("\n=== SKIP REASONS ===")

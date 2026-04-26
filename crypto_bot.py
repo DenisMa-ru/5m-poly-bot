@@ -427,6 +427,33 @@ def analyze_indicator_confirm(candles: list, direction: str | None) -> tuple[flo
     confirm_score = max(-1.0, min(support, 1.0))
     return confirm_score, ", ".join(reasons) if reasons else "neutral"
 
+
+def classify_signal_tier(
+    pm_price: float,
+    delta_pct: float,
+    confidence: float,
+    indicator_confirm: float,
+    trend_aligned: bool,
+) -> str:
+    """Classify the observed setup quality for later offline analysis."""
+    if (
+        pm_price >= 0.60
+        and pm_price <= 0.70
+        and delta_pct >= 0.012
+        and confidence >= 0.08
+        and indicator_confirm >= 0.10
+        and trend_aligned
+    ):
+        return "trade"
+    if (
+        pm_price >= 0.58
+        and pm_price <= 0.72
+        and delta_pct >= 0.008
+        and indicator_confirm >= 0.0
+    ):
+        return "candidate"
+    return "observe"
+
 def analyze(symbol: str, window_ts: int) -> dict:
     """
     Calculates a composite score based on:
@@ -510,11 +537,15 @@ def analyze(symbol: str, window_ts: int) -> dict:
     # 3. Higher timeframe trend confirmation.
     # Stronger signals get a small bonus when the 15m context agrees.
     higher_trend = get_higher_timeframe_trend(symbol)
+    trend_aligned = False
+    trend_conflict = False
     if higher_trend and ((delta > 0 and higher_trend == "Up") or (delta < 0 and higher_trend == "Down")):
         score += TREND_BONUS
         trend_str = f"{higher_trend} (+{TREND_BONUS})"
+        trend_aligned = True
     elif higher_trend:
         trend_str = f"{higher_trend} (contradicts)"
+        trend_conflict = True
         if abs(delta) < DELTA_STRONG:
             return {
                 "confidence":    0,
@@ -525,6 +556,8 @@ def analyze(symbol: str, window_ts: int) -> dict:
                 "delta_weight":  delta_weight,
                 "momentum":      momentum_str,
                 "higher_trend":  trend_str,
+                "trend_aligned": trend_aligned,
+                "trend_conflict": trend_conflict,
                 "atr":           atr if 'atr' in locals() else 0,
                 "reason":        f"trend conflict on weak delta: {trend_str}",
             }
@@ -536,6 +569,13 @@ def analyze(symbol: str, window_ts: int) -> dict:
     confidence = min(abs(score) / 12.0, 1.0)
     direction  = "Up" if score > 0 else "Down"
     indicator_confirm, indicator_reason = analyze_indicator_confirm(candles, direction)
+    signal_tier = classify_signal_tier(
+        pm_price=0.0,
+        delta_pct=delta_pct,
+        confidence=confidence,
+        indicator_confirm=indicator_confirm,
+        trend_aligned=trend_aligned,
+    )
 
     return {
         "score":         score,
@@ -549,6 +589,9 @@ def analyze(symbol: str, window_ts: int) -> dict:
         "delta_weight":  delta_weight,
         "momentum":      momentum_str,
         "higher_trend":  trend_str,
+        "trend_aligned": trend_aligned,
+        "trend_conflict": trend_conflict,
+        "signal_tier":   signal_tier,
         "atr":           atr if 'atr' in locals() else 0,
         "reason":        f"delta={delta_pct:.4f}% ({delta_dir}, w={delta_weight}) momentum={momentum_str} trend={trend_str}",
     }
@@ -1024,6 +1067,15 @@ class CryptoBot:
             ta.get("score", 0),
         )
         edge = model_prob - market_prob
+        trend_aligned = bool(ta.get("trend_aligned"))
+        trend_conflict = bool(ta.get("trend_conflict"))
+        signal_tier = classify_signal_tier(
+            pm_price=market_prob,
+            delta_pct=float(ta.get("delta_pct", 0) or 0),
+            confidence=float(ta.get("confidence", 0) or 0),
+            indicator_confirm=float(ta.get("indicator_confirm", 0) or 0),
+            trend_aligned=trend_aligned,
+        )
 
         # Build signal data for saving
         signal_data = {
@@ -1039,6 +1091,11 @@ class CryptoBot:
             "score": ta.get("score", 0),
             "indicator_confirm": ta.get("indicator_confirm", 0),
             "indicator_reason": ta.get("indicator_reason", ""),
+            "momentum": ta.get("momentum", ""),
+            "higher_trend": ta.get("higher_trend", "unknown"),
+            "trend_aligned": trend_aligned,
+            "trend_conflict": trend_conflict,
+            "signal_tier": signal_tier,
             "model_prob": model_prob,
             "market_prob": market_prob,
             "edge": edge,
@@ -1192,6 +1249,7 @@ class CryptoBot:
                 "confidence":   ta.get("confidence", 0),
                 "score":        ta.get("score", 0),
                 "indicator_confirm": ta.get("indicator_confirm", 0),
+                "signal_tier":  signal_tier,
                 "model_prob":   model_prob,
                 "market_prob":  market_prob,
                 "edge":         edge,
