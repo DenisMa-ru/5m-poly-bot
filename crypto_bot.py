@@ -23,6 +23,7 @@ import json
 import argparse
 import requests
 from datetime import datetime, timezone
+from collections import deque
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -170,6 +171,19 @@ NORMAL_ZONE_DELTA_MIN = float(_bot_settings.get("normal_zone_delta_min_pct", 0.0
 NORMAL_ZONE_TIME_LEFT_MIN = float(_bot_settings.get("normal_zone_time_left_min", 18) or 18)
 NORMAL_ZONE_EDGE_MIN = float(_bot_settings.get("normal_zone_edge_min", -0.05) or -0.05)
 NORMAL_ZONE_INDICATOR_CONFIRM_MIN = float(_bot_settings.get("normal_zone_indicator_confirm_min", -0.05) or -0.05)
+WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 40) or 40)
+SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
+SHADOW_EARLY_DELTA_MIN = float(_bot_settings.get("shadow_early_delta_min_pct", 0.010) or 0.010)
+SHADOW_LATE_DELTA_MIN = float(_bot_settings.get("shadow_late_delta_min_pct", 0.015) or 0.015)
+SHADOW_PM_MAX = float(_bot_settings.get("shadow_pm_max", 0.76) or 0.76)
+SHADOW_PULLBACK_MAX = float(_bot_settings.get("shadow_pullback_max_pct", 0.012) or 0.012)
+SHADOW_UNDERPRICING_MIN = float(_bot_settings.get("shadow_underpricing_min", 0.010) or 0.010)
+SHADOW_LIVE_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_allow_min_score", 4.5) or 4.5)
+SHADOW_LIVE_STRONG_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_strong_allow_min_score", 6.0) or 6.0)
+SHADOW_LIVE_DENY_MAX_PM_GAP = float(_bot_settings.get("shadow_live_deny_max_pm_gap", 0.18) or 0.18)
+SHADOW_LIVE_DENY_MIN_PROGRESS = float(_bot_settings.get("shadow_live_deny_min_progress", 0.80) or 0.80)
+SHADOW_LIVE_WATCH_MIN_SCORE = float(_bot_settings.get("shadow_live_watch_min_score", 3.0) or 3.0)
+SHADOW_LIVE_MODE = str(_bot_settings.get("shadow_live_mode", "observe") or "observe").strip().lower()
 
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 MIN_EDGE          = float(_bot_settings.get("min_edge", -0.05) or -0.05)
@@ -203,6 +217,17 @@ def log(msg):
 
 def now_unix():
     return int(time.time())
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def normalize_shadow_live_mode(value: str) -> str:
+    mode = str(value or "observe").strip().lower()
+    if mode in {"off", "observe", "block_deny", "hybrid"}:
+        return mode
+    return "observe"
 
 def next_close_ts():
     return ((now_unix() // 300) + 1) * 300
@@ -897,6 +922,8 @@ class CryptoBot:
         self.private_key  = os.getenv("POLY_PRIVATE_KEY", "")
         self.proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
         self.running      = True  # Flag for control
+        self.window_history: dict[str, deque] = {}
+        self.closed_window_summaries: deque = deque(maxlen=12)
 
         # Банк (начальный капитал) и текущий баланс
         settings = load_settings()
@@ -953,6 +980,7 @@ class CryptoBot:
                 f"+{self.dynamic_step_bank_gain_pct*100:.0f}% bank growth, "
                 f"max {self.dynamic_max_risk_pct*100:.0f}% | cap ${self.dynamic_max_amount:.2f}"
             )
+        log(f"Shadow live mode: {normalize_shadow_live_mode(SHADOW_LIVE_MODE)}")
         log(f"Settings from: {'settings.json' if _bot_settings else 'defaults'}")
         log("=" * 60)
 
@@ -1057,6 +1085,7 @@ class CryptoBot:
                 # Раньше здесь использовался предыдущий close_ts, из-за чего
                 # сделки могли сверяться с неправильным рынком Polymarket.
                 self._check_previous_round(close_ts)
+                self._finalize_window_summaries(close_ts)
                 break
 
             pending = [
@@ -1149,6 +1178,10 @@ class CryptoBot:
             time_left=float(seconds_left or 0),
             trend_aligned=trend_aligned,
         )
+        history = self._record_window_tick(market, ta, seconds_left)
+        window_features = self._build_window_features(history, market, ta, seconds_left)
+        shadow = self._evaluate_shadow_entry(window_features, market, ta, seconds_left)
+        shadow_live = self._evaluate_shadow_live_decision(window_features, shadow, market, ta)
 
         # Build signal data for saving
         signal_data = {
@@ -1182,11 +1215,57 @@ class CryptoBot:
             "execution_failure_detail": "",
             "execution_order_status": "",
             "execution_order_id": "",
+            "stable_ticks": window_features.get("stable_ticks", 0),
+            "direction_persistence": window_features.get("direction_persistence", 0.0),
+            "delta_slope": window_features.get("delta_slope", 0.0),
+            "pm_slope": window_features.get("pm_slope", 0.0),
+            "pullback_size": window_features.get("pullback_size", 0.0),
+            "pullback_recovered": window_features.get("pullback_recovered", False),
+            "reversal_flag": window_features.get("reversal_flag", False),
+            "window_progress_pct": window_features.get("window_progress_pct", 0.0),
+            "recent_5m_streak": window_features.get("recent_5m_streak", 0),
+            "market_regime": window_features.get("market_regime", "unknown"),
+            "pm_vs_delta_gap": window_features.get("pm_vs_delta_gap", 0.0),
+            "underpricing_score": window_features.get("underpricing_score", 0.0),
+            "shadow_entry_candidate": shadow.get("candidate", False),
+            "shadow_entry_profile": shadow.get("profile", "none"),
+            "shadow_entry_score": shadow.get("score", 0.0),
+            "shadow_entry_reason": shadow.get("reason", ""),
+            "shadow_live_decision": shadow_live.get("decision", "neutral"),
+            "shadow_live_reason": shadow_live.get("reason", ""),
+            "shadow_live_score": shadow_live.get("score", 0.0),
         }
+
+        shadow_live_decision = str(shadow_live.get("decision", "neutral") or "neutral")
+        shadow_live_reason = str(shadow_live.get("reason", "") or "")
+        shadow_live_score = float(shadow_live.get("score", 0) or 0)
+        shadow_profile = str(shadow.get("profile", "none") or "none")
+        shadow_live_mode = normalize_shadow_live_mode(SHADOW_LIVE_MODE)
+        signal_data["shadow_live_mode"] = shadow_live_mode
+        if shadow_live_mode != "off" and shadow_live_decision in {"strong_allow", "allow", "watch", "deny"}:
+            log(
+                f"   [{crypto}] SHADOW-{shadow_live_decision.upper()} — "
+                f"profile={shadow_profile} score={shadow_live_score:.2f} "
+                f"regime={shadow_live.get('market_regime', 'unknown')} "
+                f"stable={shadow_live.get('stable_ticks', 0)} streak={shadow_live.get('recent_5m_streak', 0)} "
+                f"progress={float(shadow_live.get('window_progress_pct', 0) or 0) * 100:.0f}% "
+                f"gap={float(shadow_live.get('pm_vs_delta_gap', 0) or 0):+.3f} "
+                f"underpricing={float(shadow_live.get('underpricing_score', 0) or 0):+.3f} | "
+                f"{shadow_live_reason}"
+            )
+
+        shadow_live_blocks = shadow_live_mode in {"block_deny", "hybrid"} and shadow_live_decision == "deny"
+        shadow_live_relax_filters = shadow_live_mode == "hybrid" and shadow_live_decision in {"allow", "strong_allow"}
 
         if self._daily_loss_limit_hit():
             log(f"   [{crypto}] SKIP — daily loss limit reached (${self.daily_loss_limit:.2f})")
             signal_data["reason"] = f"daily loss limit reached ({self.daily_loss_limit:.2f})"
+            save_signal(signal_data)
+            return
+
+        if shadow_live_blocks:
+            log(f"   [{crypto}] SKIP — shadow live deny ({shadow_live_reason})")
+            signal_data["reason"] = f"shadow live deny | {shadow_live_reason}"
             save_signal(signal_data)
             return
 
@@ -1264,15 +1343,24 @@ class CryptoBot:
                 f"1m={indicator_confirm:+.2f} time_left={seconds_left:.1f}s)"
             )
 
+        hybrid_shadow_live_pass = shadow_live_relax_filters and not normal_zone_live_pass
+        if hybrid_shadow_live_pass:
+            log(
+                f"   [{crypto}] ALLOW — hybrid shadow live pass "
+                f"(decision={shadow_live_decision} profile={shadow_profile} score={shadow_live_score:.2f} "
+                f"pm={pm_price:.3f} delta={delta_pct:.4f}% edge={edge:+.3f} 1m={indicator_confirm:+.2f} "
+                f"time_left={seconds_left:.1f}s)"
+            )
+
         # Filter 2: minimum confidence
-        if confidence < MIN_CONFIDENCE and not normal_zone_live_pass:
+        if confidence < MIN_CONFIDENCE and not normal_zone_live_pass and not hybrid_shadow_live_pass:
             log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
             signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
             save_signal(signal_data)
             return
 
         # Filter 2b: minimum edge vs current PM price.
-        if edge < MIN_EDGE and not normal_zone_live_pass:
+        if edge < MIN_EDGE and not normal_zone_live_pass and not hybrid_shadow_live_pass:
             log(
                 f"   [{crypto}] SKIP — edge {edge:+.3f} < {MIN_EDGE:+.3f} "
                 f"(model={model_prob:.3f} market={market_prob:.3f})"
@@ -1282,7 +1370,7 @@ class CryptoBot:
             return
 
         # Filter 2c: optional 1m indicator confirmation.
-        if indicator_confirm < INDICATOR_CONFIRM_MIN and not normal_zone_live_pass:
+        if indicator_confirm < INDICATOR_CONFIRM_MIN and not normal_zone_live_pass and not hybrid_shadow_live_pass:
             log(
                 f"   [{crypto}] SKIP — 1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f} "
                 f"({ta.get('indicator_reason', 'neutral')})"
@@ -1352,6 +1440,219 @@ class CryptoBot:
                 signal_data["execution_taker_price"] = execution.get("taker_price")
 
         save_signal(signal_data)
+
+    def _record_window_tick(self, market: dict, ta: dict, seconds_left: float) -> deque:
+        slug = str(market.get("slug") or "")
+        history = self.window_history.get(slug)
+        if history is None:
+            history = deque(maxlen=WINDOW_HISTORY_MAX_POINTS)
+            self.window_history[slug] = history
+
+        history.append({
+            "ts": now_unix(),
+            "seconds_left": float(seconds_left or 0),
+            "pm_price": float(market.get("winner_price", 0) or 0),
+            "binance_price": float(ta.get("current_price", 0) or 0),
+            "delta_pct": float(ta.get("delta_pct", 0) or 0),
+            "direction": ta.get("direction") or "none",
+            "indicator_confirm": float(ta.get("indicator_confirm", 0) or 0),
+            "trend_aligned": bool(ta.get("trend_aligned")),
+            "higher_trend": ta.get("higher_trend") or "unknown",
+        })
+        return history
+
+    def _build_window_features(self, history: deque, market: dict, ta: dict, seconds_left: float) -> dict:
+        points = list(history)
+        if not points:
+            return {}
+
+        current = points[-1]
+        directions = [p.get("direction") for p in points if p.get("direction") in ("Up", "Down")]
+        stable_ticks = 0
+        if directions:
+            last_direction = directions[-1]
+            for direction in reversed(directions):
+                if direction == last_direction:
+                    stable_ticks += 1
+                else:
+                    break
+        direction_persistence = stable_ticks / max(len(points), 1)
+
+        delta_values = [float(p.get("delta_pct", 0) or 0) for p in points]
+        pm_values = [float(p.get("pm_price", 0) or 0) for p in points]
+        delta_slope = delta_values[-1] - delta_values[0] if len(delta_values) >= 2 else 0.0
+        pm_slope = pm_values[-1] - pm_values[0] if len(pm_values) >= 2 else 0.0
+        max_delta = max(delta_values) if delta_values else 0.0
+        min_delta = min(delta_values) if delta_values else 0.0
+        pullback_size = max_delta - delta_values[-1] if delta_values and delta_values[-1] >= 0 else abs(min_delta - delta_values[-1])
+        pullback_recovered = len(delta_values) >= 3 and delta_values[-1] >= delta_values[-2] and delta_values[-1] >= delta_values[0]
+        reversal_flag = len(delta_values) >= 3 and ((delta_values[-1] > 0 > min_delta) or (delta_values[-1] < 0 < max_delta))
+        window_progress_pct = clamp((300.0 - float(seconds_left or 0)) / 300.0, 0.0, 1.0)
+        pm_vs_delta_gap = float(current.get("pm_price", 0) or 0) - clamp(abs(delta_values[-1]) * 20.0, 0.0, 0.99)
+        underpricing_score = clamp(abs(delta_values[-1]) * 15.0 - float(current.get("pm_price", 0) or 0), -1.0, 1.0)
+
+        recent_streak = 0
+        regime = "unknown"
+        if self.closed_window_summaries:
+            last_dir = self.closed_window_summaries[-1].get("direction")
+            if last_dir in ("Up", "Down"):
+                for item in reversed(self.closed_window_summaries):
+                    if item.get("direction") == last_dir:
+                        recent_streak += 1
+                    else:
+                        break
+            if recent_streak >= 2:
+                regime = f"trend_{str(last_dir).lower()}"
+            elif len(self.closed_window_summaries) >= 4:
+                dirs = [item.get("direction") for item in list(self.closed_window_summaries)[-4:]]
+                unique_dirs = {d for d in dirs if d in ("Up", "Down")}
+                regime = "chop" if len(unique_dirs) > 1 else regime
+
+        return {
+            "stable_ticks": stable_ticks,
+            "direction_persistence": direction_persistence,
+            "delta_slope": delta_slope,
+            "pm_slope": pm_slope,
+            "pullback_size": pullback_size,
+            "pullback_recovered": pullback_recovered,
+            "reversal_flag": reversal_flag,
+            "window_progress_pct": window_progress_pct,
+            "recent_5m_streak": recent_streak,
+            "market_regime": regime,
+            "pm_vs_delta_gap": pm_vs_delta_gap,
+            "underpricing_score": underpricing_score,
+        }
+
+    def _evaluate_shadow_entry(self, features: dict, market: dict, ta: dict, seconds_left: float) -> dict:
+        pm_price = float(market.get("winner_price", 0) or 0)
+        delta_pct = float(ta.get("delta_pct", 0) or 0)
+        trend_aligned = bool(ta.get("trend_aligned"))
+        indicator_confirm = float(ta.get("indicator_confirm", 0) or 0)
+        stable_ticks = int(features.get("stable_ticks", 0) or 0)
+        underpricing_score = float(features.get("underpricing_score", 0) or 0)
+        pullback_size = float(features.get("pullback_size", 0) or 0)
+        pullback_recovered = bool(features.get("pullback_recovered"))
+        reversal_flag = bool(features.get("reversal_flag"))
+
+        if not trend_aligned:
+            return {"candidate": False, "profile": "none", "score": 0.0, "reason": "trend not aligned"}
+        if stable_ticks < SHADOW_MIN_STABLE_TICKS:
+            return {"candidate": False, "profile": "none", "score": 0.0, "reason": "not enough stable ticks"}
+        if pm_price > SHADOW_PM_MAX:
+            return {"candidate": False, "profile": "none", "score": 0.0, "reason": f"pm too expensive for shadow ({pm_price:.3f})"}
+        if reversal_flag and not pullback_recovered:
+            return {"candidate": False, "profile": "none", "score": 0.0, "reason": "reversal not recovered"}
+
+        profile = "none"
+        score = 0.0
+        reason = ""
+        if 90 <= seconds_left <= 180 and delta_pct >= SHADOW_EARLY_DELTA_MIN and underpricing_score >= SHADOW_UNDERPRICING_MIN:
+            profile = "trend_early"
+            score = stable_ticks * 0.8 + delta_pct * 80 + underpricing_score * 5
+            reason = "stable early trend with PM lag"
+        elif 45 <= seconds_left <= 150 and pullback_size <= SHADOW_PULLBACK_MAX and pullback_recovered and delta_pct >= SHADOW_EARLY_DELTA_MIN:
+            profile = "trend_pullback_resume"
+            score = stable_ticks * 0.7 + delta_pct * 70 + max(0.0, 0.02 - pullback_size) * 100
+            reason = "pullback recovered into trend"
+        elif 12 <= seconds_left <= 45 and delta_pct >= SHADOW_LATE_DELTA_MIN and indicator_confirm >= -0.05:
+            profile = "late_lock"
+            score = stable_ticks * 0.6 + delta_pct * 90 + underpricing_score * 3
+            reason = "late lock with sustained move"
+
+        return {
+            "candidate": profile != "none",
+            "profile": profile,
+            "score": round(score, 4),
+            "reason": reason or "no shadow profile matched",
+        }
+
+    def _evaluate_shadow_live_decision(self, features: dict, shadow: dict, market: dict, ta: dict) -> dict:
+        profile = str(shadow.get("profile", "none") or "none")
+        score = float(shadow.get("score", 0) or 0)
+        candidate = bool(shadow.get("candidate"))
+        pm_price = float(market.get("winner_price", 0) or 0)
+        delta_pct = float(ta.get("delta_pct", 0) or 0)
+        trend_aligned = bool(ta.get("trend_aligned"))
+        stable_ticks = int(features.get("stable_ticks", 0) or 0)
+        recent_streak = int(features.get("recent_5m_streak", 0) or 0)
+        regime = str(features.get("market_regime", "unknown") or "unknown")
+        progress = float(features.get("window_progress_pct", 0) or 0)
+        underpricing_score = float(features.get("underpricing_score", 0) or 0)
+        pm_gap = float(features.get("pm_vs_delta_gap", 0) or 0)
+        pullback_recovered = bool(features.get("pullback_recovered"))
+        reversal_flag = bool(features.get("reversal_flag"))
+
+        decision = "neutral"
+        reason = "no live shadow edge"
+
+        if not candidate:
+            if not trend_aligned:
+                decision = "deny"
+                reason = "trend not aligned"
+            elif stable_ticks < SHADOW_MIN_STABLE_TICKS:
+                decision = "neutral"
+                reason = "waiting for stable window structure"
+            else:
+                reason = str(shadow.get("reason", "no shadow candidate") or "no shadow candidate")
+        else:
+            if reversal_flag and not pullback_recovered:
+                decision = "deny"
+                reason = "reversal risk not recovered"
+            elif pm_gap >= SHADOW_LIVE_DENY_MAX_PM_GAP and progress >= SHADOW_LIVE_DENY_MIN_PROGRESS:
+                decision = "deny"
+                reason = "pm already too far ahead late in window"
+            elif profile == "trend_early" and score >= SHADOW_LIVE_STRONG_ALLOW_MIN_SCORE and underpricing_score >= SHADOW_UNDERPRICING_MIN and recent_streak >= 2:
+                decision = "strong_allow"
+                reason = "trend early with regime continuation and PM lag"
+            elif profile == "trend_pullback_resume" and score >= SHADOW_LIVE_ALLOW_MIN_SCORE and pullback_recovered and stable_ticks >= SHADOW_MIN_STABLE_TICKS:
+                decision = "allow"
+                reason = "pullback resumed into stable aligned trend"
+            elif profile == "late_lock" and score >= SHADOW_LIVE_ALLOW_MIN_SCORE and regime.startswith("trend_") and pm_price <= SHADOW_PM_MAX:
+                decision = "allow"
+                reason = "late lock aligned with ongoing 5m regime"
+            elif score >= SHADOW_LIVE_WATCH_MIN_SCORE and delta_pct >= SHADOW_EARLY_DELTA_MIN * 0.8:
+                decision = "watch"
+                reason = "promising shadow pattern but not strong enough for allow"
+            else:
+                decision = "neutral"
+                reason = "candidate did not clear live-shadow quality bar"
+
+        return {
+            "decision": decision,
+            "reason": reason,
+            "profile": profile,
+            "score": round(score, 4),
+            "candidate": candidate,
+            "market_regime": regime,
+            "stable_ticks": stable_ticks,
+            "recent_5m_streak": recent_streak,
+            "window_progress_pct": round(progress, 4),
+            "underpricing_score": round(underpricing_score, 4),
+            "pm_vs_delta_gap": round(pm_gap, 4),
+        }
+
+    def _finalize_window_summaries(self, close_ts: int):
+        to_remove = []
+        for slug, history in self.window_history.items():
+            try:
+                window_close_ts = int(str(slug).rsplit("-", 1)[-1]) + 300
+            except Exception:
+                window_close_ts = close_ts
+            if window_close_ts > close_ts:
+                continue
+            points = list(history)
+            if points:
+                last_delta = float(points[-1].get("delta_pct", 0) or 0)
+                direction = points[-1].get("direction") if points[-1].get("direction") in ("Up", "Down") else ("Up" if last_delta >= 0 else "Down")
+                self.closed_window_summaries.append({
+                    "slug": slug,
+                    "direction": direction,
+                    "delta_pct": last_delta,
+                    "pm_price": float(points[-1].get("pm_price", 0) or 0),
+                })
+            to_remove.append(slug)
+        for slug in to_remove:
+            self.window_history.pop(slug, None)
 
     def _enter(
         self,

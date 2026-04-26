@@ -236,6 +236,30 @@ def signal_tier_reason_label(signal: dict) -> str:
     return str(signal.get("signal_tier_reason", "unknown") or "unknown")
 
 
+def shadow_profile_label(signal: dict) -> str:
+    return str(signal.get("shadow_entry_profile", "none") or "none")
+
+
+def shadow_reason_label(signal: dict) -> str:
+    return str(signal.get("shadow_entry_reason", "") or "none")
+
+
+def market_regime_label(signal: dict) -> str:
+    return str(signal.get("market_regime", "unknown") or "unknown")
+
+
+def shadow_live_decision_label(signal: dict) -> str:
+    return str(signal.get("shadow_live_decision", "unknown") or "unknown")
+
+
+def shadow_live_reason_label(signal: dict) -> str:
+    return str(signal.get("shadow_live_reason", "") or "none")
+
+
+def shadow_live_mode_label(signal: dict) -> str:
+    return str(signal.get("shadow_live_mode", "unknown") or "unknown")
+
+
 def indicator_reason_label(signal: dict) -> str:
     reason = str(signal.get("indicator_reason", "") or "")
     return reason if reason else "none"
@@ -252,6 +276,114 @@ def reason_label(signal: dict) -> str:
 
 def combo_bucket(signal: dict, *parts) -> str:
     return " | ".join(part(signal) for part in parts)
+
+
+def bucket_stable_ticks(signal: dict) -> str:
+    ticks = int(signal.get("stable_ticks", 0) or 0)
+    if ticks <= 0:
+        return "0"
+    if ticks == 1:
+        return "1"
+    if ticks == 2:
+        return "2"
+    if ticks == 3:
+        return "3"
+    if ticks == 4:
+        return "4"
+    return ">=5"
+
+
+def bucket_recent_streak(signal: dict) -> str:
+    streak = int(signal.get("recent_5m_streak", 0) or 0)
+    if streak <= 0:
+        return "0"
+    if streak == 1:
+        return "1"
+    if streak == 2:
+        return "2"
+    return ">=3"
+
+
+def bucket_window_progress(signal: dict) -> str:
+    progress = float(signal.get("window_progress_pct", 0) or 0)
+    if progress < 0.20:
+        return "0-19%"
+    if progress < 0.40:
+        return "20-39%"
+    if progress < 0.60:
+        return "40-59%"
+    if progress < 0.80:
+        return "60-79%"
+    return "80-100%"
+
+
+def bucket_underpricing(signal: dict) -> str:
+    score = float(signal.get("underpricing_score", 0) or 0)
+    if score < -0.50:
+        return "<-0.50"
+    if score < -0.10:
+        return "-0.50..-0.10"
+    if score < 0.10:
+        return "-0.10..0.09"
+    if score < 0.30:
+        return "0.10..0.29"
+    if score < 0.50:
+        return "0.30..0.49"
+    return ">=0.50"
+
+
+def bucket_gap(signal: dict) -> str:
+    gap = float(signal.get("pm_vs_delta_gap", 0) or 0)
+    if gap < -0.30:
+        return "<-0.30"
+    if gap < -0.10:
+        return "-0.30..-0.10"
+    if gap < 0.0:
+        return "-0.10..0.00"
+    if gap < 0.10:
+        return "0.00..0.09"
+    if gap < 0.20:
+        return "0.10..0.19"
+    return ">=0.20"
+
+
+def resolve_outcome_pnl(signal: dict) -> float | None:
+    if signal.get("entered") and signal.get("realized_pnl") is not None:
+        return float(signal.get("realized_pnl", 0) or 0)
+    if (not signal.get("entered")) and signal.get("pnl_if_entered") is not None:
+        return float(signal.get("pnl_if_entered", 0) or 0)
+    return None
+
+
+def shadow_similarity_core_label(signal: dict) -> str:
+    return combo_bucket(
+        signal,
+        shadow_profile_label,
+        market_regime_label,
+        bucket_stable_ticks,
+        bucket_window_progress,
+    )
+
+
+def shadow_similarity_extended_label(signal: dict) -> str:
+    return combo_bucket(
+        signal,
+        shadow_profile_label,
+        market_regime_label,
+        bucket_stable_ticks,
+        bucket_window_progress,
+        bucket_underpricing,
+        bucket_gap,
+    )
+
+
+def shadow_market_context_label(signal: dict) -> str:
+    return combo_bucket(
+        signal,
+        lambda s: bucket_pm(float(s.get("pm", 0) or 0)),
+        lambda s: bucket_delta(float(s.get("delta", 0) or 0)),
+        lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)),
+    )
 
 
 def summarize_trades(trades: list[dict], key_fn) -> list[dict]:
@@ -606,6 +738,395 @@ def print_execution_failed_report(signals: list[dict], min_trades: int, top: int
 
     for title, key_fn in reports:
         rows = filter_rows(summarize_trades(normalized, key_fn), min_trades)
+        print_table(title, rows, top)
+
+
+def print_shadow_entry_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== SHADOW ENTRY PROFILES ===")
+    shadow_annotated = [
+        signal for signal in signals
+        if any(
+            key in signal
+            for key in (
+                "shadow_entry_candidate",
+                "shadow_entry_profile",
+                "shadow_entry_score",
+                "stable_ticks",
+                "market_regime",
+            )
+        )
+    ]
+    if not shadow_annotated:
+        print("No shadow-annotated signals yet. Collect new live logs after the crypto_bot.py shadow patch.")
+        return
+
+    resolved = []
+    for signal in shadow_annotated:
+        outcome_pnl = resolve_outcome_pnl(signal)
+        if outcome_pnl is None:
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": outcome_pnl,
+            "won": outcome_pnl > 0,
+        })
+
+    if not resolved:
+        print("No shadow-annotated resolved signals yet.")
+        return
+
+    candidates = [signal for signal in resolved if signal.get("shadow_entry_candidate") is True]
+    entered_candidates = [signal for signal in candidates if signal.get("entered")]
+    skipped_candidates = [signal for signal in candidates if not signal.get("entered")]
+    total = sum(float(signal.get("realized_pnl", 0) or 0) for signal in candidates)
+    wins = sum(1 for signal in candidates if signal.get("won") is True)
+    losses = sum(1 for signal in candidates if signal.get("won") is False)
+
+    print(
+        f"shadow_annotated={len(shadow_annotated)} | resolved={len(resolved)} | "
+        f"candidates={len(candidates)} | entered_candidates={len(entered_candidates)} | "
+        f"skipped_candidates={len(skipped_candidates)}"
+    )
+    if candidates:
+        print(
+            f"candidate_outcomes: wins={wins} | losses={losses} | total_pnl={fmt_money(total)}"
+        )
+    else:
+        print("No resolved shadow candidates yet.")
+
+    reports = [
+        ("By shadow profile", shadow_profile_label),
+        ("By shadow reason", shadow_reason_label),
+        ("By market regime", market_regime_label),
+        ("By stable ticks", bucket_stable_ticks),
+        ("By recent 5m streak", bucket_recent_streak),
+        ("By window progress", bucket_window_progress),
+        ("By underpricing score", bucket_underpricing),
+        ("By PM vs delta gap", bucket_gap),
+        (
+            "By profile x regime",
+            lambda signal: combo_bucket(signal, shadow_profile_label, market_regime_label),
+        ),
+        (
+            "By profile x stable ticks",
+            lambda signal: combo_bucket(signal, shadow_profile_label, bucket_stable_ticks),
+        ),
+        (
+            "By candidate flag x entered",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: "candidate" if s.get("shadow_entry_candidate") else "non_candidate",
+                lambda s: "entered" if s.get("entered") else "skipped",
+            ),
+        ),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(resolved, key_fn), min_trades)
+        print_table(title, rows, top)
+
+    if skipped_candidates:
+        print("\n=== SHADOW CANDIDATE COUNTERFACTUALS ===")
+        candidate_reports = [
+            ("Skipped candidates by profile", shadow_profile_label),
+            ("Skipped candidates by regime", market_regime_label),
+            (
+                "Skipped candidates by profile x regime",
+                lambda signal: combo_bucket(signal, shadow_profile_label, market_regime_label),
+            ),
+        ]
+        for title, key_fn in candidate_reports:
+            rows = filter_rows(summarize_trades(skipped_candidates, key_fn), min_trades)
+            print_table(title, rows, top)
+
+
+def print_shadow_similarity_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== SHADOW HISTORICAL SIMILARITY ===")
+    shadow_annotated = [
+        signal for signal in signals
+        if any(
+            key in signal
+            for key in (
+                "shadow_entry_candidate",
+                "shadow_entry_profile",
+                "shadow_entry_score",
+                "stable_ticks",
+                "market_regime",
+            )
+        )
+    ]
+    if not shadow_annotated:
+        print("No shadow-annotated signals yet. Historical similarity needs new post-patch logs.")
+        return
+
+    resolved = []
+    for signal in shadow_annotated:
+        outcome_pnl = resolve_outcome_pnl(signal)
+        if outcome_pnl is None:
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": outcome_pnl,
+            "won": outcome_pnl > 0,
+        })
+
+    if not resolved:
+        print("No shadow-annotated resolved signals yet.")
+        return
+
+    candidate_resolved = [signal for signal in resolved if signal.get("shadow_entry_candidate") is True]
+    sample = candidate_resolved if candidate_resolved else resolved
+    source_label = "shadow candidates" if candidate_resolved else "all shadow-annotated resolved signals"
+    print(f"Using {len(sample)} {source_label} for similarity clustering.")
+
+    reports = [
+        ("Core similarity cluster", shadow_similarity_core_label),
+        ("Extended similarity cluster", shadow_similarity_extended_label),
+        ("Market context cluster", shadow_market_context_label),
+        (
+            "Profile x regime x PM",
+            lambda signal: combo_bucket(
+                signal,
+                shadow_profile_label,
+                market_regime_label,
+                lambda s: bucket_pm(float(s.get("pm", 0) or 0)),
+            ),
+        ),
+        (
+            "Profile x streak x underpricing",
+            lambda signal: combo_bucket(
+                signal,
+                shadow_profile_label,
+                bucket_recent_streak,
+                bucket_underpricing,
+            ),
+        ),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(sample, key_fn), min_trades)
+        print_table(title, rows, top)
+
+    print("\n=== SHADOW SIMILARITY SHORTLIST ===")
+    shortlist_rows = filter_rows(summarize_trades(sample, shadow_similarity_extended_label), min_trades)
+    if not shortlist_rows:
+        print(f"No similarity clusters with >= {min_trades} resolved signals yet.")
+        return
+
+    best_rows = list(reversed(shortlist_rows[-top:]))
+    worst_rows = shortlist_rows[:top]
+
+    print("Best historical analogs:")
+    for row in best_rows:
+        print(
+            f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+            f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])} | "
+            f"pm={row['avg_pm']:.3f} | delta={row['avg_delta']:.3f}% | t={row['avg_time']:.1f}s"
+        )
+
+    print("Worst historical analogs:")
+    for row in worst_rows:
+        print(
+            f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+            f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])} | "
+            f"pm={row['avg_pm']:.3f} | delta={row['avg_delta']:.3f}% | t={row['avg_time']:.1f}s"
+        )
+
+
+def print_shadow_live_recommendations(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== SHADOW LIVE RECOMMENDATIONS ===")
+    shadow_annotated = [
+        signal for signal in signals
+        if any(
+            key in signal
+            for key in (
+                "shadow_entry_candidate",
+                "shadow_entry_profile",
+                "shadow_entry_score",
+                "stable_ticks",
+                "market_regime",
+            )
+        )
+    ]
+    if not shadow_annotated:
+        print("No shadow-annotated signals yet. Cannot build live recommendations.")
+        return
+
+    resolved = []
+    for signal in shadow_annotated:
+        outcome_pnl = resolve_outcome_pnl(signal)
+        if outcome_pnl is None:
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": outcome_pnl,
+            "won": outcome_pnl > 0,
+        })
+
+    if not resolved:
+        print("No shadow-annotated resolved signals yet.")
+        return
+
+    candidate_resolved = [signal for signal in resolved if signal.get("shadow_entry_candidate") is True]
+    sample = candidate_resolved if candidate_resolved else resolved
+    source_label = "shadow candidates" if candidate_resolved else "all shadow-annotated resolved signals"
+    print(f"Evaluating {len(sample)} {source_label} for live shortlist.")
+
+    cluster_rows = summarize_trades(sample, shadow_similarity_extended_label)
+    core_rows = summarize_trades(sample, shadow_similarity_core_label)
+    profile_rows = summarize_trades(sample, shadow_profile_label)
+    decision_rows = summarize_trades(sample, shadow_live_decision_label)
+
+    reliable_min = max(min_trades, 3)
+    early_watch_min = max(2, min(min_trades, 2))
+
+    allow_rows = [
+        row for row in cluster_rows
+        if row["count"] >= reliable_min and row["total_pnl"] > 0 and row["roi"] > 0 and row["win_rate"] >= 55.0
+    ]
+    strong_allow_rows = [
+        row for row in allow_rows
+        if row["count"] >= reliable_min + 1 and row["win_rate"] >= 60.0 and row["roi"] >= 5.0
+    ]
+    deny_rows = [
+        row for row in cluster_rows
+        if row["count"] >= reliable_min and row["total_pnl"] < 0 and row["roi"] < 0 and row["win_rate"] <= 45.0
+    ]
+    watch_rows = [
+        row for row in cluster_rows
+        if early_watch_min <= row["count"] < reliable_min and row["total_pnl"] > 0 and row["win_rate"] >= 50.0
+    ]
+
+    print(f"reliable_min={reliable_min} | early_watch_min={early_watch_min}")
+
+    print("Potential allowlist clusters:")
+    if not allow_rows:
+        print("  None yet.")
+    else:
+        for row in list(reversed(allow_rows[-top:])):
+            print(
+                f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+            )
+
+    print("Stronger allowlist clusters:")
+    if not strong_allow_rows:
+        print("  None yet.")
+    else:
+        for row in list(reversed(strong_allow_rows[-top:])):
+            print(
+                f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+            )
+
+    print("Potential denylist clusters:")
+    if not deny_rows:
+        print("  None yet.")
+    else:
+        for row in deny_rows[:top]:
+            print(
+                f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+            )
+
+    print("Promising but under-sampled clusters:")
+    if not watch_rows:
+        print("  None yet.")
+    else:
+        for row in list(reversed(watch_rows[-top:])):
+            print(
+                f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+            )
+
+    print("Observe-only decision summary:")
+    decision_filtered = [row for row in decision_rows if row["count"] >= early_watch_min]
+    if not decision_filtered:
+        print("  No shadow_live_decision sample yet.")
+    else:
+        for row in list(reversed(decision_filtered[-top:])):
+            print(
+                f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+            )
+
+    print("\nContext summary by core cluster:")
+    core_filtered = [row for row in core_rows if row["count"] >= reliable_min]
+    if not core_filtered:
+        print("  No core clusters with enough resolved samples yet.")
+    else:
+        for row in list(reversed(core_filtered[-top:])):
+            print(
+                f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+            )
+
+    print("Profile summary:")
+    profile_filtered = [row for row in profile_rows if row["count"] >= early_watch_min]
+    if not profile_filtered:
+        print("  No profile-level sample yet.")
+    else:
+        for row in list(reversed(profile_filtered[-top:])):
+            print(
+                f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+            )
+
+    print("\nInterpretation:")
+    print("  allowlist = кластеры, которые уже можно рассматривать как кандидатов для будущего live-входа.")
+    print("  denylist  = кластеры, которые лучше явно блокировать, если паттерн повторяется.")
+    print("  watchlist = кластеры выглядят интересно, но данных пока мало; это ещё не правило для live.")
+
+
+def print_shadow_live_decision_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== SHADOW LIVE DECISION REPORT ===")
+    shadow_live_signals = [
+        signal for signal in signals
+        if "shadow_live_decision" in signal or "shadow_live_reason" in signal
+    ]
+    if not shadow_live_signals:
+        print("No shadow live decision data yet. Collect new post-patch bot logs.")
+        return
+
+    resolved = []
+    for signal in shadow_live_signals:
+        outcome_pnl = resolve_outcome_pnl(signal)
+        if outcome_pnl is None:
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": outcome_pnl,
+            "won": outcome_pnl > 0,
+        })
+
+    if not resolved:
+        print("No resolved shadow live decision signals yet.")
+        return
+
+    reports = [
+        ("By shadow live mode", shadow_live_mode_label),
+        ("By shadow live decision", shadow_live_decision_label),
+        ("By shadow live reason", shadow_live_reason_label),
+        (
+            "By mode x decision",
+            lambda signal: combo_bucket(signal, shadow_live_mode_label, shadow_live_decision_label),
+        ),
+        (
+            "By decision x profile",
+            lambda signal: combo_bucket(signal, shadow_live_decision_label, shadow_profile_label),
+        ),
+        (
+            "By decision x regime",
+            lambda signal: combo_bucket(signal, shadow_live_decision_label, market_regime_label),
+        ),
+        (
+            "By decision x stable ticks",
+            lambda signal: combo_bucket(signal, shadow_live_decision_label, bucket_stable_ticks),
+        ),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(resolved, key_fn), min_trades)
         print_table(title, rows, top)
 
 
@@ -1011,6 +1532,10 @@ def main() -> int:
     print_indicator_reason_report(signals, args.min_trades, args.top)
     print_normal_pm_zone_report(signals, args.min_trades, args.top)
     print_execution_failed_report(signals, args.min_trades, args.top)
+    print_shadow_entry_report(signals, args.min_trades, args.top)
+    print_shadow_similarity_report(signals, args.min_trades, args.top)
+    print_shadow_live_recommendations(signals, args.min_trades, args.top)
+    print_shadow_live_decision_report(signals, args.min_trades, args.top)
     print_combo_report(signals, args.min_trades, args.top)
     print_signal_tier_reason_report(signals, args.min_trades, args.top)
     print_counterfactual_skip_report(signals, args.min_trades)

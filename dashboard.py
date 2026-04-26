@@ -379,6 +379,23 @@ def build_dashboard_state():
     last_signals = signals[-20:]
     last_entered = entered[-12:]
     last_skipped = skipped[-12:]
+    shadow_live_signals = [
+        s for s in signals
+        if s.get("shadow_live_decision") is not None or s.get("shadow_live_mode") is not None
+    ]
+    last_shadow_live = shadow_live_signals[-12:]
+
+    shadow_live_counts = {"strong_allow": 0, "allow": 0, "watch": 0, "deny": 0, "neutral": 0, "other": 0}
+    for s in shadow_live_signals[-100:]:
+        decision = str(s.get("shadow_live_decision", "other") or "other")
+        if decision in shadow_live_counts:
+            shadow_live_counts[decision] += 1
+        else:
+            shadow_live_counts["other"] += 1
+
+    shadow_live_mode = "unknown"
+    if shadow_live_signals:
+        shadow_live_mode = str(shadow_live_signals[-1].get("shadow_live_mode", "unknown") or "unknown")
 
     # Последние цены BTC/ETH
     btc_price = None
@@ -422,6 +439,10 @@ def build_dashboard_state():
         "last_signals": last_signals,
         "last_entered": last_entered,
         "last_skipped": last_skipped,
+        "last_shadow_live": last_shadow_live,
+        "shadow_live_mode": shadow_live_mode,
+        "shadow_live_counts": shadow_live_counts,
+        "shadow_live_total": len(shadow_live_signals),
         "btc_signals": [s for s in signals if s.get("coin") == "BTC"],
         "eth_signals": [s for s in signals if s.get("coin") == "ETH"],
         "btc_entered": [s for s in entered if s.get("coin") == "BTC"],
@@ -626,6 +647,18 @@ with tab_dashboard:
         "Polymarket Cash/Portfolio are shown only as reference and are not changed by simulated trades."
     )
 
+    # ---- SHADOW LIVE ----
+    st.markdown("---")
+    st.markdown("#### Shadow Live")
+    sh1, sh2, sh3, sh4, sh5 = st.columns(5)
+    shadow_counts = D['shadow_live_counts']
+    sh1.metric("Mode", D['shadow_live_mode'])
+    sh2.metric("Strong/Allow", shadow_counts.get('strong_allow', 0) + shadow_counts.get('allow', 0))
+    sh3.metric("Watch", shadow_counts.get('watch', 0))
+    sh4.metric("Deny", shadow_counts.get('deny', 0))
+    sh5.metric("Shadow Signals", D['shadow_live_total'])
+    st.caption("Shadow live decisions are currently for observation/controlled rollout, depending on bot settings.")
+
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
         st.markdown("#### Strategy Quality")
@@ -694,6 +727,21 @@ with tab_dashboard:
                 skip_html += '</div>'
                 st.markdown(skip_html, unsafe_allow_html=True)
 
+    if D['last_shadow_live']:
+        st.markdown("---")
+        st.markdown("**Recent Shadow Decisions**")
+        shadow_rows = []
+        for x in reversed(D['last_shadow_live'][-8:]):
+            shadow_rows.append({
+                "Time": x.get('timestamp', ''),
+                "Coin": x.get('coin', ''),
+                "Decision": x.get('shadow_live_decision', ''),
+                "Profile": x.get('shadow_entry_profile', ''),
+                "Mode": x.get('shadow_live_mode', ''),
+                "Reason": str(x.get('shadow_live_reason', '') or '')[:48],
+            })
+        st.dataframe(shadow_rows, use_container_width=True, hide_index=True, height=220)
+
     # ---- SIGNALS TABLE ----
     if D['last_signals']:
         with st.expander(f"📋 Last Signals ({len(D['last_signals'])})", expanded=False):
@@ -706,6 +754,7 @@ with tab_dashboard:
                     "Δ%": f"{x.get('delta', 0):.3f}",
                     "Conf%": f"{x.get('confidence', 0)*100:.0f}",
                     "Price": f"{x.get('price', 0):.0f}",
+                    "Shadow": x.get('shadow_live_decision', ''),
                     "Entered": "✅" if x.get("entered") else "❌",
                 })
             st.dataframe(rows, use_container_width=True, hide_index=True, height=200)
@@ -749,6 +798,9 @@ with tab_history:
                     "Confidence": f"{x.get('confidence', 0):.0%}",
                     "Price": f"{x.get('price', 0):.0f}",
                     "Seconds Left": f"{x.get('time_left', 0):.0f}s",
+                    "Shadow Mode": x.get("shadow_live_mode", ""),
+                    "Shadow Decision": x.get("shadow_live_decision", ""),
+                    "Shadow Profile": x.get("shadow_entry_profile", ""),
                     "Entered": "✅" if x.get("entered") else "❌",
                     "Reason": x.get("reason", "")[:50],
                 })
@@ -830,6 +882,28 @@ with tab_stats:
         su6.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
         su7.metric("🔓 Spendable", f"${D['account']['spendable']:.2f}" if D['account']['spendable'] is not None else "—")
         su8.metric("🎟 Redeemable", f"${D['account']['redeemable']:.2f}" if D['account']['redeemable'] is not None else "—")
+
+        st.markdown("---")
+        st.markdown("**Shadow Live Summary**")
+        sl1, sl2, sl3, sl4, sl5 = st.columns(5)
+        shadow_counts = D['shadow_live_counts']
+        sl1.metric("Mode", D['shadow_live_mode'])
+        sl2.metric("Allow", shadow_counts.get('strong_allow', 0) + shadow_counts.get('allow', 0))
+        sl3.metric("Watch", shadow_counts.get('watch', 0))
+        sl4.metric("Deny", shadow_counts.get('deny', 0))
+        sl5.metric("Observed", D['shadow_live_total'])
+
+        if D['last_shadow_live']:
+            shadow_recent_rows = []
+            for x in reversed(D['last_shadow_live'][-6:]):
+                shadow_recent_rows.append({
+                    "Time": x.get("timestamp", ""),
+                    "Coin": x.get("coin", ""),
+                    "Decision": x.get("shadow_live_decision", ""),
+                    "Profile": x.get("shadow_entry_profile", ""),
+                    "Reason": str(x.get("shadow_live_reason", "") or "")[:42],
+                })
+            st.dataframe(shadow_recent_rows, use_container_width=True, hide_index=True, height=190)
 
         # Win/Loss breakdown
         st.markdown("---")
