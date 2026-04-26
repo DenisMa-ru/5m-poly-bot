@@ -1207,14 +1207,33 @@ class CryptoBot:
         )
         if pm_price > PRICE_MAX and not strong_overprice_ok:
             ceiling = PRICE_MAX_STRONG if pm_price <= PRICE_MAX_STRONG else PRICE_MAX
+            if pm_price > PRICE_MAX_STRONG:
+                override_reason = f"pm above strong max {PRICE_MAX_STRONG:.2f}"
+            elif delta_pct < STRONG_OVERPRICE_DELTA_MIN:
+                override_reason = f"delta {delta_pct:.4f}% < {STRONG_OVERPRICE_DELTA_MIN:.3f}%"
+            elif confidence < STRONG_OVERPRICE_CONFIDENCE_MIN:
+                override_reason = f"confidence {confidence:.0%} < {STRONG_OVERPRICE_CONFIDENCE_MIN:.0%}"
+            elif indicator_confirm < STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN:
+                override_reason = (
+                    f"1m confirm {indicator_confirm:+.2f} < {STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN:+.2f}"
+                )
+            elif edge < STRONG_OVERPRICE_EDGE_MIN:
+                override_reason = f"edge {edge:+.3f} < {STRONG_OVERPRICE_EDGE_MIN:+.3f}"
+            elif not trend_aligned:
+                override_reason = "trend not aligned"
+            elif seconds_left < STRONG_OVERPRICE_TIME_LEFT_MIN:
+                override_reason = f"time_left {seconds_left:.1f}s < {STRONG_OVERPRICE_TIME_LEFT_MIN:.0f}s"
+            else:
+                override_reason = "strong override failed"
             log(
                 f'   [{crypto}] SKIP — PM price {pm_price:.3f} > {PRICE_MAX} '
+                f'({override_reason}; '
                 f'(minimal upside; strong override requires delta>={STRONG_OVERPRICE_DELTA_MIN:.3f}% '
                 f'conf>={STRONG_OVERPRICE_CONFIDENCE_MIN:.0%} edge>={STRONG_OVERPRICE_EDGE_MIN:+.3f} '
                 f'1m>={STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN:+.2f} '
                 f'time_left>={STRONG_OVERPRICE_TIME_LEFT_MIN:.0f}s trend_aligned)'
             )
-            signal_data["reason"] = f"PM price > {ceiling:.2f}"
+            signal_data["reason"] = f"PM price > {ceiling:.2f} | {override_reason}"
             save_signal(signal_data)
             return
         if pm_price > PRICE_MAX:
