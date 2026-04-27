@@ -1529,18 +1529,25 @@ class CryptoBot:
             save_signal(signal_data)
             return
 
-        # Filter 1: minimum price per crypto
-        if market["winner_price"] < price_min:
-            log(f"   [{crypto}] SKIP — PM price {market['winner_price']:.3f} < {price_min}")
-            signal_data["reason"] = f"PM price < {price_min}"
-            save_signal(signal_data)
-            return
-
-        # Filter 1b: maximum price, with a narrow exception for stronger setups.
         confidence = float(ta.get("confidence", 0) or 0)
         indicator_confirm = float(ta.get("indicator_confirm", 0) or 0)
         delta_pct = float(ta.get("delta_pct", 0) or 0)
         pm_price = float(market["winner_price"] or 0)
+        core_first_mode = CORE_EV_ENABLED
+
+        # Filter 1: legacy PM bounds. In Core EV mode these become diagnostic only;
+        # the Core EV rulebook remains the actual entry gate.
+        if pm_price < price_min:
+            if core_first_mode:
+                log(f"   [{crypto}] NOTE — legacy PM floor {pm_price:.3f} < {price_min} ignored in core-first mode")
+            else:
+                log(f"   [{crypto}] SKIP — PM price {market['winner_price']:.3f} < {price_min}")
+                signal_data["reason"] = f"PM price < {price_min}"
+                save_signal(signal_data)
+                return
+
+        # Filter 1b: legacy maximum price / overprice override. In Core EV mode this
+        # is informational only because Core EV already enforces its own PM zone.
         strong_overprice_ok = (
             pm_price <= PRICE_MAX_STRONG
             and delta_pct >= STRONG_OVERPRICE_DELTA_MIN
@@ -1571,16 +1578,17 @@ class CryptoBot:
             else:
                 override_reason = "strong override failed"
             log(
-                f'   [{crypto}] SKIP — PM price {pm_price:.3f} > {PRICE_MAX} '
+                f'   [{crypto}] {"NOTE" if core_first_mode else "SKIP"} — PM price {pm_price:.3f} > {PRICE_MAX} '
                 f'({override_reason}; '
                 f'(minimal upside; strong override requires delta>={STRONG_OVERPRICE_DELTA_MIN:.3f}% '
                 f'conf>={STRONG_OVERPRICE_CONFIDENCE_MIN:.0%} edge>={STRONG_OVERPRICE_EDGE_MIN:+.3f} '
                 f'1m>={STRONG_OVERPRICE_INDICATOR_CONFIRM_MIN:+.2f} '
                 f'time_left>={STRONG_OVERPRICE_TIME_LEFT_MIN:.0f}s trend_aligned)'
             )
-            signal_data["reason"] = f"PM price > {ceiling:.2f} | {override_reason}"
-            save_signal(signal_data)
-            return
+            if not core_first_mode:
+                signal_data["reason"] = f"PM price > {ceiling:.2f} | {override_reason}"
+                save_signal(signal_data)
+                return
         if pm_price > PRICE_MAX:
             log(
                 f"   [{crypto}] ALLOW — PM price {pm_price:.3f} above base max {PRICE_MAX} "
@@ -1622,32 +1630,45 @@ class CryptoBot:
                 f"profile={shadow_profile} score={shadow_live_score:.2f})"
             )
 
-        # Filter 2: minimum confidence
+        # Legacy confidence/edge/1m filters become advisory in Core EV mode.
         if confidence < MIN_CONFIDENCE and not normal_zone_live_pass and not hybrid_shadow_live_pass:
-            log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
-            signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
-            save_signal(signal_data)
-            return
+            if core_first_mode:
+                log(f"   [{crypto}] NOTE — legacy confidence gate {confidence:.0%} < {MIN_CONFIDENCE:.0%} ignored in core-first mode")
+            else:
+                log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
+                signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
+                save_signal(signal_data)
+                return
 
-        # Filter 2b: minimum edge vs current PM price.
         if edge < MIN_EDGE and not normal_zone_live_pass and not hybrid_shadow_live_pass:
-            log(
-                f"   [{crypto}] SKIP — edge {edge:+.3f} < {MIN_EDGE:+.3f} "
-                f"(model={model_prob:.3f} market={market_prob:.3f})"
-            )
-            signal_data["reason"] = f"edge {edge:+.3f} < {MIN_EDGE:+.3f}"
-            save_signal(signal_data)
-            return
+            if core_first_mode:
+                log(
+                    f"   [{crypto}] NOTE — legacy edge gate {edge:+.3f} < {MIN_EDGE:+.3f} "
+                    f"(model={model_prob:.3f} market={market_prob:.3f}) ignored in core-first mode"
+                )
+            else:
+                log(
+                    f"   [{crypto}] SKIP — edge {edge:+.3f} < {MIN_EDGE:+.3f} "
+                    f"(model={model_prob:.3f} market={market_prob:.3f})"
+                )
+                signal_data["reason"] = f"edge {edge:+.3f} < {MIN_EDGE:+.3f}"
+                save_signal(signal_data)
+                return
 
-        # Filter 2c: optional 1m indicator confirmation.
         if indicator_confirm < INDICATOR_CONFIRM_MIN and not normal_zone_live_pass and not hybrid_shadow_live_pass:
-            log(
-                f"   [{crypto}] SKIP — 1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f} "
-                f"({ta.get('indicator_reason', 'neutral')})"
-            )
-            signal_data["reason"] = f"1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f}"
-            save_signal(signal_data)
-            return
+            if core_first_mode:
+                log(
+                    f"   [{crypto}] NOTE — legacy 1m gate {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f} "
+                    f"({ta.get('indicator_reason', 'neutral')}) ignored in core-first mode"
+                )
+            else:
+                log(
+                    f"   [{crypto}] SKIP — 1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f} "
+                    f"({ta.get('indicator_reason', 'neutral')})"
+                )
+                signal_data["reason"] = f"1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f}"
+                save_signal(signal_data)
+                return
 
         # Filter 3: direction must match between Binance and Polymarket
         ta_dir  = ta.get("direction")
@@ -1658,19 +1679,25 @@ class CryptoBot:
             save_signal(signal_data)
             return
 
-        # Filter 4: minimum delta
+        # Legacy delta/tier filters also become advisory in Core EV mode. Core EV
+        # itself will reject weak signals through its own bucket/tier logic.
         if delta_pct < DELTA_SKIP * 100:
-            log(f"   [{crypto}] SKIP — delta {delta_pct:.4f}% too small")
-            signal_data["reason"] = f"delta {delta_pct:.4f}% too small"
-            save_signal(signal_data)
-            return
+            if core_first_mode:
+                log(f"   [{crypto}] NOTE — legacy delta gate {delta_pct:.4f}% too small ignored in core-first mode")
+            else:
+                log(f"   [{crypto}] SKIP — delta {delta_pct:.4f}% too small")
+                signal_data["reason"] = f"delta {delta_pct:.4f}% too small"
+                save_signal(signal_data)
+                return
 
-        # Filter 5: require a setup that clears the offline quality tier.
         if signal_tier == "observe" and not normal_zone_live_pass and not hybrid_shadow_live_pass:
-            log(f"   [{crypto}] SKIP — signal tier observe ({signal_tier_reason})")
-            signal_data["reason"] = f"signal tier observe | {signal_tier_reason}"
-            save_signal(signal_data)
-            return
+            if core_first_mode:
+                log(f"   [{crypto}] NOTE — legacy signal tier observe ({signal_tier_reason}) ignored in core-first mode")
+            else:
+                log(f"   [{crypto}] SKIP — signal tier observe ({signal_tier_reason})")
+                signal_data["reason"] = f"signal tier observe | {signal_tier_reason}"
+                save_signal(signal_data)
+                return
 
         core_ev = self._evaluate_core_ev_gate(signal_data, shadow_live_decision)
         signal_data["core_ev_bucket_key"] = str(core_ev.get("bucket_key", "") or "")
