@@ -430,14 +430,56 @@ def core_pm_eligible(signal: dict, pm_min: float, pm_max: float) -> bool:
     return pm_min <= pm <= pm_max
 
 
+def derive_core_signal_tier(signal: dict) -> str:
+    explicit = str(signal.get("signal_tier", "") or "").strip().lower()
+    if explicit in {"candidate", "trade", "observe"}:
+        return explicit
+
+    pm = float(signal.get("pm", 0) or 0)
+    delta_pct = float(signal.get("delta", 0) or 0)
+    confidence = float(signal.get("confidence", 0) or 0)
+    indicator_confirm = float(signal.get("indicator_confirm", 0) or 0)
+    time_left = float(signal.get("time_left", 0) or 0)
+
+    if time_left < 10 or time_left > 30:
+        return "observe"
+    if pm < 0.58 or pm > 0.72:
+        return "observe"
+    if pm >= 0.60 and pm <= 0.68 and delta_pct >= 0.015 and confidence >= 0.10 and indicator_confirm >= 0.15:
+        return "trade"
+    if pm >= 0.58 and pm <= 0.70 and delta_pct >= 0.008 and confidence >= 0.03 and indicator_confirm >= 0.0:
+        return "candidate"
+    if pm >= 0.60 and pm <= 0.70 and delta_pct >= 0.012 and indicator_confirm > 0:
+        return "candidate"
+    if pm >= 0.58 and pm <= 0.68 and confidence >= 0.05:
+        return "candidate"
+    return "observe"
+
+
+def derive_core_trend_aligned(signal: dict) -> bool:
+    if signal.get("trend_aligned") is not None:
+        return bool(signal.get("trend_aligned"))
+    tier_reason = str(signal.get("signal_tier_reason", "") or "").strip().lower()
+    if "no trend or 1m support" in tier_reason:
+        return False
+    return True
+
+
+def derive_core_trend_conflict(signal: dict) -> bool:
+    if signal.get("trend_conflict") is not None:
+        return bool(signal.get("trend_conflict"))
+    reason = str(signal.get("reason", "") or "").strip().lower()
+    return "direction mismatch" in reason
+
+
 def core_hard_eligible(signal: dict, pm_min: float, pm_max: float) -> bool:
     if not core_pm_eligible(signal, pm_min, pm_max):
         return False
-    if not bool(signal.get("trend_aligned")):
+    if not derive_core_trend_aligned(signal):
         return False
-    if bool(signal.get("trend_conflict")):
+    if derive_core_trend_conflict(signal):
         return False
-    if str(signal.get("signal_tier", "observe") or "observe") not in {"candidate", "trade"}:
+    if derive_core_signal_tier(signal) not in {"candidate", "trade"}:
         return False
     if str(signal.get("shadow_live_decision", "neutral") or "neutral") == "deny":
         return False
@@ -454,8 +496,8 @@ def core_bucket_keys(signal: dict) -> dict[str, str]:
     regime = market_regime_label(signal)
     stable_bucket = bucket_stable_ticks_value(int(signal.get("stable_ticks", 0) or 0))
     profile = shadow_profile_label(signal)
-    tier = signal_tier_label(signal)
-    trend_flag = "trend_ok" if bool(signal.get("trend_aligned")) and not bool(signal.get("trend_conflict")) else "trend_bad"
+    tier = derive_core_signal_tier(signal)
+    trend_flag = "trend_ok" if derive_core_trend_aligned(signal) and not derive_core_trend_conflict(signal) else "trend_bad"
     return {
         "L1": " | ".join(["L1", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", trend_flag]),
         "L2": " | ".join(["L2", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"tier:{tier}"]),
