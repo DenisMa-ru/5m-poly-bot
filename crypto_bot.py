@@ -183,6 +183,7 @@ SHADOW_PROBE_DELTA_MIN = float(_bot_settings.get("shadow_probe_delta_min_pct", S
 SHADOW_PROBE_PM_MAX = float(_bot_settings.get("shadow_probe_pm_max", min(SHADOW_PM_MAX, 0.70)) or min(SHADOW_PM_MAX, 0.70))
 SHADOW_OBSERVE_PM_FLOOR = float(_bot_settings.get("shadow_observe_pm_floor", 0.10) or 0.10)
 SHADOW_EARLY_PM_FLOOR = float(_bot_settings.get("shadow_early_pm_floor", SHADOW_OBSERVE_PM_FLOOR) or SHADOW_OBSERVE_PM_FLOOR)
+SHADOW_OBSERVE_CHEAP_PM_MAX_PROGRESS = float(_bot_settings.get("shadow_observe_cheap_pm_max_progress", 0.90) or 0.90)
 SHADOW_REGIME_SUPPORT_UNDERPRICING_MIN = float(_bot_settings.get("shadow_regime_support_underpricing_min", 0.05) or 0.05)
 SHADOW_LIVE_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_allow_min_score", 4.5) or 4.5)
 SHADOW_LIVE_STRONG_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_strong_allow_min_score", 6.0) or 6.0)
@@ -1662,10 +1663,14 @@ class CryptoBot:
             score = stable_ticks * 0.8 + delta_pct * 80 + underpricing_score * 5
             reason = "stable early trend with PM lag"
         elif 45 <= seconds_left <= 150 and pullback_size <= SHADOW_PULLBACK_MAX and pullback_recovered and delta_pct >= SHADOW_EARLY_DELTA_MIN:
+            if pm_price < SHADOW_OBSERVE_PM_FLOOR:
+                return {"candidate": False, "profile": "none", "score": 0.0, "reason": f"pm too cheap for pullback shadow ({pm_price:.3f})"}
             profile = "trend_pullback_resume"
             score = stable_ticks * 0.7 + delta_pct * 70 + max(0.0, 0.02 - pullback_size) * 100
             reason = "pullback recovered into trend"
         elif 12 <= seconds_left <= 45 and delta_pct >= SHADOW_LATE_DELTA_MIN and indicator_confirm >= -0.05:
+            if pm_price < SHADOW_OBSERVE_PM_FLOOR:
+                return {"candidate": False, "profile": "none", "score": 0.0, "reason": f"pm too cheap for late shadow ({pm_price:.3f})"}
             profile = "late_lock"
             score = stable_ticks * 0.6 + delta_pct * 90 + underpricing_score * 3
             reason = "late lock with sustained move"
@@ -1701,7 +1706,7 @@ class CryptoBot:
         decision = "neutral"
         reason = "no live shadow edge"
         regime_support = regime.startswith("trend_") and recent_streak >= 2
-        early_shadow_too_cheap = pm_price < SHADOW_OBSERVE_PM_FLOOR and progress < SHADOW_LIVE_DENY_MIN_PROGRESS
+        early_shadow_too_cheap = pm_price < SHADOW_OBSERVE_PM_FLOOR and progress < SHADOW_OBSERVE_CHEAP_PM_MAX_PROGRESS
 
         if early_shadow_too_cheap and candidate:
             decision = "neutral"
