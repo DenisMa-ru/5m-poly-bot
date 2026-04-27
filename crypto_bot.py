@@ -181,6 +181,8 @@ SHADOW_PULLBACK_MAX = float(_bot_settings.get("shadow_pullback_max_pct", 0.012) 
 SHADOW_UNDERPRICING_MIN = float(_bot_settings.get("shadow_underpricing_min", 0.010) or 0.010)
 SHADOW_PROBE_DELTA_MIN = float(_bot_settings.get("shadow_probe_delta_min_pct", SHADOW_EARLY_DELTA_MIN * 0.8) or (SHADOW_EARLY_DELTA_MIN * 0.8))
 SHADOW_PROBE_PM_MAX = float(_bot_settings.get("shadow_probe_pm_max", min(SHADOW_PM_MAX, 0.70)) or min(SHADOW_PM_MAX, 0.70))
+SHADOW_OBSERVE_PM_FLOOR = float(_bot_settings.get("shadow_observe_pm_floor", 0.10) or 0.10)
+SHADOW_EARLY_PM_FLOOR = float(_bot_settings.get("shadow_early_pm_floor", SHADOW_OBSERVE_PM_FLOOR) or SHADOW_OBSERVE_PM_FLOOR)
 SHADOW_REGIME_SUPPORT_UNDERPRICING_MIN = float(_bot_settings.get("shadow_regime_support_underpricing_min", 0.05) or 0.05)
 SHADOW_LIVE_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_allow_min_score", 4.5) or 4.5)
 SHADOW_LIVE_STRONG_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_strong_allow_min_score", 6.0) or 6.0)
@@ -1630,6 +1632,7 @@ class CryptoBot:
         reversal_flag = bool(features.get("reversal_flag"))
         regime_support = regime.startswith("trend_") and recent_streak >= 2
         soft_structure_ok = stable_ticks >= SHADOW_SOFT_STABLE_TICKS or direction_persistence >= 0.45
+        early_shadow_too_cheap = pm_price < SHADOW_EARLY_PM_FLOOR and seconds_left >= 45
 
         if not trend_aligned and not regime_support:
             return {"candidate": False, "profile": "none", "score": 0.0, "reason": "trend not aligned"}
@@ -1637,6 +1640,8 @@ class CryptoBot:
             return {"candidate": False, "profile": "none", "score": 0.0, "reason": f"pm too expensive for shadow ({pm_price:.3f})"}
         if reversal_flag and not pullback_recovered:
             return {"candidate": False, "profile": "none", "score": 0.0, "reason": "reversal not recovered"}
+        if early_shadow_too_cheap:
+            return {"candidate": False, "profile": "none", "score": 0.0, "reason": f"pm too cheap for early shadow ({pm_price:.3f})"}
 
         profile = "none"
         score = 0.0
@@ -1696,6 +1701,27 @@ class CryptoBot:
         decision = "neutral"
         reason = "no live shadow edge"
         regime_support = regime.startswith("trend_") and recent_streak >= 2
+        early_shadow_too_cheap = pm_price < SHADOW_OBSERVE_PM_FLOOR and progress < SHADOW_LIVE_DENY_MIN_PROGRESS
+
+        if early_shadow_too_cheap and candidate:
+            decision = "neutral"
+            reason = f"pm too cheap for reliable early shadow ({pm_price:.3f})"
+            candidate = False
+            profile = "none"
+            score = 0.0
+            return {
+                "decision": decision,
+                "reason": reason,
+                "profile": profile,
+                "score": round(score, 4),
+                "candidate": candidate,
+                "market_regime": regime,
+                "stable_ticks": stable_ticks,
+                "recent_5m_streak": recent_streak,
+                "window_progress_pct": round(progress, 4),
+                "underpricing_score": round(underpricing_score, 4),
+                "pm_vs_delta_gap": round(pm_gap, 4),
+            }
 
         if not candidate:
             if not trend_aligned:
