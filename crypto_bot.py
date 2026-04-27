@@ -171,6 +171,7 @@ NORMAL_ZONE_DELTA_MIN = float(_bot_settings.get("normal_zone_delta_min_pct", 0.0
 NORMAL_ZONE_TIME_LEFT_MIN = float(_bot_settings.get("normal_zone_time_left_min", 18) or 18)
 NORMAL_ZONE_EDGE_MIN = float(_bot_settings.get("normal_zone_edge_min", -0.05) or -0.05)
 NORMAL_ZONE_INDICATOR_CONFIRM_MIN = float(_bot_settings.get("normal_zone_indicator_confirm_min", -0.05) or -0.05)
+HYBRID_SHADOW_PM_MIN = float(_bot_settings.get("hybrid_shadow_pm_min", NORMAL_ZONE_MIN) or NORMAL_ZONE_MIN)
 WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 40) or 40)
 SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
 SHADOW_SOFT_STABLE_TICKS = int(_bot_settings.get("shadow_soft_stable_ticks", max(1, SHADOW_MIN_STABLE_TICKS - 1)) or max(1, SHADOW_MIN_STABLE_TICKS - 1))
@@ -1365,13 +1366,23 @@ class CryptoBot:
                 f"1m={indicator_confirm:+.2f} time_left={seconds_left:.1f}s)"
             )
 
-        hybrid_shadow_live_pass = shadow_live_relax_filters and not normal_zone_live_pass
+        hybrid_shadow_live_pass = (
+            shadow_live_relax_filters
+            and not normal_zone_live_pass
+            and pm_price >= HYBRID_SHADOW_PM_MIN
+        )
         if hybrid_shadow_live_pass:
             log(
                 f"   [{crypto}] ALLOW — hybrid shadow live pass "
                 f"(decision={shadow_live_decision} profile={shadow_profile} score={shadow_live_score:.2f} "
                 f"pm={pm_price:.3f} delta={delta_pct:.4f}% edge={edge:+.3f} 1m={indicator_confirm:+.2f} "
                 f"time_left={seconds_left:.1f}s)"
+            )
+        elif shadow_live_relax_filters and not normal_zone_live_pass and pm_price < HYBRID_SHADOW_PM_MIN:
+            log(
+                f"   [{crypto}] SHADOW-ALLOW BLOCKED — hybrid shadow PM too cheap "
+                f"(pm={pm_price:.3f} < {HYBRID_SHADOW_PM_MIN:.2f}; decision={shadow_live_decision} "
+                f"profile={shadow_profile} score={shadow_live_score:.2f})"
             )
 
         # Filter 2: minimum confidence
