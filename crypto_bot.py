@@ -1428,6 +1428,13 @@ class CryptoBot:
             save_signal(signal_data)
             return
 
+        # Filter 5: require a setup that clears the offline quality tier.
+        if signal_tier == "observe" and not normal_zone_live_pass and not hybrid_shadow_live_pass:
+            log(f"   [{crypto}] SKIP — signal tier observe ({signal_tier_reason})")
+            signal_data["reason"] = f"signal tier observe | {signal_tier_reason}"
+            save_signal(signal_data)
+            return
+
         if not self.paper and not self.dry_run:
             collateral_balance, collateral_allowance = get_collateral_balance_allowance(
                 self.private_key,
