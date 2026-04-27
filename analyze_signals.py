@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 DEFAULT_FILE = Path(__file__).with_name("signals.json")
+DEFAULT_WINDOW_SAMPLES_FILE = Path(__file__).with_name("window_samples.json")
 DEFAULT_CORE_EV_RULES_FILE = Path(__file__).with_name("core_ev_rules.json")
 
 
@@ -26,6 +27,15 @@ def load_signals(path: Path) -> list[dict]:
     if not isinstance(data, list):
         raise ValueError("signals file must contain a JSON list")
     return data
+
+
+def select_core_ev_records(records: list[dict]) -> list[dict]:
+    selected = []
+    for record in records:
+        record_type = str(record.get("record_type", "") or "").strip().lower()
+        if not record_type or record_type == "window_sample":
+            selected.append(record)
+    return selected
 
 
 def avg(values: list[float]) -> float:
@@ -440,9 +450,17 @@ def core_l1_delta_bucket(delta_pct: float) -> str:
 
 
 def core_l1_time_bucket(time_left: float) -> str:
+    if time_left < 10:
+        return "<10s"
     if time_left < 20:
         return "10-19s"
-    return "20-29s"
+    if time_left < 30:
+        return "20-29s"
+    if time_left < 60:
+        return "30-59s"
+    if time_left < 120:
+        return "60-119s"
+    return "120-300s"
 
 
 def core_pm_eligible(signal: dict, pm_min: float, pm_max: float) -> bool:
@@ -461,7 +479,7 @@ def derive_core_signal_tier(signal: dict) -> str:
     indicator_confirm = float(signal.get("indicator_confirm", 0) or 0)
     time_left = float(signal.get("time_left", 0) or 0)
 
-    if time_left < 10 or time_left > 30:
+    if time_left < 10 or time_left > 305:
         return "observe"
     if pm < 0.58 or pm > 0.72:
         return "observe"
@@ -529,6 +547,7 @@ def core_bucket_keys(signal: dict) -> dict[str, str]:
 
 
 def build_core_ev_rulebook(signals: list[dict], args) -> dict:
+    source_label = getattr(args, "core_ev_source_label", "signals")
     resolved = []
     for signal in signals:
         outcome_pnl = resolve_outcome_pnl(signal)
@@ -602,6 +621,7 @@ def build_core_ev_rulebook(signals: list[dict], args) -> dict:
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_type": source_label,
         "source_signals": len(signals),
         "resolved_eligible_signals": len(resolved),
         "core_pm_min": args.core_pm_min,
@@ -617,6 +637,7 @@ def build_core_ev_rulebook(signals: list[dict], args) -> dict:
 def print_core_ev_rulebook_summary(rulebook: dict, top: int) -> None:
     print("=== CORE EV RULEBOOK ===")
     print(f"generated_at: {rulebook.get('generated_at', 'unknown')}")
+    print(f"source_type: {rulebook.get('source_type', 'unknown')}")
     print(f"source_signals: {rulebook.get('source_signals', 0)}")
     print(f"resolved_eligible_signals: {rulebook.get('resolved_eligible_signals', 0)}")
     rows = [{"key": key, **stats} for key, stats in rulebook.get("buckets", {}).items()]
@@ -1101,6 +1122,56 @@ def print_core_ev_timing_report(signals: list[dict], min_trades: int, top: int) 
         ("By time left", lambda signal: bucket_time_left(float(signal.get("time_left", 0) or 0))),
         ("By PM x time", lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)))),
         ("By delta x time", lambda signal: combo_bucket(signal, lambda s: bucket_delta(float(s.get("delta", 0) or 0)), lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)))),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(resolved, key_fn), min_trades)
+        print_table(title, rows, top)
+
+
+def print_full_window_core_ev_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== FULL-WINDOW CORE EV REPORT ===")
+    resolved = []
+    for signal in signals:
+        pnl = resolve_outcome_pnl(signal)
+        if pnl is None:
+            continue
+        if not core_hard_eligible(signal, 0.58, 0.70):
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": pnl,
+            "won": pnl > 0,
+        })
+
+    if not resolved:
+        print("No resolved full-window core-like samples yet.")
+        return
+
+    print(
+        f"signals={len(resolved)} | total={fmt_money(sum(float(s.get('realized_pnl', 0) or 0) for s in resolved))} | "
+        f"avg_pm={avg([float(s.get('pm', 0) or 0) for s in resolved]):.3f} | avg_time={avg([float(s.get('time_left', 0) or 0) for s in resolved]):.1f}s"
+    )
+
+    reports = [
+        ("By time left", lambda signal: bucket_time_left(float(signal.get("time_left", 0) or 0))),
+        ("By L1 time", lambda signal: core_l1_time_bucket(float(signal.get("time_left", 0) or 0))),
+        (
+            "By PM x time",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: bucket_pm(float(s.get("pm", 0) or 0)),
+                lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)),
+            ),
+        ),
+        (
+            "By delta x time",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: bucket_delta(float(s.get("delta", 0) or 0)),
+                lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)),
+            ),
+        ),
     ]
 
     for title, key_fn in reports:
@@ -2010,7 +2081,9 @@ def run_grid_search(signals: list[dict], args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze bot signals.json history")
     parser.add_argument("--file", default=str(DEFAULT_FILE), help="Path to signals.json")
+    parser.add_argument("--window-file", default=str(DEFAULT_WINDOW_SAMPLES_FILE), help="Path to window_samples.json for full-window Core EV analysis")
     parser.add_argument("--build-core-ev-rules", action="store_true", help="Build Core EV rulebook JSON from resolved signals")
+    parser.add_argument("--core-ev-source", choices=["signals", "window"], default="window", help="Source dataset for Core EV rulebook generation")
     parser.add_argument("--rules-out", default=str(DEFAULT_CORE_EV_RULES_FILE), help="Path to write Core EV rulebook JSON")
     parser.add_argument("--top", type=int, default=6, help="Number of best/worst rows to show")
     parser.add_argument("--min-trades", type=int, default=3, help="Hide segment rows with fewer than this many settled trades")
@@ -2048,10 +2121,24 @@ def main() -> int:
     signals = load_signals(path)
 
     if args.build_core_ev_rules:
-        rulebook = build_core_ev_rulebook(signals, args)
+        if args.core_ev_source == "window":
+            window_path = Path(args.window_file)
+            if not window_path.exists():
+                print(f"Window samples file not found: {window_path}")
+                print("Tip: run the updated bot first so it writes window_samples.json, or pass --core-ev-source signals.")
+                return 1
+            core_records = select_core_ev_records(load_signals(window_path))
+            args.core_ev_source_label = "window_samples"
+        else:
+            core_records = signals
+            args.core_ev_source_label = "signals"
+
+        rulebook = build_core_ev_rulebook(core_records, args)
         out_path = Path(args.rules_out)
         out_path.write_text(json.dumps(rulebook, indent=2), encoding="utf-8")
         print_core_ev_rulebook_summary(rulebook, args.top)
+        if args.core_ev_source == "window":
+            print_full_window_core_ev_report(core_records, args.min_trades, args.top)
         print(f"\nWrote Core EV rules to: {out_path}")
         return 0
 

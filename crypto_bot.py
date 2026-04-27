@@ -37,6 +37,7 @@ load_dotenv()
 BOT_DIR = Path(__file__).parent
 CONTROL_FILE = BOT_DIR / "control.json"
 SIGNALS_FILE = BOT_DIR / "signals.json"
+WINDOW_SAMPLES_FILE = BOT_DIR / "window_samples.json"
 SETTINGS_FILE = BOT_DIR / "settings.json"
 PID_FILE = BOT_DIR / "bot.pid"
 CORE_EV_RULES_FILE = BOT_DIR / "core_ev_rules.json"
@@ -63,6 +64,32 @@ def load_signals_file() -> list:
 def save_signals_file(signals: list):
     """Persist signals history atomically."""
     atomic_write_text(SIGNALS_FILE, json.dumps(signals[-10000:], indent=2))
+
+
+def load_window_samples_file() -> list:
+    """Load full-window observation history safely."""
+    if not WINDOW_SAMPLES_FILE.exists():
+        return []
+    try:
+        data = json.loads(WINDOW_SAMPLES_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_window_samples_file(samples: list):
+    """Persist full-window observation history atomically."""
+    atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2))
+
+
+def save_window_sample(sample_data: dict):
+    """Append a full-window observation sample for offline EV analysis."""
+    try:
+        samples = load_window_samples_file()
+        samples.append(sample_data)
+        save_window_samples_file(samples)
+    except Exception as e:
+        log(f"[WINDOW SAMPLE SAVE ERROR] {e}")
 
 
 def load_core_ev_rules() -> dict:
@@ -168,7 +195,15 @@ PRICE_MIN         = {
 PRICE_MAX         = _bot_settings.get("price_max", 0.99)
 PRICE_MAX_STRONG  = float(_bot_settings.get("price_max_strong", max(float(PRICE_MAX), 0.76)) or max(float(PRICE_MAX), 0.76))
 
-WAKE_BEFORE       = 65
+OBSERVE_WINDOW_SECONDS = int(_bot_settings.get("observe_window_seconds", 305) or 305)
+FULL_WINDOW_CORE_EV_ENABLED = bool(_bot_settings.get("full_window_core_ev_enabled", True))
+WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_enabled", True))
+CORE_EV_ENTRY_TIME_MIN = float(_bot_settings.get("core_ev_entry_time_min", 10) or 10)
+CORE_EV_ENTRY_TIME_MAX = float(_bot_settings.get("core_ev_entry_time_max", max(10, OBSERVE_WINDOW_SECONDS)) or max(10, OBSERVE_WINDOW_SECONDS))
+FULL_WINDOW_ENTRY_CONFIRM_TICKS = int(_bot_settings.get("full_window_entry_confirm_ticks", 2) or 2)
+FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_entry_commit_time_left", 19) or 19)
+FULL_WINDOW_ENTRY_MIN_SCORE_GAIN = float(_bot_settings.get("full_window_entry_min_score_gain", 0.15) or 0.15)
+WAKE_BEFORE       = int(_bot_settings.get("wake_before", max(65, OBSERVE_WINDOW_SECONDS)) or max(65, OBSERVE_WINDOW_SECONDS))
 POLL_INTERVAL     = 3
 
 DELTA_SKIP        = _bot_settings.get("delta_skip", 0.0005)
@@ -189,8 +224,10 @@ HYBRID_SHADOW_PM_MIN = float(_bot_settings.get("hybrid_shadow_pm_min", NORMAL_ZO
 CORE_EV_ENABLED = bool(_bot_settings.get("core_ev_enabled", True))
 CORE_EV_PM_MIN = float(_bot_settings.get("core_ev_pm_min", 0.58) or 0.58)
 CORE_EV_PM_MAX = float(_bot_settings.get("core_ev_pm_max", 0.70) or 0.70)
+CORE_EV_TIME_LEFT_MIN = float(_bot_settings.get("core_ev_time_left_min", CORE_EV_ENTRY_TIME_MIN) or CORE_EV_ENTRY_TIME_MIN)
+CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("core_ev_time_left_max", min(20, CORE_EV_ENTRY_TIME_MAX)) or min(20, CORE_EV_ENTRY_TIME_MAX))
 CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
-WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 40) or 40)
+WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 140) or 140)
 SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
 SHADOW_SOFT_STABLE_TICKS = int(_bot_settings.get("shadow_soft_stable_ticks", max(1, SHADOW_MIN_STABLE_TICKS - 1)) or max(1, SHADOW_MIN_STABLE_TICKS - 1))
 SHADOW_EARLY_DELTA_MIN = float(_bot_settings.get("shadow_early_delta_min_pct", 0.010) or 0.010)
@@ -371,9 +408,17 @@ def core_l1_delta_bucket_value(delta_pct: float) -> str:
 
 
 def core_l1_time_bucket_value(time_left: float) -> str:
+    if time_left < 10:
+        return "<10s"
     if time_left < 20:
         return "10-19s"
-    return "20-29s"
+    if time_left < 30:
+        return "20-29s"
+    if time_left < 60:
+        return "30-59s"
+    if time_left < 120:
+        return "60-119s"
+    return "120-300s"
 
 def next_close_ts():
     return ((now_unix() // 300) + 1) * 300
@@ -621,8 +666,10 @@ def classify_signal_tier(
     trend_aligned: bool,
 ) -> tuple[str, str]:
     """Classify the observed setup quality for later offline analysis."""
-    if time_left < ENTRY_SECONDS_MIN or time_left > ENTRY_SECONDS_MAX:
-        return "observe", "outside entry window"
+    if time_left < 10:
+        return "observe", "too late for execution"
+    if time_left > OBSERVE_WINDOW_SECONDS:
+        return "observe", "outside observed window"
     if pm_price < 0.58:
         return "observe", "pm too cheap"
     if pm_price > 0.72:
@@ -1173,6 +1220,206 @@ class CryptoBot:
         sized_amount = self.bank_balance * risk_pct
         return max(self.dynamic_min_amount, min(sized_amount, self.dynamic_max_amount))
 
+    def _build_signal_snapshot(self, market, ta, seconds_left, shadow_context: dict | None = None) -> dict:
+        slug = market["slug"]
+        crypto = market["crypto"]
+        trade_amount = self._get_trade_amount()
+        market_prob = float(market["winner_price"] or 0)
+        model_prob = estimate_model_prob(
+            ta.get("direction"),
+            market["winner_side"],
+            ta.get("confidence", 0),
+            market_prob,
+            ta.get("score", 0),
+        )
+        edge = model_prob - market_prob
+        trend_aligned = bool(ta.get("trend_aligned"))
+        trend_conflict = bool(ta.get("trend_conflict"))
+        signal_tier, signal_tier_reason = classify_signal_tier(
+            pm_price=market_prob,
+            delta_pct=float(ta.get("delta_pct", 0) or 0),
+            confidence=float(ta.get("confidence", 0) or 0),
+            indicator_confirm=float(ta.get("indicator_confirm", 0) or 0),
+            edge=float(edge or 0),
+            time_left=float(seconds_left or 0),
+            trend_aligned=trend_aligned,
+        )
+        shadow_context = shadow_context or self._observe_shadow_window(market, ta, seconds_left, allow_log=False)
+        window_features = shadow_context.get("features", {})
+        shadow = shadow_context.get("shadow", {})
+        shadow_live = shadow_context.get("shadow_live", {})
+        shadow_state = self.shadow_window_state.get(slug, {})
+
+        signal_data = {
+            "timestamp": ts_str(),
+            "market_slug": slug,
+            "market_close_ts": market.get("close_ts"),
+            "market_start_ts": market.get("close_ts", 0) - 300 if market.get("close_ts") else None,
+            "coin": crypto,
+            "side": market["winner_side"],
+            "pm": market["winner_price"],
+            "delta": ta.get("delta_pct", 0),
+            "confidence": ta.get("confidence", 0),
+            "score": ta.get("score", 0),
+            "indicator_confirm": ta.get("indicator_confirm", 0),
+            "indicator_reason": ta.get("indicator_reason", ""),
+            "momentum": ta.get("momentum", ""),
+            "higher_trend": ta.get("higher_trend", "unknown"),
+            "trend_aligned": trend_aligned,
+            "trend_conflict": trend_conflict,
+            "signal_tier": signal_tier,
+            "signal_tier_reason": signal_tier_reason,
+            "model_prob": model_prob,
+            "market_prob": market_prob,
+            "edge": edge,
+            "price": ta.get("current_price", 0),
+            "time_left": seconds_left,
+            "entered": False,
+            "reason": "",
+            "amount": trade_amount,
+            "execution_failure_type": "",
+            "execution_failure_detail": "",
+            "execution_order_status": "",
+            "execution_order_id": "",
+            "stable_ticks": window_features.get("stable_ticks", 0),
+            "direction_persistence": window_features.get("direction_persistence", 0.0),
+            "delta_slope": window_features.get("delta_slope", 0.0),
+            "pm_slope": window_features.get("pm_slope", 0.0),
+            "pullback_size": window_features.get("pullback_size", 0.0),
+            "pullback_recovered": window_features.get("pullback_recovered", False),
+            "reversal_flag": window_features.get("reversal_flag", False),
+            "window_progress_pct": window_features.get("window_progress_pct", 0.0),
+            "recent_5m_streak": window_features.get("recent_5m_streak", 0),
+            "market_regime": window_features.get("market_regime", "unknown"),
+            "pm_vs_delta_gap": window_features.get("pm_vs_delta_gap", 0.0),
+            "underpricing_score": window_features.get("underpricing_score", 0.0),
+            "shadow_entry_candidate": shadow.get("candidate", False),
+            "shadow_entry_profile": shadow.get("profile", "none"),
+            "shadow_entry_score": shadow.get("score", 0.0),
+            "shadow_entry_reason": shadow.get("reason", ""),
+            "shadow_live_decision": shadow_live.get("decision", "neutral"),
+            "shadow_live_reason": shadow_live.get("reason", ""),
+            "shadow_live_score": shadow_live.get("score", 0.0),
+            "shadow_observation_count": shadow_state.get("observation_count", 0),
+            "shadow_first_observed_progress_pct": shadow_state.get("first_progress_pct", window_features.get("window_progress_pct", 0.0)),
+            "shadow_first_candidate_progress_pct": shadow_state.get("first_candidate_progress_pct"),
+            "shadow_first_candidate_seconds_left": shadow_state.get("first_candidate_seconds_left"),
+            "shadow_first_candidate_profile": shadow_state.get("first_candidate_profile", "none"),
+            "shadow_first_candidate_score": shadow_state.get("first_candidate_score", 0.0),
+            "shadow_first_live_decision": shadow_state.get("first_live_decision", "neutral"),
+            "shadow_first_live_decision_progress_pct": shadow_state.get("first_live_decision_progress_pct"),
+            "shadow_max_score": shadow_state.get("max_score", shadow.get("score", 0.0)),
+            "shadow_max_score_profile": shadow_state.get("max_score_profile", shadow.get("profile", "none")),
+            "shadow_max_live_decision": shadow_state.get("max_live_decision", shadow_live.get("decision", "neutral")),
+            "core_ev_bucket_key": "",
+            "core_ev_bucket_level": "",
+            "core_ev_decision": "unknown",
+            "core_ev_reason": "",
+            "core_ev_sample_size": 0,
+            "core_ev_historical_roi": 0.0,
+            "core_ev_historical_win_rate": 0.0,
+            "core_ev_recent_roi": 0.0,
+            "core_ev_recent_trades": 0,
+            "core_ev_size_fraction": 0.0,
+        }
+
+        shadow_live_decision = str(shadow_live.get("decision", "neutral") or "neutral")
+        shadow_live_reason = str(shadow_live.get("reason", "") or "")
+        shadow_live_score = float(shadow_live.get("score", 0) or 0)
+        shadow_profile = str(shadow.get("profile", "none") or "none")
+        shadow_live_mode = normalize_shadow_live_mode(SHADOW_LIVE_MODE)
+        signal_data["shadow_live_mode"] = shadow_live_mode
+
+        return {
+            "signal_data": signal_data,
+            "trade_amount": trade_amount,
+            "market_prob": market_prob,
+            "model_prob": model_prob,
+            "edge": edge,
+            "trend_aligned": trend_aligned,
+            "trend_conflict": trend_conflict,
+            "signal_tier": signal_tier,
+            "signal_tier_reason": signal_tier_reason,
+            "shadow_live": shadow_live,
+            "shadow_live_decision": shadow_live_decision,
+            "shadow_live_reason": shadow_live_reason,
+            "shadow_live_score": shadow_live_score,
+            "shadow_profile": shadow_profile,
+            "shadow_live_mode": shadow_live_mode,
+        }
+
+    def _save_window_sample(self, snapshot: dict):
+        sample = dict(snapshot.get("signal_data", {}))
+        sample["record_type"] = "window_sample"
+        sample["sample_source"] = "full_window_observe"
+        save_window_sample(sample)
+
+    def _candidate_priority(self, signal_data: dict, core_ev: dict, shadow_live_decision: str, shadow_live_score: float) -> tuple:
+        decision = str(core_ev.get("decision", "unknown") or "unknown")
+        decision_rank = {"strong_allow": 3, "allow": 2, "watch": 1, "deny": 0, "unknown": -1}.get(decision, -1)
+        shadow_rank = {"strong_allow": 3, "allow": 2, "watch": 1, "neutral": 0, "deny": -1}.get(shadow_live_decision, 0)
+        return (
+            decision_rank,
+            float(core_ev.get("historical_roi", 0) or 0),
+            float(core_ev.get("recent_roi", 0) or 0),
+            int(core_ev.get("sample_size", 0) or 0),
+            shadow_rank,
+            float(shadow_live_score or 0),
+            float(signal_data.get("indicator_confirm", 0) or 0),
+            float(signal_data.get("delta", 0) or 0),
+        )
+
+    def _should_take_full_window_entry(self, slug: str, signal_data: dict, core_ev: dict,
+                                       shadow_live_decision: str, shadow_live_score: float,
+                                       seconds_left: float) -> tuple[bool, str]:
+        if not FULL_WINDOW_CORE_EV_ENABLED:
+            return True, "full-window mode disabled"
+
+        state = self.shadow_window_state.setdefault(slug, {"best_core_ev_candidate": None})
+        candidate = {
+            "priority": self._candidate_priority(signal_data, core_ev, shadow_live_decision, shadow_live_score),
+            "time_left": float(seconds_left or 0),
+            "confirm_ticks": int(state.get("observation_count", 0) or 0),
+            "shadow_live_decision": shadow_live_decision,
+            "shadow_live_score": float(shadow_live_score or 0),
+            "historical_roi": float(core_ev.get("historical_roi", 0) or 0),
+            "recent_roi": float(core_ev.get("recent_roi", 0) or 0),
+            "sample_size": int(core_ev.get("sample_size", 0) or 0),
+            "signal_score": float(signal_data.get("shadow_entry_score", 0) or 0),
+        }
+
+        best = state.get("best_core_ev_candidate")
+        if best is None or candidate["priority"] > tuple(best.get("priority", ())):
+            candidate["confirm_ticks"] = 1
+            state["best_core_ev_candidate"] = candidate
+            return False, "tracking new best full-window candidate"
+
+        if candidate["priority"] == tuple(best.get("priority", ())) and abs(candidate["time_left"] - float(best.get("time_left", 0) or 0)) <= 6.0:
+            best["confirm_ticks"] = int(best.get("confirm_ticks", 0) or 0) + 1
+            state["best_core_ev_candidate"] = best
+        else:
+            if candidate["priority"][-2] >= best["priority"][-2] + FULL_WINDOW_ENTRY_MIN_SCORE_GAIN:
+                candidate["confirm_ticks"] = 1
+                state["best_core_ev_candidate"] = candidate
+                return False, "tracking improved full-window candidate"
+
+        best = state.get("best_core_ev_candidate")
+        if best is None:
+            return False, "waiting for full-window candidate"
+
+        current_priority = candidate["priority"]
+        best_priority = tuple(best.get("priority", ()))
+        if current_priority != best_priority:
+            return False, "current signal is not best in window"
+
+        if int(best.get("confirm_ticks", 0) or 0) >= FULL_WINDOW_ENTRY_CONFIRM_TICKS:
+            return True, f"best candidate confirmed for {int(best.get('confirm_ticks', 0) or 0)} ticks"
+
+        if float(seconds_left or 0) <= FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT:
+            return True, f"commit threshold reached at {seconds_left:.1f}s"
+
+        return False, "best candidate not confirmed yet"
+
     def _build_core_ev_bucket_keys(self, signal_data: dict) -> dict[str, str]:
         pm_bucket = bucket_pm_value(float(signal_data.get("pm", 0) or 0))
         delta_bucket = bucket_delta_value(float(signal_data.get("delta", 0) or 0))
@@ -1369,6 +1616,9 @@ class CryptoBot:
                     continue
 
                 shadow_context = self._observe_shadow_window(market, ta, seconds_left)
+                snapshot = self._build_signal_snapshot(market, ta, seconds_left, shadow_context)
+                if WINDOW_SAMPLE_LOGGING_ENABLED:
+                    self._save_window_sample(snapshot)
 
                 # Log monitoring info when still outside entry window
                 if seconds_left > ENTRY_SECONDS_MAX + 5:
@@ -1377,7 +1627,6 @@ class CryptoBot:
                         f"Price:{ta.get('current_price',0):.2f} | "
                         f"delta:{ta.get('delta_pct',0):.4f}% | "
                         f"conf:{ta.get('confidence',0):.0%}")
-                    continue
 
                 log(f"🎯 [{crypto}] {seconds_left:.1f}s | "
                     f"PM:{market['winner_side']}@{market['winner_price']:.3f} | "
@@ -1386,122 +1635,49 @@ class CryptoBot:
                     f"conf:{ta.get('confidence',0):.0%} | "
                     f"{ta.get('reason','')[:50]}")
 
-                if ENTRY_SECONDS_MIN <= seconds_left <= ENTRY_SECONDS_MAX:
-                    self._evaluate_entry(market, ta, seconds_left, entered_slugs, shadow_context)
+                should_evaluate_entry = (
+                    CORE_EV_ENTRY_TIME_MIN <= seconds_left <= CORE_EV_ENTRY_TIME_MAX
+                    if FULL_WINDOW_CORE_EV_ENABLED
+                    else ENTRY_SECONDS_MIN <= seconds_left <= ENTRY_SECONDS_MAX
+                )
+                if should_evaluate_entry:
+                    self._evaluate_entry(
+                        market,
+                        ta,
+                        seconds_left,
+                        entered_slugs,
+                        shadow_context,
+                        snapshot=snapshot,
+                        persist_signal=not FULL_WINDOW_CORE_EV_ENABLED,
+                    )
 
             time.sleep(POLL_INTERVAL)
 
-    def _evaluate_entry(self, market, ta, seconds_left, entered_slugs, shadow_context: dict | None = None):
+    def _evaluate_entry(self, market, ta, seconds_left, entered_slugs, shadow_context: dict | None = None,
+                        snapshot: dict | None = None, persist_signal: bool = True):
+        snapshot = snapshot or self._build_signal_snapshot(market, ta, seconds_left, shadow_context)
+        signal_data = snapshot["signal_data"]
         slug      = market["slug"]
         crypto    = market["crypto"]
         price_min = PRICE_MIN.get(crypto, 0.92)
-        trade_amount = self._get_trade_amount()
-        market_prob = float(market["winner_price"] or 0)
-        model_prob = estimate_model_prob(
-            ta.get("direction"),
-            market["winner_side"],
-            ta.get("confidence", 0),
-            market_prob,
-            ta.get("score", 0),
-        )
-        edge = model_prob - market_prob
-        trend_aligned = bool(ta.get("trend_aligned"))
-        trend_conflict = bool(ta.get("trend_conflict"))
-        signal_tier, signal_tier_reason = classify_signal_tier(
-            pm_price=market_prob,
-            delta_pct=float(ta.get("delta_pct", 0) or 0),
-            confidence=float(ta.get("confidence", 0) or 0),
-            indicator_confirm=float(ta.get("indicator_confirm", 0) or 0),
-            edge=float(edge or 0),
-            time_left=float(seconds_left or 0),
-            trend_aligned=trend_aligned,
-        )
-        shadow_context = shadow_context or self._observe_shadow_window(market, ta, seconds_left, allow_log=False)
-        window_features = shadow_context.get("features", {})
-        shadow = shadow_context.get("shadow", {})
-        shadow_live = shadow_context.get("shadow_live", {})
-        shadow_state = self.shadow_window_state.get(slug, {})
+        trade_amount = float(snapshot.get("trade_amount", signal_data.get("amount", self.amount)) or self.amount)
+        market_prob = float(snapshot.get("market_prob", signal_data.get("market_prob", 0)) or 0)
+        model_prob = float(snapshot.get("model_prob", signal_data.get("model_prob", 0)) or 0)
+        edge = float(snapshot.get("edge", signal_data.get("edge", 0)) or 0)
+        trend_aligned = bool(snapshot.get("trend_aligned", signal_data.get("trend_aligned")))
+        trend_conflict = bool(snapshot.get("trend_conflict", signal_data.get("trend_conflict")))
+        signal_tier = str(snapshot.get("signal_tier", signal_data.get("signal_tier", "observe")) or "observe")
+        signal_tier_reason = str(snapshot.get("signal_tier_reason", signal_data.get("signal_tier_reason", "")) or "")
+        shadow_live = snapshot.get("shadow_live", {})
+        shadow_live_decision = str(snapshot.get("shadow_live_decision", signal_data.get("shadow_live_decision", "neutral")) or "neutral")
+        shadow_live_reason = str(snapshot.get("shadow_live_reason", signal_data.get("shadow_live_reason", "")) or "")
+        shadow_live_score = float(snapshot.get("shadow_live_score", signal_data.get("shadow_live_score", 0)) or 0)
+        shadow_profile = str(snapshot.get("shadow_profile", signal_data.get("shadow_entry_profile", "none")) or "none")
+        shadow_live_mode = str(snapshot.get("shadow_live_mode", signal_data.get("shadow_live_mode", normalize_shadow_live_mode(SHADOW_LIVE_MODE))) or normalize_shadow_live_mode(SHADOW_LIVE_MODE))
 
-        # Build signal data for saving
-        signal_data = {
-            "timestamp": ts_str(),
-            "market_slug": slug,
-            "market_close_ts": market.get("close_ts"),
-            "market_start_ts": market.get("close_ts", 0) - 300 if market.get("close_ts") else None,
-            "coin": crypto,
-            "side": market["winner_side"],
-            "pm": market["winner_price"],
-            "delta": ta.get("delta_pct", 0),
-            "confidence": ta.get("confidence", 0),
-            "score": ta.get("score", 0),
-            "indicator_confirm": ta.get("indicator_confirm", 0),
-            "indicator_reason": ta.get("indicator_reason", ""),
-            "momentum": ta.get("momentum", ""),
-            "higher_trend": ta.get("higher_trend", "unknown"),
-            "trend_aligned": trend_aligned,
-            "trend_conflict": trend_conflict,
-            "signal_tier": signal_tier,
-            "signal_tier_reason": signal_tier_reason,
-            "model_prob": model_prob,
-            "market_prob": market_prob,
-            "edge": edge,
-            "price": ta.get("current_price", 0),
-            "time_left": seconds_left,
-            "entered": False,
-            "reason": "",
-            "amount": trade_amount,
-            "execution_failure_type": "",
-            "execution_failure_detail": "",
-            "execution_order_status": "",
-            "execution_order_id": "",
-            "stable_ticks": window_features.get("stable_ticks", 0),
-            "direction_persistence": window_features.get("direction_persistence", 0.0),
-            "delta_slope": window_features.get("delta_slope", 0.0),
-            "pm_slope": window_features.get("pm_slope", 0.0),
-            "pullback_size": window_features.get("pullback_size", 0.0),
-            "pullback_recovered": window_features.get("pullback_recovered", False),
-            "reversal_flag": window_features.get("reversal_flag", False),
-            "window_progress_pct": window_features.get("window_progress_pct", 0.0),
-            "recent_5m_streak": window_features.get("recent_5m_streak", 0),
-            "market_regime": window_features.get("market_regime", "unknown"),
-            "pm_vs_delta_gap": window_features.get("pm_vs_delta_gap", 0.0),
-            "underpricing_score": window_features.get("underpricing_score", 0.0),
-            "shadow_entry_candidate": shadow.get("candidate", False),
-            "shadow_entry_profile": shadow.get("profile", "none"),
-            "shadow_entry_score": shadow.get("score", 0.0),
-            "shadow_entry_reason": shadow.get("reason", ""),
-            "shadow_live_decision": shadow_live.get("decision", "neutral"),
-            "shadow_live_reason": shadow_live.get("reason", ""),
-            "shadow_live_score": shadow_live.get("score", 0.0),
-            "shadow_observation_count": shadow_state.get("observation_count", 0),
-            "shadow_first_observed_progress_pct": shadow_state.get("first_progress_pct", window_features.get("window_progress_pct", 0.0)),
-            "shadow_first_candidate_progress_pct": shadow_state.get("first_candidate_progress_pct"),
-            "shadow_first_candidate_seconds_left": shadow_state.get("first_candidate_seconds_left"),
-            "shadow_first_candidate_profile": shadow_state.get("first_candidate_profile", "none"),
-            "shadow_first_candidate_score": shadow_state.get("first_candidate_score", 0.0),
-            "shadow_first_live_decision": shadow_state.get("first_live_decision", "neutral"),
-            "shadow_first_live_decision_progress_pct": shadow_state.get("first_live_decision_progress_pct"),
-            "shadow_max_score": shadow_state.get("max_score", shadow.get("score", 0.0)),
-            "shadow_max_score_profile": shadow_state.get("max_score_profile", shadow.get("profile", "none")),
-            "shadow_max_live_decision": shadow_state.get("max_live_decision", shadow_live.get("decision", "neutral")),
-            "core_ev_bucket_key": "",
-            "core_ev_bucket_level": "",
-            "core_ev_decision": "unknown",
-            "core_ev_reason": "",
-            "core_ev_sample_size": 0,
-            "core_ev_historical_roi": 0.0,
-            "core_ev_historical_win_rate": 0.0,
-            "core_ev_recent_roi": 0.0,
-            "core_ev_recent_trades": 0,
-            "core_ev_size_fraction": 0.0,
-        }
-
-        shadow_live_decision = str(shadow_live.get("decision", "neutral") or "neutral")
-        shadow_live_reason = str(shadow_live.get("reason", "") or "")
-        shadow_live_score = float(shadow_live.get("score", 0) or 0)
-        shadow_profile = str(shadow.get("profile", "none") or "none")
-        shadow_live_mode = normalize_shadow_live_mode(SHADOW_LIVE_MODE)
-        signal_data["shadow_live_mode"] = shadow_live_mode
+        def persist_record(force: bool = False):
+            if persist_signal or force:
+                save_signal(signal_data)
         if shadow_live_mode != "off" and shadow_live_decision in {"strong_allow", "allow", "watch", "deny"}:
             log(
                 f"   [{crypto}] SHADOW-{shadow_live_decision.upper()} — "
@@ -1520,13 +1696,13 @@ class CryptoBot:
         if self._daily_loss_limit_hit():
             log(f"   [{crypto}] SKIP — daily loss limit reached (${self.daily_loss_limit:.2f})")
             signal_data["reason"] = f"daily loss limit reached ({self.daily_loss_limit:.2f})"
-            save_signal(signal_data)
+            persist_record()
             return
 
         if shadow_live_blocks:
             log(f"   [{crypto}] SKIP — shadow live deny ({shadow_live_reason})")
             signal_data["reason"] = f"shadow live deny | {shadow_live_reason}"
-            save_signal(signal_data)
+            persist_record()
             return
 
         confidence = float(ta.get("confidence", 0) or 0)
@@ -1543,7 +1719,7 @@ class CryptoBot:
             else:
                 log(f"   [{crypto}] SKIP — PM price {market['winner_price']:.3f} < {price_min}")
                 signal_data["reason"] = f"PM price < {price_min}"
-                save_signal(signal_data)
+                persist_record()
                 return
 
         # Filter 1b: legacy maximum price / overprice override. In Core EV mode this
@@ -1587,7 +1763,7 @@ class CryptoBot:
             )
             if not core_first_mode:
                 signal_data["reason"] = f"PM price > {ceiling:.2f} | {override_reason}"
-                save_signal(signal_data)
+                persist_record()
                 return
         if pm_price > PRICE_MAX:
             log(
@@ -1637,7 +1813,7 @@ class CryptoBot:
             else:
                 log(f"   [{crypto}] SKIP — confidence {confidence:.0%} < {MIN_CONFIDENCE:.0%}")
                 signal_data["reason"] = f"confidence < {MIN_CONFIDENCE:.0%}"
-                save_signal(signal_data)
+                persist_record()
                 return
 
         if edge < MIN_EDGE and not normal_zone_live_pass and not hybrid_shadow_live_pass:
@@ -1652,7 +1828,7 @@ class CryptoBot:
                     f"(model={model_prob:.3f} market={market_prob:.3f})"
                 )
                 signal_data["reason"] = f"edge {edge:+.3f} < {MIN_EDGE:+.3f}"
-                save_signal(signal_data)
+                persist_record()
                 return
 
         if indicator_confirm < INDICATOR_CONFIRM_MIN and not normal_zone_live_pass and not hybrid_shadow_live_pass:
@@ -1667,7 +1843,7 @@ class CryptoBot:
                     f"({ta.get('indicator_reason', 'neutral')})"
                 )
                 signal_data["reason"] = f"1m confirm {indicator_confirm:+.2f} < {INDICATOR_CONFIRM_MIN:+.2f}"
-                save_signal(signal_data)
+                persist_record()
                 return
 
         # Filter 3: direction must match between Binance and Polymarket
@@ -1676,7 +1852,7 @@ class CryptoBot:
         if ta_dir and ta_dir != pm_side:
             log(f"   [{crypto}] SKIP — Binance says {ta_dir} but PM says {pm_side}")
             signal_data["reason"] = f"direction mismatch: {ta_dir} vs {pm_side}"
-            save_signal(signal_data)
+            persist_record()
             return
 
         # Legacy delta/tier filters also become advisory in Core EV mode. Core EV
@@ -1687,7 +1863,7 @@ class CryptoBot:
             else:
                 log(f"   [{crypto}] SKIP — delta {delta_pct:.4f}% too small")
                 signal_data["reason"] = f"delta {delta_pct:.4f}% too small"
-                save_signal(signal_data)
+                persist_record()
                 return
 
         if signal_tier == "observe" and not normal_zone_live_pass and not hybrid_shadow_live_pass:
@@ -1696,7 +1872,7 @@ class CryptoBot:
             else:
                 log(f"   [{crypto}] SKIP — signal tier observe ({signal_tier_reason})")
                 signal_data["reason"] = f"signal tier observe | {signal_tier_reason}"
-                save_signal(signal_data)
+                persist_record()
                 return
 
         core_ev = self._evaluate_core_ev_gate(signal_data, shadow_live_decision)
@@ -1721,7 +1897,34 @@ class CryptoBot:
             )
         if core_ev_decision not in {"allow", "strong_allow"}:
             signal_data["reason"] = f"core ev {core_ev_decision} | {signal_data['core_ev_reason']}"
-            save_signal(signal_data)
+            persist_record()
+            return
+
+        allow_full_window_entry, full_window_reason = self._should_take_full_window_entry(
+            slug,
+            signal_data,
+            core_ev,
+            shadow_live_decision,
+            shadow_live_score,
+            seconds_left,
+        )
+        signal_data["full_window_entry_reason"] = full_window_reason
+        if FULL_WINDOW_CORE_EV_ENABLED and not allow_full_window_entry:
+            log(f"   [{crypto}] WAIT — {full_window_reason}")
+            signal_data["reason"] = f"full window wait | {full_window_reason}"
+            return
+
+        if not FULL_WINDOW_CORE_EV_ENABLED and CORE_EV_ENABLED and not (CORE_EV_TIME_LEFT_MIN <= seconds_left < CORE_EV_TIME_LEFT_MAX):
+            log(
+                f"   [{crypto}] SKIP — core ev timing policy requires "
+                f"{CORE_EV_TIME_LEFT_MIN:.0f}-{CORE_EV_TIME_LEFT_MAX:.0f}s exclusive upper bound "
+                f"(got {seconds_left:.1f}s)"
+            )
+            signal_data["reason"] = (
+                f"core ev timing policy | time_left {seconds_left:.1f}s outside "
+                f"{CORE_EV_TIME_LEFT_MIN:.0f}-{CORE_EV_TIME_LEFT_MAX:.0f}s"
+            )
+            persist_record()
             return
 
         core_ev_size_fraction = float(core_ev.get("size_fraction", 0) or 0)
@@ -1742,7 +1945,7 @@ class CryptoBot:
                     f"   [{crypto}] SKIP — insufficient collateral/allowance ${spendable:.2f} < ${trade_amount:.2f}"
                 )
                 signal_data["reason"] = f"insufficient collateral/allowance ({spendable:.2f} < {trade_amount:.2f})"
-                save_signal(signal_data)
+                persist_record(force=True)
                 return
 
         # Entry approved. Mark it as entered only after a successful execution.
@@ -1762,6 +1965,9 @@ class CryptoBot:
             signal_data["reason"] = "all filters passed"
             entered_slugs.add(slug)
             self.traded_slugs.add(slug)
+            state = self.shadow_window_state.get(slug)
+            if isinstance(state, dict):
+                state["best_core_ev_candidate"] = None
         else:
             signal_data["entered"] = False
             signal_data["reason"] = "execution failed"
@@ -1774,7 +1980,7 @@ class CryptoBot:
             if execution.get("taker_price") is not None:
                 signal_data["execution_taker_price"] = execution.get("taker_price")
 
-        save_signal(signal_data)
+        persist_record(force=True)
 
     def _observe_shadow_window(self, market: dict, ta: dict, seconds_left: float, allow_log: bool = True) -> dict:
         slug = str(market.get("slug") or "")
@@ -1797,6 +2003,7 @@ class CryptoBot:
                 "max_score": 0.0,
                 "max_score_profile": "none",
                 "max_live_decision": "neutral",
+                "best_core_ev_candidate": None,
                 "last_logged_key": None,
             }
             self.shadow_window_state[slug] = state
@@ -2214,131 +2421,124 @@ class CryptoBot:
           - для entered=False: контрфактический pnl_if_entered для оффлайн-анализа
         """
         try:
-            # Ищем сигналы этого раунда
-            if not SIGNALS_FILE.exists():
-                return
-            signals = load_signals_file()
-            if not isinstance(signals, list):
-                return
+            result_cache = {}
 
-            updated = False
-
-            for i, sig in enumerate(signals):
-                entered = bool(sig.get("entered"))
-
-                # Уже есть результат?
-                # - для entered сигналов достаточно realized_pnl
-                # - для skipped сигналов достаточно установленного winner/pnl_if_entered
-                if entered and "realized_pnl" in sig:
-                    continue
-                if (not entered) and ("winner" in sig and "pnl_if_entered" in sig):
-                    continue
-
-                # Для новых сигналов используем точную привязку к market_close_ts.
-                sig_close_ts = sig.get("market_close_ts")
-                if sig_close_ts is not None:
-                    # Проверяем все уже закрывшиеся и еще не резолвленные сигналы,
-                    # потому что Gamma может финализировать рынок не сразу.
-                    if sig_close_ts > close_ts:
+            def resolve_records(records: list, persist_fn, apply_bank_updates: bool) -> None:
+                updated = False
+                for i, sig in enumerate(records):
+                    entered = bool(sig.get("entered"))
+                    if entered and "realized_pnl" in sig:
                         continue
-                else:
-                    # Fallback для старых записей без market_close_ts.
-                    sig_ts_str = sig.get("timestamp", "")
-                    if not sig_ts_str:
-                        continue
-                    try:
-                        sig_dt = datetime.strptime(sig_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                        sig_unix = int(sig_dt.timestamp())
-                    except Exception:
+                    if (not entered) and ("winner" in sig and "pnl_if_entered" in sig):
                         continue
 
-                    # Старый формат: берем только сигналы, которые точно относятся
-                    # к уже закрывшимся раундам на момент текущей проверки.
-                    if sig_unix > close_ts:
+                    sig_close_ts = sig.get("market_close_ts")
+                    if sig_close_ts is not None:
+                        if sig_close_ts > close_ts:
+                            continue
+                    else:
+                        sig_ts_str = sig.get("timestamp", "")
+                        if not sig_ts_str:
+                            continue
+                        try:
+                            sig_dt = datetime.strptime(sig_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                            sig_unix = int(sig_dt.timestamp())
+                        except Exception:
+                            continue
+                        if sig_unix > close_ts:
+                            continue
+
+                    crypto = sig.get("coin", "")
+                    side = sig.get("side", "")
+                    if not crypto or not side:
                         continue
 
-                # Получаем результат с Polymarket
-                crypto = sig.get("coin", "")
-                side = sig.get("side", "")
-                if not crypto or not side:
-                    continue
+                    slug = sig.get("market_slug")
+                    if not slug:
+                        prefix = "btc-updown-5m" if crypto == "BTC" else "eth-updown-5m"
+                        start_ts = close_ts - 300
+                        slug = f"{prefix}-{start_ts}"
 
-                # Определяем slug для этого раунда
-                slug = sig.get("market_slug")
-                if not slug:
-                    prefix = "btc-updown-5m" if crypto == "BTC" else "eth-updown-5m"
-                    start_ts = close_ts - 300
-                    slug = f"{prefix}-{start_ts}"
+                    if slug not in result_cache:
+                        try:
+                            r = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=5)
+                            r.raise_for_status()
+                            data = r.json()
+                            if not data:
+                                result_cache[slug] = None
+                                continue
+                            event = data[0]
+                            if event.get("active") and not event.get("closed"):
+                                result_cache[slug] = None
+                                continue
+                            markets = event.get("markets", [])
+                            if not markets:
+                                result_cache[slug] = None
+                                continue
+                            market = markets[0]
+                            outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+                            outcomes = json.loads(market.get("outcomes", "[]"))
+                            if len(outcome_prices) < 2 or len(outcomes) < 2:
+                                result_cache[slug] = None
+                                continue
+                            prices = [float(p) for p in outcome_prices]
+                            winner_idx = 0 if prices[0] >= prices[1] else 1
+                            result_cache[slug] = (outcomes[winner_idx], outcomes[1 - winner_idx])
+                        except Exception as e:
+                            log(f"   ⚠️  Result check failed for {slug}: {e}")
+                            result_cache[slug] = None
+                            continue
 
-                # Запрашиваем результат с Gamma API
-                try:
-                    r = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=5)
-                    r.raise_for_status()
-                    data = r.json()
-                    if not data:
+                    outcome = result_cache.get(slug)
+                    if outcome is None:
                         continue
-                    event = data[0]
-                    if event.get("active") and not event.get("closed"):
-                        # Рынок еще не финализирован, попробуем в следующем цикле.
-                        continue
-                    markets = event.get("markets", [])
-                    if not markets:
-                        continue
-                    market = markets[0]
-                    outcome_prices = json.loads(market.get("outcomePrices", "[]"))
-                    outcomes = json.loads(market.get("outcomes", "[]"))
+                    winner, loser = outcome
 
-                    if len(outcome_prices) < 2 or len(outcomes) < 2:
-                        continue
+                    won = (side == winner)
+                    entry_price = sig.get("pm", 0)
+                    trade_amount = sig.get("amount", self.amount)
 
-                    prices = [float(p) for p in outcome_prices]
-                    winner_idx = 0 if prices[0] >= prices[1] else 1
-                    winner = outcomes[winner_idx]
-                    loser = outcomes[1 - winner_idx]
-                except Exception as e:
-                    log(f"   ⚠️  Result check failed for {slug}: {e}")
-                    continue
+                    records[i]["won"] = won
+                    records[i]["winner"] = winner
+                    records[i]["loser"] = loser
+                    records[i]["resolved_at"] = ts_str()
 
-                # Определяем win/loss
-                won = (side == winner)
-                entry_price = sig.get("pm", 0)
-                trade_amount = sig.get("amount", self.amount)
+                    if won:
+                        payout = trade_amount / entry_price if entry_price > 0 else trade_amount
+                        pnl_if_entered = payout - trade_amount
+                        result = "WIN"
+                    else:
+                        payout = 0
+                        pnl_if_entered = -trade_amount
+                        result = "LOSS"
 
-                signals[i]["won"] = won
-                signals[i]["winner"] = winner
-                signals[i]["loser"] = loser
-                signals[i]["resolved_at"] = ts_str()
+                    records[i]["pnl_if_entered"] = round(pnl_if_entered, 2)
 
-                if won:
-                    # Выигрыш: payout = amount / entry_price
-                    payout = trade_amount / entry_price if entry_price > 0 else trade_amount
-                    pnl_if_entered = payout - trade_amount
-                    result = "WIN"
-                else:
-                    # Проигрыш: теряем ставку
-                    payout = 0
-                    pnl_if_entered = -trade_amount
-                    result = "LOSS"
+                    if entered:
+                        records[i]["result"] = result
+                        records[i]["realized_pnl"] = round(pnl_if_entered, 2)
+                        records[i]["payout"] = round(payout, 2)
+                        if apply_bank_updates:
+                            self.bank_balance += pnl_if_entered
+                            log(f"   🏁 [{crypto}] {result} | side={side} winner={winner} | "
+                                f"pnl=${pnl_if_entered:+.2f} | bank=${self.bank_balance:.2f}")
+                    else:
+                        records[i]["counterfactual_result"] = result
 
-                # Поле для оффлайн-симуляций (даже если сигнал был skipped)
-                signals[i]["pnl_if_entered"] = round(pnl_if_entered, 2)
+                    updated = True
 
-                if entered:
-                    signals[i]["result"] = result
-                    signals[i]["realized_pnl"] = round(pnl_if_entered, 2)
-                    signals[i]["payout"] = round(payout, 2)
+                if updated:
+                    persist_fn(records)
 
-                    # Обновляем банк только для реально entered сигналов
-                    self.bank_balance += pnl_if_entered
-                    log(f"   🏁 [{crypto}] {result} | side={side} winner={winner} | "
-                        f"pnl=${pnl_if_entered:+.2f} | bank=${self.bank_balance:.2f}")
-                else:
-                    signals[i]["counterfactual_result"] = result
+            if SIGNALS_FILE.exists():
+                signals = load_signals_file()
+                if isinstance(signals, list):
+                    resolve_records(signals, save_signals_file, apply_bank_updates=True)
 
-                updated = True
-
-            if updated:
-                save_signals_file(signals)
+            if WINDOW_SAMPLES_FILE.exists():
+                samples = load_window_samples_file()
+                if isinstance(samples, list):
+                    resolve_records(samples, save_window_samples_file, apply_bank_updates=False)
 
         except Exception as e:
             log(f"   ⚠️  _check_previous_round error: {e}")
