@@ -173,11 +173,15 @@ NORMAL_ZONE_EDGE_MIN = float(_bot_settings.get("normal_zone_edge_min", -0.05) or
 NORMAL_ZONE_INDICATOR_CONFIRM_MIN = float(_bot_settings.get("normal_zone_indicator_confirm_min", -0.05) or -0.05)
 WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 40) or 40)
 SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
+SHADOW_SOFT_STABLE_TICKS = int(_bot_settings.get("shadow_soft_stable_ticks", max(1, SHADOW_MIN_STABLE_TICKS - 1)) or max(1, SHADOW_MIN_STABLE_TICKS - 1))
 SHADOW_EARLY_DELTA_MIN = float(_bot_settings.get("shadow_early_delta_min_pct", 0.010) or 0.010)
 SHADOW_LATE_DELTA_MIN = float(_bot_settings.get("shadow_late_delta_min_pct", 0.015) or 0.015)
 SHADOW_PM_MAX = float(_bot_settings.get("shadow_pm_max", 0.76) or 0.76)
 SHADOW_PULLBACK_MAX = float(_bot_settings.get("shadow_pullback_max_pct", 0.012) or 0.012)
 SHADOW_UNDERPRICING_MIN = float(_bot_settings.get("shadow_underpricing_min", 0.010) or 0.010)
+SHADOW_PROBE_DELTA_MIN = float(_bot_settings.get("shadow_probe_delta_min_pct", SHADOW_EARLY_DELTA_MIN * 0.8) or (SHADOW_EARLY_DELTA_MIN * 0.8))
+SHADOW_PROBE_PM_MAX = float(_bot_settings.get("shadow_probe_pm_max", min(SHADOW_PM_MAX, 0.70)) or min(SHADOW_PM_MAX, 0.70))
+SHADOW_REGIME_SUPPORT_UNDERPRICING_MIN = float(_bot_settings.get("shadow_regime_support_underpricing_min", 0.05) or 0.05)
 SHADOW_LIVE_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_allow_min_score", 4.5) or 4.5)
 SHADOW_LIVE_STRONG_ALLOW_MIN_SCORE = float(_bot_settings.get("shadow_live_strong_allow_min_score", 6.0) or 6.0)
 SHADOW_LIVE_DENY_MAX_PM_GAP = float(_bot_settings.get("shadow_live_deny_max_pm_gap", 0.18) or 0.18)
@@ -1529,15 +1533,20 @@ class CryptoBot:
         trend_aligned = bool(ta.get("trend_aligned"))
         indicator_confirm = float(ta.get("indicator_confirm", 0) or 0)
         stable_ticks = int(features.get("stable_ticks", 0) or 0)
+        direction_persistence = float(features.get("direction_persistence", 0) or 0)
+        regime = str(features.get("market_regime", "unknown") or "unknown")
+        recent_streak = int(features.get("recent_5m_streak", 0) or 0)
+        progress = float(features.get("window_progress_pct", 0) or 0)
         underpricing_score = float(features.get("underpricing_score", 0) or 0)
+        pm_gap = float(features.get("pm_vs_delta_gap", 0) or 0)
         pullback_size = float(features.get("pullback_size", 0) or 0)
         pullback_recovered = bool(features.get("pullback_recovered"))
         reversal_flag = bool(features.get("reversal_flag"))
+        regime_support = regime.startswith("trend_") and recent_streak >= 2
+        soft_structure_ok = stable_ticks >= SHADOW_SOFT_STABLE_TICKS or direction_persistence >= 0.45
 
-        if not trend_aligned:
+        if not trend_aligned and not regime_support:
             return {"candidate": False, "profile": "none", "score": 0.0, "reason": "trend not aligned"}
-        if stable_ticks < SHADOW_MIN_STABLE_TICKS:
-            return {"candidate": False, "profile": "none", "score": 0.0, "reason": "not enough stable ticks"}
         if pm_price > SHADOW_PM_MAX:
             return {"candidate": False, "profile": "none", "score": 0.0, "reason": f"pm too expensive for shadow ({pm_price:.3f})"}
         if reversal_flag and not pullback_recovered:
@@ -1546,7 +1555,18 @@ class CryptoBot:
         profile = "none"
         score = 0.0
         reason = ""
-        if 90 <= seconds_left <= 180 and delta_pct >= SHADOW_EARLY_DELTA_MIN and underpricing_score >= SHADOW_UNDERPRICING_MIN:
+        if not soft_structure_ok:
+            if regime_support and pm_price <= SHADOW_PROBE_PM_MAX and delta_pct >= SHADOW_PROBE_DELTA_MIN and underpricing_score >= 0:
+                profile = "trend_regime_probe"
+                score = stable_ticks * 0.6 + direction_persistence * 2.5 + delta_pct * 75 + max(0.0, underpricing_score) * 4
+                reason = "regime support with forming structure"
+            else:
+                return {"candidate": False, "profile": "none", "score": 0.0, "reason": "not enough stable ticks"}
+        elif 75 <= seconds_left <= 210 and delta_pct >= SHADOW_PROBE_DELTA_MIN and underpricing_score >= 0 and pm_price <= SHADOW_PROBE_PM_MAX:
+            profile = "trend_regime_probe"
+            score = stable_ticks * 0.7 + direction_persistence * 2.0 + delta_pct * 70 + max(0.0, underpricing_score) * 4
+            reason = "forming trend with acceptable PM lag"
+        elif 90 <= seconds_left <= 180 and delta_pct >= SHADOW_EARLY_DELTA_MIN and underpricing_score >= SHADOW_UNDERPRICING_MIN:
             profile = "trend_early"
             score = stable_ticks * 0.8 + delta_pct * 80 + underpricing_score * 5
             reason = "stable early trend with PM lag"
@@ -1558,6 +1578,10 @@ class CryptoBot:
             profile = "late_lock"
             score = stable_ticks * 0.6 + delta_pct * 90 + underpricing_score * 3
             reason = "late lock with sustained move"
+        elif regime_support and progress >= 0.55 and delta_pct >= SHADOW_PROBE_DELTA_MIN and pm_gap <= 0.10 and pm_price <= SHADOW_PM_MAX:
+            profile = "trend_regime_probe"
+            score = stable_ticks * 0.6 + direction_persistence * 2.0 + delta_pct * 65 + max(0.0, underpricing_score) * 3
+            reason = "regime continuation with acceptable late pricing"
 
         return {
             "candidate": profile != "none",
@@ -1581,17 +1605,26 @@ class CryptoBot:
         pm_gap = float(features.get("pm_vs_delta_gap", 0) or 0)
         pullback_recovered = bool(features.get("pullback_recovered"))
         reversal_flag = bool(features.get("reversal_flag"))
+        direction_persistence = float(features.get("direction_persistence", 0) or 0)
 
         decision = "neutral"
         reason = "no live shadow edge"
+        regime_support = regime.startswith("trend_") and recent_streak >= 2
 
         if not candidate:
             if not trend_aligned:
-                decision = "deny"
-                reason = "trend not aligned"
-            elif stable_ticks < SHADOW_MIN_STABLE_TICKS:
+                if regime_support and underpricing_score >= SHADOW_REGIME_SUPPORT_UNDERPRICING_MIN and pm_price <= SHADOW_PROBE_PM_MAX:
+                    decision = "watch"
+                    reason = "regime support offsets local trend misalignment"
+                else:
+                    decision = "deny"
+                    reason = "trend not aligned"
+            elif stable_ticks < SHADOW_MIN_STABLE_TICKS and direction_persistence < 0.45:
                 decision = "neutral"
                 reason = "waiting for stable window structure"
+            elif regime_support and pm_price <= SHADOW_PROBE_PM_MAX and delta_pct >= SHADOW_PROBE_DELTA_MIN:
+                decision = "watch"
+                reason = "forming structure with regime support"
             else:
                 reason = str(shadow.get("reason", "no shadow candidate") or "no shadow candidate")
         else:
@@ -1601,6 +1634,12 @@ class CryptoBot:
             elif pm_gap >= SHADOW_LIVE_DENY_MAX_PM_GAP and progress >= SHADOW_LIVE_DENY_MIN_PROGRESS:
                 decision = "deny"
                 reason = "pm already too far ahead late in window"
+            elif profile == "trend_regime_probe" and regime_support and score >= SHADOW_LIVE_ALLOW_MIN_SCORE and pm_price <= SHADOW_PROBE_PM_MAX:
+                decision = "allow"
+                reason = "regime probe aligned with broader 5m continuation"
+            elif profile == "trend_regime_probe" and score >= SHADOW_LIVE_WATCH_MIN_SCORE:
+                decision = "watch"
+                reason = "probe candidate worth monitoring for continuation"
             elif profile == "trend_early" and score >= SHADOW_LIVE_STRONG_ALLOW_MIN_SCORE and underpricing_score >= SHADOW_UNDERPRICING_MIN and recent_streak >= 2:
                 decision = "strong_allow"
                 reason = "trend early with regime continuation and PM lag"
