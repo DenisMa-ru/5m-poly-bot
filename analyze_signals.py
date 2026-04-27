@@ -421,6 +421,16 @@ def select_shadow_sample(resolved: list[dict], shadow_pm_floor: float) -> tuple[
     return resolved, "raw"
 
 
+def is_real_shadow_candidate(signal: dict) -> bool:
+    if signal.get("shadow_entry_candidate") is True:
+        return True
+    profile = str(signal.get("shadow_entry_profile", "none") or "none")
+    if profile != "none":
+        return True
+    first_profile = str(signal.get("shadow_first_candidate_profile", "none") or "none")
+    return first_profile != "none"
+
+
 def shadow_similarity_core_label(signal: dict) -> str:
     return combo_bucket(
         signal,
@@ -952,10 +962,12 @@ def print_shadow_similarity_report(signals: list[dict], min_trades: int, top: in
         f"sample={sample_label} ({len(resolved_sample)})"
     )
 
-    candidate_resolved = [signal for signal in resolved_sample if signal.get("shadow_entry_candidate") is True]
-    sample = candidate_resolved if candidate_resolved else resolved_sample
-    source_label = "shadow candidates" if candidate_resolved else "all shadow-annotated resolved signals"
-    print(f"Using {len(sample)} {source_label} for similarity clustering.")
+    candidate_resolved = [signal for signal in resolved_sample if is_real_shadow_candidate(signal)]
+    if not candidate_resolved:
+        print("No cleaned real shadow candidates yet; skipping similarity clustering to avoid profile=none noise.")
+        return
+    sample = candidate_resolved
+    print(f"Using {len(sample)} shadow candidates for similarity clustering.")
 
     reports = [
         ("Core similarity cluster", shadow_similarity_core_label),
@@ -1051,10 +1063,26 @@ def print_shadow_live_recommendations(signals: list[dict], min_trades: int, top:
         f"sample={sample_label} ({len(resolved_sample)})"
     )
 
-    candidate_resolved = [signal for signal in resolved_sample if signal.get("shadow_entry_candidate") is True]
-    sample = candidate_resolved if candidate_resolved else resolved_sample
-    source_label = "shadow candidates" if candidate_resolved else "all shadow-annotated resolved signals"
-    print(f"Evaluating {len(sample)} {source_label} for live shortlist.")
+    candidate_resolved = [signal for signal in resolved_sample if is_real_shadow_candidate(signal)]
+    if not candidate_resolved:
+        print("No cleaned real shadow candidates yet; skipping allowlist/denylist clustering to avoid profile=none noise.")
+        decision_rows = summarize_trades(resolved_sample, shadow_live_decision_label)
+        early_watch_min = max(2, min(min_trades, 2))
+        print("Observe-only decision summary:")
+        decision_filtered = [row for row in decision_rows if row["count"] >= early_watch_min]
+        if not decision_filtered:
+            print("  No shadow_live_decision sample yet.")
+        else:
+            for row in list(reversed(decision_filtered[-top:])):
+                print(
+                    f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                    f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+                )
+        print("\nInterpretation:")
+        print("  Пока нет очищенных реальных shadow candidates; profile=none решения не считаем shortlist-материалом.")
+        return
+    sample = candidate_resolved
+    print(f"Evaluating {len(sample)} shadow candidates for live shortlist.")
 
     cluster_rows = summarize_trades(sample, shadow_similarity_extended_label)
     core_rows = summarize_trades(sample, shadow_similarity_core_label)

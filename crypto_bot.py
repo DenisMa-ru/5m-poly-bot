@@ -1730,7 +1730,12 @@ class CryptoBot:
 
         if not candidate:
             if not trend_aligned:
-                if regime_support and underpricing_score >= SHADOW_REGIME_SUPPORT_UNDERPRICING_MIN and pm_price <= SHADOW_PROBE_PM_MAX:
+                if (
+                    regime_support
+                    and underpricing_score >= SHADOW_REGIME_SUPPORT_UNDERPRICING_MIN
+                    and SHADOW_OBSERVE_PM_FLOOR <= pm_price <= SHADOW_PROBE_PM_MAX
+                    and progress >= 0.75
+                ):
                     decision = "watch"
                     reason = "regime support offsets local trend misalignment"
                 else:
@@ -1739,7 +1744,13 @@ class CryptoBot:
             elif stable_ticks < SHADOW_MIN_STABLE_TICKS and direction_persistence < 0.45:
                 decision = "neutral"
                 reason = "waiting for stable window structure"
-            elif regime_support and pm_price <= SHADOW_PROBE_PM_MAX and delta_pct >= SHADOW_PROBE_DELTA_MIN:
+            elif (
+                regime_support
+                and SHADOW_OBSERVE_PM_FLOOR <= pm_price <= SHADOW_PROBE_PM_MAX
+                and delta_pct >= SHADOW_PROBE_DELTA_MIN
+                and underpricing_score >= 0
+                and progress >= 0.75
+            ):
                 decision = "watch"
                 reason = "forming structure with regime support"
             else:
