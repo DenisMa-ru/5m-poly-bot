@@ -39,6 +39,7 @@ CONTROL_FILE = BOT_DIR / "control.json"
 SIGNALS_FILE = BOT_DIR / "signals.json"
 SETTINGS_FILE = BOT_DIR / "settings.json"
 PID_FILE = BOT_DIR / "bot.pid"
+CORE_EV_RULES_FILE = BOT_DIR / "core_ev_rules.json"
 
 
 def atomic_write_text(path: Path, content: str):
@@ -62,6 +63,19 @@ def load_signals_file() -> list:
 def save_signals_file(signals: list):
     """Persist signals history atomically."""
     atomic_write_text(SIGNALS_FILE, json.dumps(signals[-10000:], indent=2))
+
+
+def load_core_ev_rules() -> dict:
+    """Load Core EV runtime rulebook, fallback to an empty structure."""
+    if not CORE_EV_RULES_FILE.exists():
+        return {"buckets": {}}
+    try:
+        data = json.loads(CORE_EV_RULES_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("buckets", {}), dict):
+            return data
+    except Exception:
+        pass
+    return {"buckets": {}}
 
 
 def ensure_single_instance():
@@ -172,6 +186,10 @@ NORMAL_ZONE_TIME_LEFT_MIN = float(_bot_settings.get("normal_zone_time_left_min",
 NORMAL_ZONE_EDGE_MIN = float(_bot_settings.get("normal_zone_edge_min", -0.05) or -0.05)
 NORMAL_ZONE_INDICATOR_CONFIRM_MIN = float(_bot_settings.get("normal_zone_indicator_confirm_min", -0.05) or -0.05)
 HYBRID_SHADOW_PM_MIN = float(_bot_settings.get("hybrid_shadow_pm_min", NORMAL_ZONE_MIN) or NORMAL_ZONE_MIN)
+CORE_EV_ENABLED = bool(_bot_settings.get("core_ev_enabled", True))
+CORE_EV_PM_MIN = float(_bot_settings.get("core_ev_pm_min", 0.58) or 0.58)
+CORE_EV_PM_MAX = float(_bot_settings.get("core_ev_pm_max", 0.70) or 0.70)
+CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
 WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 40) or 40)
 SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
 SHADOW_SOFT_STABLE_TICKS = int(_bot_settings.get("shadow_soft_stable_ticks", max(1, SHADOW_MIN_STABLE_TICKS - 1)) or max(1, SHADOW_MIN_STABLE_TICKS - 1))
@@ -236,6 +254,106 @@ def normalize_shadow_live_mode(value: str) -> str:
     if mode in {"off", "observe", "block_deny", "hybrid"}:
         return mode
     return "observe"
+
+
+def bucket_time_left_value(time_left: float) -> str:
+    if time_left < 10:
+        return "<10s"
+    if time_left < 15:
+        return "10-14s"
+    if time_left < 20:
+        return "15-19s"
+    if time_left < 30:
+        return "20-29s"
+    if time_left < 40:
+        return "30-39s"
+    return ">=40s"
+
+
+def bucket_pm_value(pm_price: float) -> str:
+    if pm_price < 0.55:
+        return "<0.55"
+    if pm_price < 0.58:
+        return "0.55-0.579"
+    if pm_price < 0.60:
+        return "0.58-0.599"
+    if pm_price < 0.62:
+        return "0.60-0.619"
+    if pm_price < 0.64:
+        return "0.62-0.639"
+    if pm_price < 0.67:
+        return "0.64-0.669"
+    if pm_price < 0.70:
+        return "0.67-0.699"
+    if pm_price < 0.80:
+        return "0.70-0.799"
+    if pm_price < 0.90:
+        return "0.80-0.899"
+    if pm_price < 0.94:
+        return "0.90-0.939"
+    if pm_price < 0.95:
+        return "0.94-0.949"
+    if pm_price < 0.96:
+        return "0.95-0.959"
+    if pm_price < 0.97:
+        return "0.96-0.969"
+    if pm_price < 0.98:
+        return "0.97-0.979"
+    return ">=0.98"
+
+
+def bucket_delta_value(delta_pct: float) -> str:
+    if delta_pct < 0.005:
+        return "<0.005%"
+    if delta_pct < 0.010:
+        return "0.005-0.009%"
+    if delta_pct < 0.020:
+        return "0.010-0.019%"
+    if delta_pct < 0.030:
+        return "0.020-0.029%"
+    if delta_pct < 0.050:
+        return "0.030-0.049%"
+    if delta_pct < 0.10:
+        return "0.050-0.099%"
+    if delta_pct < 0.15:
+        return "0.10-0.15%"
+    if delta_pct < 0.20:
+        return "0.15-0.20%"
+    if delta_pct < 0.30:
+        return "0.20-0.30%"
+    if delta_pct < 0.50:
+        return "0.30-0.50%"
+    return ">=0.50%"
+
+
+def bucket_indicator_confirm_value(confirm: float) -> str:
+    if confirm < -0.50:
+        return "<-0.50"
+    if confirm < -0.20:
+        return "-0.50..-0.20"
+    if confirm < 0.0:
+        return "-0.20..0.00"
+    if confirm < 0.10:
+        return "0.00..0.09"
+    if confirm < 0.25:
+        return "0.10..0.24"
+    if confirm < 0.50:
+        return "0.25..0.49"
+    return ">=0.50"
+
+
+def bucket_stable_ticks_value(stable_ticks: int) -> str:
+    if stable_ticks <= 0:
+        return "0"
+    if stable_ticks == 1:
+        return "1"
+    if stable_ticks == 2:
+        return "2"
+    if stable_ticks == 3:
+        return "3"
+    if stable_ticks == 4:
+        return "4"
+    return ">=5"
 
 def next_close_ts():
     return ((now_unix() // 300) + 1) * 300
@@ -933,6 +1051,7 @@ class CryptoBot:
         self.window_history: dict[str, deque] = {}
         self.shadow_window_state: dict[str, dict] = {}
         self.closed_window_summaries: deque = deque(maxlen=12)
+        self.core_ev_rules = load_core_ev_rules()
 
         # Банк (начальный капитал) и текущий баланс
         settings = load_settings()
@@ -990,6 +1109,15 @@ class CryptoBot:
                 f"max {self.dynamic_max_risk_pct*100:.0f}% | cap ${self.dynamic_max_amount:.2f}"
             )
         log(f"Shadow live mode: {normalize_shadow_live_mode(SHADOW_LIVE_MODE)}")
+        if CORE_EV_ENABLED:
+            log(
+                f"Core EV mode: ON | pm={CORE_EV_PM_MIN:.2f}-{CORE_EV_PM_MAX:.2f} | "
+                f"rules={len(self.core_ev_rules.get('buckets', {}))} buckets"
+            )
+            if not self.core_ev_rules.get("buckets"):
+                log("WARNING: Core EV rulebook is empty; rebuild core_ev_rules.json from fresh shadow-era signals before live trading.")
+        else:
+            log("Core EV mode: OFF")
         log(f"Settings from: {'settings.json' if _bot_settings else 'defaults'}")
         log("=" * 60)
 
@@ -1024,6 +1152,82 @@ class CryptoBot:
         )
         sized_amount = self.bank_balance * risk_pct
         return max(self.dynamic_min_amount, min(sized_amount, self.dynamic_max_amount))
+
+    def _build_core_ev_bucket_keys(self, signal_data: dict) -> dict[str, str]:
+        pm_bucket = bucket_pm_value(float(signal_data.get("pm", 0) or 0))
+        delta_bucket = bucket_delta_value(float(signal_data.get("delta", 0) or 0))
+        time_bucket = bucket_time_left_value(float(signal_data.get("time_left", 0) or 0))
+        confirm_bucket = bucket_indicator_confirm_value(float(signal_data.get("indicator_confirm", 0) or 0))
+        regime = str(signal_data.get("market_regime", "unknown") or "unknown")
+        stable_bucket = bucket_stable_ticks_value(int(signal_data.get("stable_ticks", 0) or 0))
+        profile = str(signal_data.get("shadow_entry_profile", "none") or "none")
+        tier = str(signal_data.get("signal_tier", "unknown") or "unknown")
+        trend_flag = "trend_ok" if bool(signal_data.get("trend_aligned")) and not bool(signal_data.get("trend_conflict")) else "trend_bad"
+        return {
+            "L1": " | ".join(["L1", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", trend_flag]),
+            "L2": " | ".join(["L2", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"tier:{tier}"]),
+            "L3": " | ".join(["L3", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"confirm:{confirm_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"profile:{profile}", f"tier:{tier}"]),
+        }
+
+    def _evaluate_core_ev_gate(self, signal_data: dict, shadow_live_decision: str) -> dict:
+        if not CORE_EV_ENABLED:
+            return {"decision": "allow", "reason": "core ev disabled", "size_fraction": 0.0}
+
+        pm = float(signal_data.get("pm", 0) or 0)
+        if pm < CORE_EV_PM_MIN or pm > CORE_EV_PM_MAX:
+            return {"decision": "deny", "reason": f"pm outside core ev zone ({pm:.3f})", "size_fraction": 0.0}
+        if not bool(signal_data.get("trend_aligned")) or bool(signal_data.get("trend_conflict")):
+            return {"decision": "deny", "reason": "core ev requires aligned non-conflicting trend", "size_fraction": 0.0}
+        if str(signal_data.get("signal_tier", "observe") or "observe") not in {"candidate", "trade"}:
+            return {"decision": "deny", "reason": f"signal tier {signal_data.get('signal_tier', 'observe')} not core-eligible", "size_fraction": 0.0}
+        if shadow_live_decision == "deny":
+            return {"decision": "deny", "reason": "shadow live deny", "size_fraction": 0.0}
+        if bool(signal_data.get("reversal_flag")) and not bool(signal_data.get("pullback_recovered")):
+            return {"decision": "deny", "reason": "reversal risk not recovered", "size_fraction": 0.0}
+
+        keys = self._build_core_ev_bucket_keys(signal_data)
+        buckets = self.core_ev_rules.get("buckets", {}) if isinstance(self.core_ev_rules, dict) else {}
+        selected_key = None
+        selected_stats = None
+        for level in ("L3", "L2", "L1"):
+            key = keys[level]
+            stats = buckets.get(key)
+            if isinstance(stats, dict) and str(stats.get("decision", "unknown") or "unknown") != "unknown":
+                selected_key = key
+                selected_stats = stats
+                break
+        if selected_stats is None:
+            return {
+                "decision": "deny",
+                "reason": "undersampled or unknown core ev bucket",
+                "bucket_key": keys["L3"],
+                "bucket_level": "L3",
+                "sample_size": 0,
+                "historical_roi": 0.0,
+                "historical_win_rate": 0.0,
+                "recent_roi": 0.0,
+                "recent_trades": 0,
+                "size_fraction": 0.0,
+            }
+
+        decision = str(selected_stats.get("decision", "deny") or "deny")
+        size_fraction = 0.0
+        if decision == "strong_allow":
+            size_fraction = CORE_EV_MAX_RISK_PCT
+        elif decision == "allow":
+            size_fraction = CORE_EV_MAX_RISK_PCT * 0.5
+        return {
+            "decision": decision,
+            "reason": f"core ev {decision}",
+            "bucket_key": selected_key,
+            "bucket_level": str(selected_stats.get("level", "unknown") or "unknown"),
+            "sample_size": int(selected_stats.get("trades", 0) or 0),
+            "historical_roi": float(selected_stats.get("roi", 0) or 0),
+            "historical_win_rate": float(selected_stats.get("win_rate", 0) or 0),
+            "recent_roi": float(selected_stats.get("recent_roi", 0) or 0),
+            "recent_trades": int(selected_stats.get("recent_trades", 0) or 0),
+            "size_fraction": size_fraction,
+        }
 
     def run(self):
         while self.running:
@@ -1257,6 +1461,16 @@ class CryptoBot:
             "shadow_max_score": shadow_state.get("max_score", shadow.get("score", 0.0)),
             "shadow_max_score_profile": shadow_state.get("max_score_profile", shadow.get("profile", "none")),
             "shadow_max_live_decision": shadow_state.get("max_live_decision", shadow_live.get("decision", "neutral")),
+            "core_ev_bucket_key": "",
+            "core_ev_bucket_level": "",
+            "core_ev_decision": "unknown",
+            "core_ev_reason": "",
+            "core_ev_sample_size": 0,
+            "core_ev_historical_roi": 0.0,
+            "core_ev_historical_win_rate": 0.0,
+            "core_ev_recent_roi": 0.0,
+            "core_ev_recent_trades": 0,
+            "core_ev_size_fraction": 0.0,
         }
 
         shadow_live_decision = str(shadow_live.get("decision", "neutral") or "neutral")
@@ -1434,6 +1648,37 @@ class CryptoBot:
             signal_data["reason"] = f"signal tier observe | {signal_tier_reason}"
             save_signal(signal_data)
             return
+
+        core_ev = self._evaluate_core_ev_gate(signal_data, shadow_live_decision)
+        signal_data["core_ev_bucket_key"] = str(core_ev.get("bucket_key", "") or "")
+        signal_data["core_ev_bucket_level"] = str(core_ev.get("bucket_level", "") or "")
+        signal_data["core_ev_decision"] = str(core_ev.get("decision", "unknown") or "unknown")
+        signal_data["core_ev_reason"] = str(core_ev.get("reason", "") or "")
+        signal_data["core_ev_sample_size"] = int(core_ev.get("sample_size", 0) or 0)
+        signal_data["core_ev_historical_roi"] = float(core_ev.get("historical_roi", 0) or 0)
+        signal_data["core_ev_historical_win_rate"] = float(core_ev.get("historical_win_rate", 0) or 0)
+        signal_data["core_ev_recent_roi"] = float(core_ev.get("recent_roi", 0) or 0)
+        signal_data["core_ev_recent_trades"] = int(core_ev.get("recent_trades", 0) or 0)
+        signal_data["core_ev_size_fraction"] = float(core_ev.get("size_fraction", 0) or 0)
+
+        core_ev_decision = str(core_ev.get("decision", "unknown") or "unknown")
+        if CORE_EV_ENABLED:
+            log(
+                f"   [{crypto}] CORE-EV {core_ev_decision.upper()} — "
+                f"level={signal_data['core_ev_bucket_level']} sample={signal_data['core_ev_sample_size']} "
+                f"roi={signal_data['core_ev_historical_roi']:+.1f}% recent={signal_data['core_ev_recent_roi']:+.1f}% | "
+                f"{signal_data['core_ev_reason']}"
+            )
+        if core_ev_decision not in {"allow", "strong_allow"}:
+            signal_data["reason"] = f"core ev {core_ev_decision} | {signal_data['core_ev_reason']}"
+            save_signal(signal_data)
+            return
+
+        core_ev_size_fraction = float(core_ev.get("size_fraction", 0) or 0)
+        if core_ev_size_fraction > 0:
+            core_ev_amount = self.bank_balance * core_ev_size_fraction
+            trade_amount = max(self.dynamic_min_amount, min(core_ev_amount, self.dynamic_max_amount, self.bank_balance))
+            signal_data["amount"] = trade_amount
 
         if not self.paper and not self.dry_run:
             collateral_balance, collateral_allowance = get_collateral_balance_allowance(

@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 DEFAULT_FILE = Path(__file__).with_name("signals.json")
+DEFAULT_CORE_EV_RULES_FILE = Path(__file__).with_name("core_ev_rules.json")
 
 
 def load_signals(path: Path) -> list[dict]:
@@ -408,6 +409,175 @@ def resolve_outcome_pnl(signal: dict) -> float | None:
     if (not signal.get("entered")) and signal.get("pnl_if_entered") is not None:
         return float(signal.get("pnl_if_entered", 0) or 0)
     return None
+
+
+def bucket_stable_ticks_value(stable_ticks: int) -> str:
+    if stable_ticks <= 0:
+        return "0"
+    if stable_ticks == 1:
+        return "1"
+    if stable_ticks == 2:
+        return "2"
+    if stable_ticks == 3:
+        return "3"
+    if stable_ticks == 4:
+        return "4"
+    return ">=5"
+
+
+def core_pm_eligible(signal: dict, pm_min: float, pm_max: float) -> bool:
+    pm = float(signal.get("pm", 0) or 0)
+    return pm_min <= pm <= pm_max
+
+
+def core_hard_eligible(signal: dict, pm_min: float, pm_max: float) -> bool:
+    if not core_pm_eligible(signal, pm_min, pm_max):
+        return False
+    if not bool(signal.get("trend_aligned")):
+        return False
+    if bool(signal.get("trend_conflict")):
+        return False
+    if str(signal.get("signal_tier", "observe") or "observe") not in {"candidate", "trade"}:
+        return False
+    if str(signal.get("shadow_live_decision", "neutral") or "neutral") == "deny":
+        return False
+    if bool(signal.get("reversal_flag")) and not bool(signal.get("pullback_recovered")):
+        return False
+    return True
+
+
+def core_bucket_keys(signal: dict) -> dict[str, str]:
+    pm_bucket = bucket_pm(float(signal.get("pm", 0) or 0))
+    delta_bucket = bucket_delta(float(signal.get("delta", 0) or 0))
+    time_bucket = bucket_time_left(float(signal.get("time_left", 0) or 0))
+    confirm_bucket = bucket_indicator_confirm(signal)
+    regime = market_regime_label(signal)
+    stable_bucket = bucket_stable_ticks_value(int(signal.get("stable_ticks", 0) or 0))
+    profile = shadow_profile_label(signal)
+    tier = signal_tier_label(signal)
+    trend_flag = "trend_ok" if bool(signal.get("trend_aligned")) and not bool(signal.get("trend_conflict")) else "trend_bad"
+    return {
+        "L1": " | ".join(["L1", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", trend_flag]),
+        "L2": " | ".join(["L2", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"tier:{tier}"]),
+        "L3": " | ".join(["L3", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"confirm:{confirm_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"profile:{profile}", f"tier:{tier}"]),
+    }
+
+
+def build_core_ev_rulebook(signals: list[dict], args) -> dict:
+    resolved = []
+    for signal in signals:
+        outcome_pnl = resolve_outcome_pnl(signal)
+        if outcome_pnl is None:
+            continue
+        if not core_hard_eligible(signal, args.core_pm_min, args.core_pm_max):
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": outcome_pnl,
+            "won": outcome_pnl > 0,
+        })
+
+    recent_cutoff = datetime.now(timezone.utc).timestamp() - args.core_recent_hours * 3600 if args.core_recent_hours > 0 else None
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for signal in resolved:
+        for key in core_bucket_keys(signal).values():
+            groups[key].append(signal)
+
+    mins = {
+        "L1": args.core_min_bucket_trades_l1,
+        "L2": args.core_min_bucket_trades_l2,
+        "L3": args.core_min_bucket_trades_l3,
+    }
+    buckets = {}
+    for key, items in groups.items():
+        level = key.split(" | ", 1)[0]
+        min_trades = mins.get(level, args.core_min_bucket_trades_l2)
+        trades = len(items)
+        wins = sum(1 for item in items if item.get("won") is True)
+        total_pnl = sum(float(item.get("realized_pnl", 0) or 0) for item in items)
+        total_amount = sum(float(item.get("amount", args.default_amount) or args.default_amount) for item in items)
+        roi = (total_pnl / total_amount * 100) if total_amount else 0.0
+        win_rate = (wins / trades * 100) if trades else 0.0
+        recent_items = []
+        for item in items:
+            if recent_cutoff is None:
+                recent_items.append(item)
+                continue
+            dt = parse_ts(str(item.get("timestamp", "")))
+            if dt and dt.timestamp() >= recent_cutoff:
+                recent_items.append(item)
+        recent_trades = len(recent_items)
+        recent_pnl = sum(float(item.get("realized_pnl", 0) or 0) for item in recent_items)
+        recent_amount = sum(float(item.get("amount", args.default_amount) or args.default_amount) for item in recent_items)
+        recent_roi = (recent_pnl / recent_amount * 100) if recent_amount else 0.0
+
+        if trades < min_trades:
+            decision = "unknown"
+        elif roi <= 0 or total_pnl <= 0:
+            decision = "deny"
+        elif recent_trades >= args.core_min_recent_trades and recent_roi < 0:
+            decision = "watch"
+        elif trades >= min_trades + 3 and roi >= args.core_strong_roi_min and recent_roi >= 0:
+            decision = "strong_allow"
+        else:
+            decision = "allow"
+
+        buckets[key] = {
+            "level": level,
+            "trades": trades,
+            "wins": wins,
+            "losses": trades - wins,
+            "win_rate": round(win_rate, 4),
+            "total_pnl": round(total_pnl, 4),
+            "roi": round(roi, 4),
+            "recent_trades": recent_trades,
+            "recent_roi": round(recent_roi, 4),
+            "decision": decision,
+        }
+
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source_signals": len(signals),
+        "resolved_eligible_signals": len(resolved),
+        "core_pm_min": args.core_pm_min,
+        "core_pm_max": args.core_pm_max,
+        "recent_hours": args.core_recent_hours,
+        "min_bucket_trades": mins,
+        "min_recent_trades": args.core_min_recent_trades,
+        "strong_roi_min": args.core_strong_roi_min,
+        "buckets": buckets,
+    }
+
+
+def print_core_ev_rulebook_summary(rulebook: dict, top: int) -> None:
+    print("=== CORE EV RULEBOOK ===")
+    print(f"generated_at: {rulebook.get('generated_at', 'unknown')}")
+    print(f"source_signals: {rulebook.get('source_signals', 0)}")
+    print(f"resolved_eligible_signals: {rulebook.get('resolved_eligible_signals', 0)}")
+    rows = [{"key": key, **stats} for key, stats in rulebook.get("buckets", {}).items()]
+    allow_rows = [row for row in rows if row.get("decision") in {"allow", "strong_allow"}]
+    deny_rows = [row for row in rows if row.get("decision") == "deny"]
+    allow_rows.sort(key=lambda row: (row["roi"], row["trades"], row["win_rate"]), reverse=True)
+    deny_rows.sort(key=lambda row: (row["roi"], -row["trades"]))
+    print(f"allow-ish buckets: {len(allow_rows)} | deny buckets: {len(deny_rows)}")
+    print("Top allow buckets:")
+    if not allow_rows:
+        print("  None")
+    else:
+        for row in allow_rows[:top]:
+            print(
+                f"  {row['key']} | trades={row['trades']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"roi={fmt_pct(row['roi'])} | recent_trades={row['recent_trades']} | recent_roi={fmt_pct(row['recent_roi'])} | {row['decision']}"
+            )
+    print("Top deny buckets:")
+    if not deny_rows:
+        print("  None")
+    else:
+        for row in deny_rows[:top]:
+            print(
+                f"  {row['key']} | trades={row['trades']} | win_rate={fmt_pct(row['win_rate'])} | "
+                f"roi={fmt_pct(row['roi'])} | recent_trades={row['recent_trades']} | recent_roi={fmt_pct(row['recent_roi'])}"
+            )
 
 
 def shadow_pm_eligible(signal: dict, pm_floor: float) -> bool:
@@ -1676,6 +1846,8 @@ def run_grid_search(signals: list[dict], args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze bot signals.json history")
     parser.add_argument("--file", default=str(DEFAULT_FILE), help="Path to signals.json")
+    parser.add_argument("--build-core-ev-rules", action="store_true", help="Build Core EV rulebook JSON from resolved signals")
+    parser.add_argument("--rules-out", default=str(DEFAULT_CORE_EV_RULES_FILE), help="Path to write Core EV rulebook JSON")
     parser.add_argument("--top", type=int, default=6, help="Number of best/worst rows to show")
     parser.add_argument("--min-trades", type=int, default=3, help="Hide segment rows with fewer than this many settled trades")
     parser.add_argument("--recent-hours", type=float, default=6.0, help="Recent time window for skip-flow diagnostics")
@@ -1693,6 +1865,14 @@ def main() -> int:
     parser.add_argument("--price-max-grid", default="0.94,0.95,0.96,0.97", help="Comma-separated max prices")
     parser.add_argument("--entry-min-grid", default="10,12,15", help="Comma-separated entry_min values")
     parser.add_argument("--entry-max-grid", default="25,30,35", help="Comma-separated entry_max values")
+    parser.add_argument("--core-pm-min", type=float, default=0.58, help="Core EV PM minimum")
+    parser.add_argument("--core-pm-max", type=float, default=0.70, help="Core EV PM maximum")
+    parser.add_argument("--core-recent-hours", type=float, default=72.0, help="Recent window for Core EV bucket freshness")
+    parser.add_argument("--core-min-bucket-trades-l1", type=int, default=12, help="Minimum trades for L1 Core EV buckets")
+    parser.add_argument("--core-min-bucket-trades-l2", type=int, default=8, help="Minimum trades for L2 Core EV buckets")
+    parser.add_argument("--core-min-bucket-trades-l3", type=int, default=5, help="Minimum trades for L3 Core EV buckets")
+    parser.add_argument("--core-min-recent-trades", type=int, default=2, help="Minimum recent trades before recent ROI can downgrade bucket quality")
+    parser.add_argument("--core-strong-roi-min", type=float, default=5.0, help="ROI threshold for strong_allow Core EV buckets")
     args = parser.parse_args()
 
     path = Path(args.file)
@@ -1702,6 +1882,14 @@ def main() -> int:
         return 1
 
     signals = load_signals(path)
+
+    if args.build_core_ev_rules:
+        rulebook = build_core_ev_rulebook(signals, args)
+        out_path = Path(args.rules_out)
+        out_path.write_text(json.dumps(rulebook, indent=2), encoding="utf-8")
+        print_core_ev_rulebook_summary(rulebook, args.top)
+        print(f"\nWrote Core EV rules to: {out_path}")
+        return 0
 
     if args.optimize:
         return run_grid_search(signals, args)
