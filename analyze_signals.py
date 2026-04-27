@@ -425,6 +425,26 @@ def bucket_stable_ticks_value(stable_ticks: int) -> str:
     return ">=5"
 
 
+def core_l1_pm_bucket(pm_price: float) -> str:
+    if pm_price < 0.62:
+        return "0.58-0.619"
+    return "0.62-0.70"
+
+
+def core_l1_delta_bucket(delta_pct: float) -> str:
+    if delta_pct < 0.010:
+        return "<0.010%"
+    if delta_pct < 0.030:
+        return "0.010-0.029%"
+    return ">=0.030%"
+
+
+def core_l1_time_bucket(time_left: float) -> str:
+    if time_left < 20:
+        return "10-19s"
+    return "20-29s"
+
+
 def core_pm_eligible(signal: dict, pm_min: float, pm_max: float) -> bool:
     pm = float(signal.get("pm", 0) or 0)
     return pm_min <= pm <= pm_max
@@ -492,6 +512,9 @@ def core_bucket_keys(signal: dict) -> dict[str, str]:
     pm_bucket = bucket_pm(float(signal.get("pm", 0) or 0))
     delta_bucket = bucket_delta(float(signal.get("delta", 0) or 0))
     time_bucket = bucket_time_left(float(signal.get("time_left", 0) or 0))
+    l1_pm_bucket = core_l1_pm_bucket(float(signal.get("pm", 0) or 0))
+    l1_delta_bucket = core_l1_delta_bucket(float(signal.get("delta", 0) or 0))
+    l1_time_bucket = core_l1_time_bucket(float(signal.get("time_left", 0) or 0))
     confirm_bucket = bucket_indicator_confirm(signal)
     regime = market_regime_label(signal)
     stable_bucket = bucket_stable_ticks_value(int(signal.get("stable_ticks", 0) or 0))
@@ -499,7 +522,7 @@ def core_bucket_keys(signal: dict) -> dict[str, str]:
     tier = derive_core_signal_tier(signal)
     trend_flag = "trend_ok" if derive_core_trend_aligned(signal) and not derive_core_trend_conflict(signal) else "trend_bad"
     return {
-        "L1": " | ".join(["L1", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", trend_flag]),
+        "L1": " | ".join(["L1", f"pm:{l1_pm_bucket}", f"delta:{l1_delta_bucket}", f"time:{l1_time_bucket}", trend_flag]),
         "L2": " | ".join(["L2", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"tier:{tier}"]),
         "L3": " | ".join(["L3", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"confirm:{confirm_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"profile:{profile}", f"tier:{tier}"]),
     }

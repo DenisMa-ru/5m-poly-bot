@@ -355,6 +355,26 @@ def bucket_stable_ticks_value(stable_ticks: int) -> str:
         return "4"
     return ">=5"
 
+
+def core_l1_pm_bucket_value(pm_price: float) -> str:
+    if pm_price < 0.62:
+        return "0.58-0.619"
+    return "0.62-0.70"
+
+
+def core_l1_delta_bucket_value(delta_pct: float) -> str:
+    if delta_pct < 0.010:
+        return "<0.010%"
+    if delta_pct < 0.030:
+        return "0.010-0.029%"
+    return ">=0.030%"
+
+
+def core_l1_time_bucket_value(time_left: float) -> str:
+    if time_left < 20:
+        return "10-19s"
+    return "20-29s"
+
 def next_close_ts():
     return ((now_unix() // 300) + 1) * 300
 
@@ -1157,6 +1177,9 @@ class CryptoBot:
         pm_bucket = bucket_pm_value(float(signal_data.get("pm", 0) or 0))
         delta_bucket = bucket_delta_value(float(signal_data.get("delta", 0) or 0))
         time_bucket = bucket_time_left_value(float(signal_data.get("time_left", 0) or 0))
+        l1_pm_bucket = core_l1_pm_bucket_value(float(signal_data.get("pm", 0) or 0))
+        l1_delta_bucket = core_l1_delta_bucket_value(float(signal_data.get("delta", 0) or 0))
+        l1_time_bucket = core_l1_time_bucket_value(float(signal_data.get("time_left", 0) or 0))
         confirm_bucket = bucket_indicator_confirm_value(float(signal_data.get("indicator_confirm", 0) or 0))
         regime = str(signal_data.get("market_regime", "unknown") or "unknown")
         stable_bucket = bucket_stable_ticks_value(int(signal_data.get("stable_ticks", 0) or 0))
@@ -1164,7 +1187,7 @@ class CryptoBot:
         tier = str(signal_data.get("signal_tier", "unknown") or "unknown")
         trend_flag = "trend_ok" if bool(signal_data.get("trend_aligned")) and not bool(signal_data.get("trend_conflict")) else "trend_bad"
         return {
-            "L1": " | ".join(["L1", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", trend_flag]),
+            "L1": " | ".join(["L1", f"pm:{l1_pm_bucket}", f"delta:{l1_delta_bucket}", f"time:{l1_time_bucket}", trend_flag]),
             "L2": " | ".join(["L2", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"tier:{tier}"]),
             "L3": " | ".join(["L3", f"pm:{pm_bucket}", f"delta:{delta_bucket}", f"time:{time_bucket}", f"confirm:{confirm_bucket}", f"regime:{regime}", f"stable:{stable_bucket}", f"profile:{profile}", f"tier:{tier}"]),
         }
