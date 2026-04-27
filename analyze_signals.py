@@ -1009,6 +1009,105 @@ def print_normal_pm_zone_report(signals: list[dict], min_trades: int, top: int) 
         print_table(title, rows, top)
 
 
+def print_core_ev_pm_expansion_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== CORE EV PM EXPANSION (>0.70) ===")
+    resolved = []
+    for signal in signals:
+        pnl = resolve_outcome_pnl(signal)
+        if pnl is None:
+            continue
+        pm = float(signal.get("pm", 0) or 0)
+        if pm <= 0.70:
+            continue
+        if pm > 0.95:
+            continue
+        if not derive_core_trend_aligned(signal):
+            continue
+        if derive_core_trend_conflict(signal):
+            continue
+        if derive_core_signal_tier(signal) not in {"candidate", "trade"}:
+            continue
+        if str(signal.get("shadow_live_decision", "neutral") or "neutral") == "deny":
+            continue
+        if bool(signal.get("reversal_flag")) and not bool(signal.get("pullback_recovered")):
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": pnl,
+            "won": pnl > 0,
+        })
+
+    if not resolved:
+        print("No resolved high-PM core-like signals yet.")
+        return
+
+    print(
+        f"signals={len(resolved)} | total={fmt_money(sum(float(s.get('realized_pnl', 0) or 0) for s in resolved))} | "
+        f"avg_pm={avg([float(s.get('pm', 0) or 0) for s in resolved]):.3f} | avg_time={avg([float(s.get('time_left', 0) or 0) for s in resolved]):.1f}s"
+    )
+
+    reports = [
+        ("By PM price", lambda signal: bucket_pm(float(signal.get("pm", 0) or 0))),
+        ("By time left", lambda signal: bucket_time_left(float(signal.get("time_left", 0) or 0))),
+        (
+            "By PM x time",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: bucket_pm(float(s.get("pm", 0) or 0)),
+                lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)),
+            ),
+        ),
+        (
+            "By PM x delta",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: bucket_pm(float(s.get("pm", 0) or 0)),
+                lambda s: bucket_delta(float(s.get("delta", 0) or 0)),
+            ),
+        ),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(resolved, key_fn), min_trades)
+        print_table(title, rows, top)
+
+
+def print_core_ev_timing_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== CORE EV TIMING REPORT ===")
+    resolved = []
+    for signal in signals:
+        pnl = resolve_outcome_pnl(signal)
+        if pnl is None:
+            continue
+        if not core_hard_eligible(signal, 0.58, 0.95):
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": pnl,
+            "won": pnl > 0,
+        })
+
+    if not resolved:
+        print("No resolved core-like timing samples yet.")
+        return
+
+    print(
+        f"signals={len(resolved)} | total={fmt_money(sum(float(s.get('realized_pnl', 0) or 0) for s in resolved))} | "
+        f"avg_pm={avg([float(s.get('pm', 0) or 0) for s in resolved]):.3f} | avg_time={avg([float(s.get('time_left', 0) or 0) for s in resolved]):.1f}s"
+    )
+    print("Note: this report only reflects time slices the bot actually observed historically, not the full 0-300s window.")
+
+    reports = [
+        ("By time left", lambda signal: bucket_time_left(float(signal.get("time_left", 0) or 0))),
+        ("By PM x time", lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)))),
+        ("By delta x time", lambda signal: combo_bucket(signal, lambda s: bucket_delta(float(s.get("delta", 0) or 0)), lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)))),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(resolved, key_fn), min_trades)
+        print_table(title, rows, top)
+
+
 def print_execution_failed_report(signals: list[dict], min_trades: int, top: int) -> None:
     print("\n=== EXECUTION FAILED PROFILE ===")
     failed = [signal for signal in signals if str(signal.get("reason", "")) == "execution failed"]
@@ -2017,6 +2116,8 @@ def main() -> int:
     print_indicator_confirm_report(signals, args.min_trades)
     print_indicator_reason_report(signals, args.min_trades, args.top)
     print_normal_pm_zone_report(signals, args.min_trades, args.top)
+    print_core_ev_pm_expansion_report(signals, args.min_trades, args.top)
+    print_core_ev_timing_report(signals, args.min_trades, args.top)
     print_execution_failed_report(signals, args.min_trades, args.top)
     print_shadow_entry_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
     print_shadow_similarity_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
