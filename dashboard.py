@@ -16,6 +16,8 @@ load_dotenv()
 DEFAULT_LOG = Path("/root/5m-poly-bot/bot.log")
 CONTROL_FILE = Path("/root/5m-poly-bot/control.json")
 SIGNALS_FILE = Path("/root/5m-poly-bot/signals.json")
+WINDOW_SAMPLES_FILE = Path("/root/5m-poly-bot/window_samples.json")
+CORE_EV_RULES_FILE = Path("/root/5m-poly-bot/core_ev_rules.json")
 BOT_DIR = Path("/root/5m-poly-bot")
 BOT_SCRIPT = "crypto_bot.py"
 PID_FILE = Path("/root/5m-poly-bot/bot.pid")
@@ -110,7 +112,7 @@ def is_bot_running():
     except:
         return False
 
-# ===== DATA HELPERS — единый источник: signals.json =====
+# ===== DATA HELPERS — runtime data =====
 def load_saved_signals():
     """Load all saved signals from signals.json."""
     try:
@@ -118,6 +120,24 @@ def load_saved_signals():
         return data if isinstance(data, list) else []
     except:
         return []
+
+
+def load_window_samples():
+    """Load full-window observation samples."""
+    try:
+        data = json.loads(WINDOW_SAMPLES_FILE.read_text())
+        return data if isinstance(data, list) else []
+    except:
+        return []
+
+
+def load_core_ev_rules():
+    """Load runtime Core EV rulebook metadata."""
+    try:
+        data = json.loads(CORE_EV_RULES_FILE.read_text())
+        return data if isinstance(data, dict) else {"buckets": {}}
+    except:
+        return {"buckets": {}}
 
 
 def _safe_float(value):
@@ -320,14 +340,61 @@ def fetch_polymarket_account_state() -> dict:
 
 def build_dashboard_state():
     """
-    Строим состояние Dashboard из signals.json (единый источник данных).
-    Возвращает dict с метриками, последними сигналами, скипами, трейдами.
+    Строим состояние Dashboard из signals.json + window_samples.json.
+    Возвращает dict с метриками, последними сигналами, full-window наблюдениями и rulebook state.
     """
     signals = load_saved_signals()
+    window_samples = load_window_samples()
+    core_ev_rules = load_core_ev_rules()
 
     # Разделяем на вошедшие и пропущенные
     entered = [s for s in signals if s.get("entered")]
     skipped = [s for s in signals if not s.get("entered")]
+    resolved_window_samples = [s for s in window_samples if s.get("pnl_if_entered") is not None]
+    last_window_samples = window_samples[-20:]
+    full_window_waits = [s for s in signals if str(s.get("reason", "")).startswith("full window wait |")]
+    last_full_window_waits = full_window_waits[-12:]
+
+    core_ev_decision_counts = {"strong_allow": 0, "allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
+    for s in signals[-200:]:
+        decision = str(s.get("core_ev_decision", "unknown") or "unknown")
+        if decision in core_ev_decision_counts:
+            core_ev_decision_counts[decision] += 1
+        else:
+            core_ev_decision_counts["other"] += 1
+
+    bucket_rows = [{"key": key, **stats} for key, stats in (core_ev_rules.get("buckets", {}) or {}).items() if isinstance(stats, dict)]
+    rulebook_decisions = {"strong_allow": 0, "allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
+    for row in bucket_rows:
+        decision = str(row.get("decision", "unknown") or "unknown")
+        if decision in rulebook_decisions:
+            rulebook_decisions[decision] += 1
+        else:
+            rulebook_decisions["other"] += 1
+
+    time_bucket_counts = {}
+    for s in window_samples[-200:]:
+        t = _safe_float(s.get("time_left"))
+        if t is None:
+            key = "unknown"
+        elif t < 10:
+            key = "<10s"
+        elif t < 20:
+            key = "10-19s"
+        elif t < 30:
+            key = "20-29s"
+        elif t < 60:
+            key = "30-59s"
+        elif t < 120:
+            key = "60-119s"
+        else:
+            key = "120-300s"
+        time_bucket_counts[key] = time_bucket_counts.get(key, 0) + 1
+
+    top_allow_buckets = [row for row in bucket_rows if row.get("decision") in {"allow", "strong_allow"}]
+    top_allow_buckets.sort(key=lambda row: (float(row.get("roi", 0) or 0), int(row.get("trades", 0) or 0)), reverse=True)
+    top_deny_buckets = [row for row in bucket_rows if row.get("decision") == "deny"]
+    top_deny_buckets.sort(key=lambda row: (float(row.get("roi", 0) or 0), -int(row.get("trades", 0) or 0)))
 
     # Считаем invested и pnl из вошедших сигналов
     settings = load_settings()
@@ -421,6 +488,8 @@ def build_dashboard_state():
 
     return {
         "total_signals": len(signals),
+        "total_window_samples": len(window_samples),
+        "resolved_window_samples": len(resolved_window_samples),
         "total_entered": len(entered),
         "total_skipped": len(skipped),
         "invested": total_invested,
@@ -437,12 +506,24 @@ def build_dashboard_state():
         "eth_pm": eth_pm,
         "skip_reasons": skip_reasons,
         "last_signals": last_signals,
+        "last_window_samples": last_window_samples,
         "last_entered": last_entered,
         "last_skipped": last_skipped,
+        "last_full_window_waits": last_full_window_waits,
         "last_shadow_live": last_shadow_live,
         "shadow_live_mode": shadow_live_mode,
         "shadow_live_counts": shadow_live_counts,
         "shadow_live_total": len(shadow_live_signals),
+        "core_ev_rules": core_ev_rules,
+        "core_ev_rulebook_decisions": rulebook_decisions,
+        "core_ev_rulebook_bucket_count": len(bucket_rows),
+        "core_ev_source_type": str(core_ev_rules.get("source_type", "unknown") or "unknown"),
+        "core_ev_generated_at": str(core_ev_rules.get("generated_at", "unknown") or "unknown"),
+        "core_ev_resolved_eligible": int(core_ev_rules.get("resolved_eligible_signals", 0) or 0),
+        "core_ev_runtime_decisions": core_ev_decision_counts,
+        "window_time_bucket_counts": time_bucket_counts,
+        "top_allow_buckets": top_allow_buckets[:10],
+        "top_deny_buckets": top_deny_buckets[:10],
         "btc_signals": [s for s in signals if s.get("coin") == "BTC"],
         "eth_signals": [s for s in signals if s.get("coin") == "ETH"],
         "btc_entered": [s for s in entered if s.get("coin") == "BTC"],
@@ -537,7 +618,13 @@ D = build_dashboard_state()  # Dashboard state из signals.json
 L = parse_log_state(Path(os.environ.get("BOT_LOG_FILE", str(DEFAULT_LOG))))  # Log state только для статуса
 
 # ===== TABS =====
-tab_dashboard, tab_history, tab_stats, tab_settings = st.tabs(["📊 Dashboard", "📋 History", "📈 Statistics", "⚙️ Settings"])
+tab_dashboard, tab_history, tab_window, tab_stats, tab_settings = st.tabs([
+    "📊 Dashboard",
+    "📋 History",
+    "🪟 Window Intelligence",
+    "📈 Statistics",
+    "⚙️ Settings",
+])
 
 # ==========================================
 # TAB 1: DASHBOARD
@@ -659,6 +746,24 @@ with tab_dashboard:
     sh5.metric("Shadow Signals", D['shadow_live_total'])
     st.caption("Shadow live decisions are currently for observation/controlled rollout, depending on bot settings.")
 
+    # ---- CORE EV / FULL-WINDOW ----
+    st.markdown("---")
+    st.markdown("#### Core EV / Full-Window")
+    ce1, ce2, ce3, ce4, ce5, ce6 = st.columns(6)
+    rulebook_counts = D['core_ev_rulebook_decisions']
+    runtime_counts = D['core_ev_runtime_decisions']
+    ce1.metric("Window Samples", D['total_window_samples'])
+    ce2.metric("Resolved Samples", D['resolved_window_samples'])
+    ce3.metric("Rulebook Buckets", D['core_ev_rulebook_bucket_count'])
+    ce4.metric("Rulebook Eligible", D['core_ev_resolved_eligible'])
+    ce5.metric("Runtime Allow", runtime_counts.get('strong_allow', 0) + runtime_counts.get('allow', 0))
+    ce6.metric("Runtime Deny", runtime_counts.get('deny', 0))
+    st.caption(
+        f"Rulebook source: {D['core_ev_source_type']} | generated: {D['core_ev_generated_at']} | "
+        f"allow={rulebook_counts.get('strong_allow', 0) + rulebook_counts.get('allow', 0)} "
+        f"watch={rulebook_counts.get('watch', 0)} deny={rulebook_counts.get('deny', 0)} unknown={rulebook_counts.get('unknown', 0)}"
+    )
+
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
         st.markdown("#### Strategy Quality")
@@ -742,6 +847,21 @@ with tab_dashboard:
             })
         st.dataframe(shadow_rows, use_container_width=True, hide_index=True, height=220)
 
+    if D['last_full_window_waits']:
+        st.markdown("---")
+        st.markdown("**Recent Full-Window Waits**")
+        wait_rows = []
+        for x in reversed(D['last_full_window_waits'][-8:]):
+            wait_rows.append({
+                "Time": x.get('timestamp', ''),
+                "Coin": x.get('coin', ''),
+                "PM": f"{x.get('pm', 0):.3f}",
+                "Time Left": f"{x.get('time_left', 0):.1f}s",
+                "Core EV": x.get('core_ev_decision', ''),
+                "Reason": str(x.get('full_window_entry_reason', x.get('reason', '')) or '')[:64],
+            })
+        st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=220)
+
     # ---- SIGNALS TABLE ----
     if D['last_signals']:
         with st.expander(f"📋 Last Signals ({len(D['last_signals'])})", expanded=False):
@@ -753,11 +873,30 @@ with tab_dashboard:
                     "PM": f"{x.get('pm', 0):.3f}",
                     "Δ%": f"{x.get('delta', 0):.3f}",
                     "Conf%": f"{x.get('confidence', 0)*100:.0f}",
+                    "CoreEV": x.get('core_ev_decision', ''),
+                    "FW Reason": str(x.get('full_window_entry_reason', '') or '')[:24],
                     "Price": f"{x.get('price', 0):.0f}",
                     "Shadow": x.get('shadow_live_decision', ''),
                     "Entered": "✅" if x.get("entered") else "❌",
                 })
             st.dataframe(rows, use_container_width=True, hide_index=True, height=200)
+
+    if D['last_window_samples']:
+        with st.expander(f"🪟 Last Window Samples ({len(D['last_window_samples'])})", expanded=False):
+            rows = []
+            for x in reversed(D['last_window_samples']):
+                rows.append({
+                    "Time": x.get('timestamp', ''),
+                    "Coin": x.get('coin', ''),
+                    "PM": f"{x.get('pm', 0):.3f}",
+                    "Δ%": f"{x.get('delta', 0):.3f}",
+                    "Time Left": f"{x.get('time_left', 0):.1f}s",
+                    "Tier": x.get('signal_tier', ''),
+                    "CoreEV": x.get('core_ev_decision', ''),
+                    "Shadow": x.get('shadow_live_decision', ''),
+                    "Outcome": x.get('counterfactual_result', ''),
+                })
+            st.dataframe(rows, use_container_width=True, hide_index=True, height=220)
 
 # ==========================================
 # TAB 2: HISTORY
@@ -813,11 +952,133 @@ with tab_history:
         st.info("No saved signals yet. Signals are saved when the bot processes them.")
 
 # ==========================================
-# TAB 3: STATISTICS
+# TAB 3: WINDOW INTELLIGENCE
+# ==========================================
+with tab_window:
+    st.markdown("### 🪟 Window Intelligence")
+    st.caption("Full-window observation flow, Core EV rulebook state, and best-entry wait logic.")
+
+    wi1, wi2, wi3, wi4, wi5, wi6 = st.columns(6)
+    wi1.metric("Samples", D['total_window_samples'])
+    wi2.metric("Resolved", D['resolved_window_samples'])
+    wi3.metric("Rulebook Buckets", D['core_ev_rulebook_bucket_count'])
+    wi4.metric("Eligible", D['core_ev_resolved_eligible'])
+    wi5.metric("Recent Waits", len(D['last_full_window_waits']))
+    wi6.metric("Source", D['core_ev_source_type'])
+
+    st.markdown("---")
+    rw1, rw2 = st.columns(2)
+    with rw1:
+        st.markdown("**Top Allow Buckets**")
+        if D['top_allow_buckets']:
+            allow_rows = []
+            for row in D['top_allow_buckets']:
+                allow_rows.append({
+                    "Decision": row.get("decision", ""),
+                    "Trades": row.get("trades", 0),
+                    "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
+                    "Recent ROI": f"{float(row.get('recent_roi', 0) or 0):+.1f}%",
+                    "Bucket": str(row.get("key", ""))[:92],
+                })
+            st.dataframe(allow_rows, use_container_width=True, hide_index=True, height=260)
+        else:
+            st.caption("No allow buckets yet.")
+
+    with rw2:
+        st.markdown("**Top Deny Buckets**")
+        if D['top_deny_buckets']:
+            deny_rows = []
+            for row in D['top_deny_buckets']:
+                deny_rows.append({
+                    "Decision": row.get("decision", ""),
+                    "Trades": row.get("trades", 0),
+                    "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
+                    "Recent ROI": f"{float(row.get('recent_roi', 0) or 0):+.1f}%",
+                    "Bucket": str(row.get("key", ""))[:92],
+                })
+            st.dataframe(deny_rows, use_container_width=True, hide_index=True, height=260)
+        else:
+            st.caption("No deny buckets yet.")
+
+    st.markdown("---")
+    tw1, tw2 = st.columns(2)
+    with tw1:
+        st.markdown("**Recent Timing Coverage**")
+        if D['window_time_bucket_counts']:
+            timing_rows = []
+            for key, count in sorted(D['window_time_bucket_counts'].items(), key=lambda item: item[0]):
+                timing_rows.append({"Time Bucket": key, "Samples": count})
+            st.dataframe(timing_rows, use_container_width=True, hide_index=True, height=220)
+        else:
+            st.caption("No timing data yet.")
+
+    with tw2:
+        st.markdown("**Recent Full-Window Wait Reasons**")
+        if D['last_full_window_waits']:
+            wait_rows = []
+            for x in reversed(D['last_full_window_waits'][-10:]):
+                wait_rows.append({
+                    "Time": x.get("timestamp", ""),
+                    "Coin": x.get("coin", ""),
+                    "Core EV": x.get("core_ev_decision", ""),
+                    "Time Left": f"{x.get('time_left', 0):.1f}s",
+                    "Reason": str(x.get("full_window_entry_reason", x.get("reason", "")) or "")[:72],
+                })
+            st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=220)
+        else:
+            st.caption("No full-window waits yet.")
+
+    st.markdown("---")
+    st.markdown("**Window Sample History**")
+    window_samples = load_window_samples()
+    if window_samples:
+        wf1, wf2, wf3, wf4 = st.columns(4)
+        with wf1:
+            coin_filter = st.selectbox("Coin", ["All", "BTC", "ETH"], key="ws_coin")
+        with wf2:
+            core_filter = st.selectbox("Core EV", ["All", "strong_allow", "allow", "watch", "deny", "unknown"], key="ws_core")
+        with wf3:
+            outcome_filter = st.selectbox("Outcome", ["All", "WIN", "LOSS", "Unresolved"], key="ws_outcome")
+        with wf4:
+            sample_count = st.slider("Show last N samples", 20, 500, 80, key="ws_count")
+
+        filtered_samples = window_samples
+        if coin_filter != "All":
+            filtered_samples = [s for s in filtered_samples if s.get("coin") == coin_filter]
+        if core_filter != "All":
+            filtered_samples = [s for s in filtered_samples if str(s.get("core_ev_decision", "unknown") or "unknown") == core_filter]
+        if outcome_filter == "WIN":
+            filtered_samples = [s for s in filtered_samples if str(s.get("counterfactual_result", "")) == "WIN"]
+        elif outcome_filter == "LOSS":
+            filtered_samples = [s for s in filtered_samples if str(s.get("counterfactual_result", "")) == "LOSS"]
+        elif outcome_filter == "Unresolved":
+            filtered_samples = [s for s in filtered_samples if s.get("pnl_if_entered") is None]
+
+        sample_rows = []
+        for x in reversed(filtered_samples[-sample_count:]):
+            sample_rows.append({
+                "Time": x.get("timestamp", ""),
+                "Coin": x.get("coin", ""),
+                "Side": x.get("side", ""),
+                "PM": f"{x.get('pm', 0):.3f}",
+                "Δ%": f"{x.get('delta', 0):.3f}",
+                "Conf%": f"{x.get('confidence', 0) * 100:.0f}",
+                "Time Left": f"{x.get('time_left', 0):.1f}s",
+                "Tier": x.get("signal_tier", ""),
+                "Core EV": x.get("core_ev_decision", ""),
+                "Shadow": x.get("shadow_live_decision", ""),
+                "Outcome": x.get("counterfactual_result", ""),
+            })
+        st.dataframe(sample_rows, use_container_width=True, hide_index=True, height=360)
+    else:
+        st.info("No window samples yet. Let the updated bot observe more windows.")
+
+# ==========================================
+# TAB 4: STATISTICS
 # ==========================================
 with tab_stats:
     st.markdown("### 📈 Statistics")
-    st.caption("Данные из signals.json — синхронизированы с Dashboard")
+    st.caption("Данные из signals.json + window_samples.json — синхронизированы с текущей full-window Core EV версией бота")
 
     if D['total_signals'] > 0:
         s1, s2, s3, s4 = st.columns(4)
@@ -825,6 +1086,25 @@ with tab_stats:
         s2.metric("BTC Signals", len(D['btc_signals']))
         s3.metric("ETH Signals", len(D['eth_signals']))
         s4.metric("Entries", D['total_entered'])
+
+        st.markdown("---")
+
+        st.markdown("**Core EV / Full-Window Summary**")
+        fw1, fw2, fw3, fw4, fw5, fw6 = st.columns(6)
+        fw1.metric("Window Samples", D['total_window_samples'])
+        fw2.metric("Resolved Samples", D['resolved_window_samples'])
+        fw3.metric("Rulebook Buckets", D['core_ev_rulebook_bucket_count'])
+        fw4.metric("Rulebook Eligible", D['core_ev_resolved_eligible'])
+        fw5.metric("Rulebook Allow", D['core_ev_rulebook_decisions'].get('strong_allow', 0) + D['core_ev_rulebook_decisions'].get('allow', 0))
+        fw6.metric("Rulebook Deny", D['core_ev_rulebook_decisions'].get('deny', 0))
+        st.caption(f"Source: {D['core_ev_source_type']} | Generated: {D['core_ev_generated_at']}")
+
+        if D['window_time_bucket_counts']:
+            st.markdown("**Recent Window Sample Timing**")
+            bucket_rows = []
+            for key, count in sorted(D['window_time_bucket_counts'].items(), key=lambda item: item[0]):
+                bucket_rows.append({"Time Bucket": key, "Samples": count})
+            st.dataframe(bucket_rows, use_container_width=True, hide_index=True, height=210)
 
         st.markdown("---")
 
