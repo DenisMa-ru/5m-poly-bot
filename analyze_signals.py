@@ -317,6 +317,61 @@ def bucket_window_progress(signal: dict) -> str:
     return "80-100%"
 
 
+def bucket_shadow_progress_value(progress: float | None) -> str:
+    if progress is None:
+        return "unknown"
+    if progress < 0.20:
+        return "0-19%"
+    if progress < 0.40:
+        return "20-39%"
+    if progress < 0.60:
+        return "40-59%"
+    if progress < 0.80:
+        return "60-79%"
+    return "80-100%"
+
+
+def bucket_shadow_first_candidate_progress(signal: dict) -> str:
+    raw = signal.get("shadow_first_candidate_progress_pct")
+    progress = float(raw) if raw is not None else None
+    return bucket_shadow_progress_value(progress)
+
+
+def bucket_shadow_first_live_decision_progress(signal: dict) -> str:
+    raw = signal.get("shadow_first_live_decision_progress_pct")
+    progress = float(raw) if raw is not None else None
+    return bucket_shadow_progress_value(progress)
+
+
+def bucket_shadow_observation_count(signal: dict) -> str:
+    count = int(signal.get("shadow_observation_count", 0) or 0)
+    if count <= 0:
+        return "0"
+    if count == 1:
+        return "1"
+    if count == 2:
+        return "2"
+    if count == 3:
+        return "3"
+    if count <= 5:
+        return "4-5"
+    return ">=6"
+
+
+def early_shadow_candidate_label(signal: dict) -> str:
+    progress = signal.get("shadow_first_candidate_progress_pct")
+    if progress is None:
+        return "no_candidate"
+    progress = float(progress)
+    if progress < 0.60:
+        return "candidate_before_60%"
+    if progress < 0.70:
+        return "candidate_60-69%"
+    if progress < 0.80:
+        return "candidate_70-79%"
+    return "candidate_80-100%"
+
+
 def bucket_underpricing(signal: dict) -> str:
     score = float(signal.get("underpricing_score", 0) or 0)
     if score < -0.50:
@@ -353,6 +408,17 @@ def resolve_outcome_pnl(signal: dict) -> float | None:
     if (not signal.get("entered")) and signal.get("pnl_if_entered") is not None:
         return float(signal.get("pnl_if_entered", 0) or 0)
     return None
+
+
+def shadow_pm_eligible(signal: dict, pm_floor: float) -> bool:
+    return float(signal.get("pm", 0) or 0) >= pm_floor
+
+
+def select_shadow_sample(resolved: list[dict], shadow_pm_floor: float) -> tuple[list[dict], str]:
+    cleaned = [signal for signal in resolved if shadow_pm_eligible(signal, shadow_pm_floor)]
+    if cleaned:
+        return cleaned, "cleaned"
+    return resolved, "raw"
 
 
 def shadow_similarity_core_label(signal: dict) -> str:
@@ -741,7 +807,7 @@ def print_execution_failed_report(signals: list[dict], min_trades: int, top: int
         print_table(title, rows, top)
 
 
-def print_shadow_entry_report(signals: list[dict], min_trades: int, top: int) -> None:
+def print_shadow_entry_report(signals: list[dict], min_trades: int, top: int, shadow_pm_floor: float) -> None:
     print("\n=== SHADOW ENTRY PROFILES ===")
     shadow_annotated = [
         signal for signal in signals
@@ -775,7 +841,13 @@ def print_shadow_entry_report(signals: list[dict], min_trades: int, top: int) ->
         print("No shadow-annotated resolved signals yet.")
         return
 
-    candidates = [signal for signal in resolved if signal.get("shadow_entry_candidate") is True]
+    sample, sample_label = select_shadow_sample(resolved, shadow_pm_floor)
+    print(
+        f"economic_pm_floor>={shadow_pm_floor:.3f} | raw_resolved={len(resolved)} | "
+        f"sample={sample_label} ({len(sample)})"
+    )
+
+    candidates = [signal for signal in sample if signal.get("shadow_entry_candidate") is True]
     entered_candidates = [signal for signal in candidates if signal.get("entered")]
     skipped_candidates = [signal for signal in candidates if not signal.get("entered")]
     total = sum(float(signal.get("realized_pnl", 0) or 0) for signal in candidates)
@@ -822,7 +894,7 @@ def print_shadow_entry_report(signals: list[dict], min_trades: int, top: int) ->
     ]
 
     for title, key_fn in reports:
-        rows = filter_rows(summarize_trades(resolved, key_fn), min_trades)
+        rows = filter_rows(summarize_trades(sample, key_fn), min_trades)
         print_table(title, rows, top)
 
     if skipped_candidates:
@@ -840,7 +912,7 @@ def print_shadow_entry_report(signals: list[dict], min_trades: int, top: int) ->
             print_table(title, rows, top)
 
 
-def print_shadow_similarity_report(signals: list[dict], min_trades: int, top: int) -> None:
+def print_shadow_similarity_report(signals: list[dict], min_trades: int, top: int, shadow_pm_floor: float) -> None:
     print("\n=== SHADOW HISTORICAL SIMILARITY ===")
     shadow_annotated = [
         signal for signal in signals
@@ -874,8 +946,14 @@ def print_shadow_similarity_report(signals: list[dict], min_trades: int, top: in
         print("No shadow-annotated resolved signals yet.")
         return
 
-    candidate_resolved = [signal for signal in resolved if signal.get("shadow_entry_candidate") is True]
-    sample = candidate_resolved if candidate_resolved else resolved
+    resolved_sample, sample_label = select_shadow_sample(resolved, shadow_pm_floor)
+    print(
+        f"economic_pm_floor>={shadow_pm_floor:.3f} | raw_resolved={len(resolved)} | "
+        f"sample={sample_label} ({len(resolved_sample)})"
+    )
+
+    candidate_resolved = [signal for signal in resolved_sample if signal.get("shadow_entry_candidate") is True]
+    sample = candidate_resolved if candidate_resolved else resolved_sample
     source_label = "shadow candidates" if candidate_resolved else "all shadow-annotated resolved signals"
     print(f"Using {len(sample)} {source_label} for similarity clustering.")
 
@@ -933,7 +1011,7 @@ def print_shadow_similarity_report(signals: list[dict], min_trades: int, top: in
         )
 
 
-def print_shadow_live_recommendations(signals: list[dict], min_trades: int, top: int) -> None:
+def print_shadow_live_recommendations(signals: list[dict], min_trades: int, top: int, shadow_pm_floor: float) -> None:
     print("\n=== SHADOW LIVE RECOMMENDATIONS ===")
     shadow_annotated = [
         signal for signal in signals
@@ -967,8 +1045,14 @@ def print_shadow_live_recommendations(signals: list[dict], min_trades: int, top:
         print("No shadow-annotated resolved signals yet.")
         return
 
-    candidate_resolved = [signal for signal in resolved if signal.get("shadow_entry_candidate") is True]
-    sample = candidate_resolved if candidate_resolved else resolved
+    resolved_sample, sample_label = select_shadow_sample(resolved, shadow_pm_floor)
+    print(
+        f"economic_pm_floor>={shadow_pm_floor:.3f} | raw_resolved={len(resolved)} | "
+        f"sample={sample_label} ({len(resolved_sample)})"
+    )
+
+    candidate_resolved = [signal for signal in resolved_sample if signal.get("shadow_entry_candidate") is True]
+    sample = candidate_resolved if candidate_resolved else resolved_sample
     source_label = "shadow candidates" if candidate_resolved else "all shadow-annotated resolved signals"
     print(f"Evaluating {len(sample)} {source_label} for live shortlist.")
 
@@ -1078,7 +1162,7 @@ def print_shadow_live_recommendations(signals: list[dict], min_trades: int, top:
     print("  watchlist = кластеры выглядят интересно, но данных пока мало; это ещё не правило для live.")
 
 
-def print_shadow_live_decision_report(signals: list[dict], min_trades: int, top: int) -> None:
+def print_shadow_live_decision_report(signals: list[dict], min_trades: int, top: int, shadow_pm_floor: float) -> None:
     print("\n=== SHADOW LIVE DECISION REPORT ===")
     shadow_live_signals = [
         signal for signal in signals
@@ -1103,6 +1187,12 @@ def print_shadow_live_decision_report(signals: list[dict], min_trades: int, top:
         print("No resolved shadow live decision signals yet.")
         return
 
+    sample, sample_label = select_shadow_sample(resolved, shadow_pm_floor)
+    print(
+        f"economic_pm_floor>={shadow_pm_floor:.3f} | raw_resolved={len(resolved)} | "
+        f"sample={sample_label} ({len(sample)})"
+    )
+
     reports = [
         ("By shadow live mode", shadow_live_mode_label),
         ("By shadow live decision", shadow_live_decision_label),
@@ -1126,8 +1216,122 @@ def print_shadow_live_decision_report(signals: list[dict], min_trades: int, top:
     ]
 
     for title, key_fn in reports:
-        rows = filter_rows(summarize_trades(resolved, key_fn), min_trades)
+        rows = filter_rows(summarize_trades(sample, key_fn), min_trades)
         print_table(title, rows, top)
+
+
+def print_shadow_early_timing_report(signals: list[dict], min_trades: int, top: int, shadow_pm_floor: float) -> None:
+    print("\n=== SHADOW EARLY TIMING REPORT ===")
+    early_shadow_signals = [
+        signal for signal in signals
+        if any(
+            key in signal
+            for key in (
+                "shadow_observation_count",
+                "shadow_first_candidate_progress_pct",
+                "shadow_first_live_decision_progress_pct",
+                "shadow_max_score",
+            )
+        )
+    ]
+    if not early_shadow_signals:
+        print("No early shadow timing data yet. Collect new post-patch bot logs.")
+        return
+
+    resolved = []
+    for signal in early_shadow_signals:
+        outcome_pnl = resolve_outcome_pnl(signal)
+        if outcome_pnl is None:
+            continue
+        resolved.append({
+            **signal,
+            "realized_pnl": outcome_pnl,
+            "won": outcome_pnl > 0,
+        })
+
+    if not resolved:
+        print("No resolved early shadow timing signals yet.")
+        return
+
+    cleaned = [signal for signal in resolved if shadow_pm_eligible(signal, shadow_pm_floor)]
+    print(
+        f"economic_pm_floor>={shadow_pm_floor:.3f} | raw_resolved={len(resolved)} | "
+        f"cleaned_resolved={len(cleaned)}"
+    )
+
+    active_sample, sample_label = select_shadow_sample(resolved, shadow_pm_floor)
+
+    with_candidate = [signal for signal in active_sample if signal.get("shadow_first_candidate_progress_pct") is not None]
+    with_live_decision = [signal for signal in active_sample if signal.get("shadow_first_live_decision_progress_pct") is not None]
+    early_candidates = [signal for signal in with_candidate if float(signal.get("shadow_first_candidate_progress_pct", 1) or 1) < 0.80]
+    early_live = [signal for signal in with_live_decision if float(signal.get("shadow_first_live_decision_progress_pct", 1) or 1) < 0.80]
+
+    print(
+        f"sample={sample_label} | resolved={len(active_sample)} | with_candidate_timing={len(with_candidate)} | "
+        f"with_live_decision_timing={len(with_live_decision)}"
+    )
+    print(
+        f"early_candidates(<80%)={len(early_candidates)} | "
+        f"early_live_decisions(<80%)={len(early_live)}"
+    )
+
+    reports = [
+        ("By observation count", bucket_shadow_observation_count),
+        ("By first candidate progress", bucket_shadow_first_candidate_progress),
+        ("By first live decision progress", bucket_shadow_first_live_decision_progress),
+        ("By early candidate timing", early_shadow_candidate_label),
+        (
+            "By first candidate profile x timing",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: str(s.get("shadow_first_candidate_profile", "none") or "none"),
+                bucket_shadow_first_candidate_progress,
+            ),
+        ),
+        (
+            "By first live decision x timing",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: str(s.get("shadow_first_live_decision", "neutral") or "neutral"),
+                bucket_shadow_first_live_decision_progress,
+            ),
+        ),
+        (
+            "By max profile x early timing",
+            lambda signal: combo_bucket(
+                signal,
+                lambda s: str(s.get("shadow_max_score_profile", "none") or "none"),
+                early_shadow_candidate_label,
+            ),
+        ),
+    ]
+
+    for title, key_fn in reports:
+        rows = filter_rows(summarize_trades(active_sample, key_fn), min_trades)
+        print_table(title, rows, top)
+
+    if early_candidates:
+        print("\nEarly candidate shortlist:")
+        shortlist = filter_rows(
+            summarize_trades(
+                early_candidates,
+                lambda signal: combo_bucket(
+                    signal,
+                    lambda s: str(s.get("shadow_first_candidate_profile", "none") or "none"),
+                    bucket_shadow_first_candidate_progress,
+                    market_regime_label,
+                ),
+            ),
+            max(2, min_trades),
+        )
+        if not shortlist:
+            print("  No early candidate clusters with enough resolved samples yet.")
+        else:
+            for row in list(reversed(shortlist[-top:])):
+                print(
+                    f"  {row['key']} | trades={row['count']} | win_rate={fmt_pct(row['win_rate'])} | "
+                    f"total={fmt_money(row['total_pnl'])} | roi={fmt_pct(row['roi'])}"
+                )
 
 
 def print_combo_report(signals: list[dict], min_trades: int, top: int) -> None:
@@ -1453,6 +1657,7 @@ def main() -> int:
     parser.add_argument("--default-amount", type=float, default=10.0, help="Fallback amount for signals without amount field")
     parser.add_argument("--pm-floor", type=float, default=0.10, help="Ignore signals with PM price below this floor in optimize mode")
     parser.add_argument("--pm-ceiling", type=float, default=0.99, help="Ignore signals with PM price above this ceiling in optimize mode")
+    parser.add_argument("--shadow-pm-floor", type=float, default=0.05, help="Ignore shadow-analysis rows with PM price below this floor when possible")
     parser.add_argument("--conf-grid", default="0.45,0.50,0.55,0.60", help="Comma-separated confidence thresholds")
     parser.add_argument("--delta-grid", default="0.0008,0.0010,0.0012,0.0015", help="Comma-separated delta_skip thresholds")
     parser.add_argument("--price-min-btc-grid", default="0.82,0.86,0.90,0.94", help="Comma-separated BTC min prices")
@@ -1532,10 +1737,11 @@ def main() -> int:
     print_indicator_reason_report(signals, args.min_trades, args.top)
     print_normal_pm_zone_report(signals, args.min_trades, args.top)
     print_execution_failed_report(signals, args.min_trades, args.top)
-    print_shadow_entry_report(signals, args.min_trades, args.top)
-    print_shadow_similarity_report(signals, args.min_trades, args.top)
-    print_shadow_live_recommendations(signals, args.min_trades, args.top)
-    print_shadow_live_decision_report(signals, args.min_trades, args.top)
+    print_shadow_entry_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
+    print_shadow_similarity_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
+    print_shadow_live_recommendations(signals, args.min_trades, args.top, args.shadow_pm_floor)
+    print_shadow_live_decision_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
+    print_shadow_early_timing_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
     print_combo_report(signals, args.min_trades, args.top)
     print_signal_tier_reason_report(signals, args.min_trades, args.top)
     print_counterfactual_skip_report(signals, args.min_trades)

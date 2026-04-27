@@ -927,6 +927,7 @@ class CryptoBot:
         self.proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
         self.running      = True  # Flag for control
         self.window_history: dict[str, deque] = {}
+        self.shadow_window_state: dict[str, dict] = {}
         self.closed_window_summaries: deque = deque(maxlen=12)
 
         # Банк (начальный капитал) и текущий баланс
@@ -1136,6 +1137,8 @@ class CryptoBot:
                 if slug in self.traded_slugs or slug in entered_slugs:
                     continue
 
+                shadow_context = self._observe_shadow_window(market, ta, seconds_left)
+
                 # Log monitoring info when still outside entry window
                 if seconds_left > ENTRY_SECONDS_MAX + 5:
                     log(f"   [{crypto}] {seconds_left:.0f}s | "
@@ -1153,11 +1156,11 @@ class CryptoBot:
                     f"{ta.get('reason','')[:50]}")
 
                 if ENTRY_SECONDS_MIN <= seconds_left <= ENTRY_SECONDS_MAX:
-                    self._evaluate_entry(market, ta, seconds_left, entered_slugs)
+                    self._evaluate_entry(market, ta, seconds_left, entered_slugs, shadow_context)
 
             time.sleep(POLL_INTERVAL)
 
-    def _evaluate_entry(self, market, ta, seconds_left, entered_slugs):
+    def _evaluate_entry(self, market, ta, seconds_left, entered_slugs, shadow_context: dict | None = None):
         slug      = market["slug"]
         crypto    = market["crypto"]
         price_min = PRICE_MIN.get(crypto, 0.92)
@@ -1182,10 +1185,11 @@ class CryptoBot:
             time_left=float(seconds_left or 0),
             trend_aligned=trend_aligned,
         )
-        history = self._record_window_tick(market, ta, seconds_left)
-        window_features = self._build_window_features(history, market, ta, seconds_left)
-        shadow = self._evaluate_shadow_entry(window_features, market, ta, seconds_left)
-        shadow_live = self._evaluate_shadow_live_decision(window_features, shadow, market, ta)
+        shadow_context = shadow_context or self._observe_shadow_window(market, ta, seconds_left, allow_log=False)
+        window_features = shadow_context.get("features", {})
+        shadow = shadow_context.get("shadow", {})
+        shadow_live = shadow_context.get("shadow_live", {})
+        shadow_state = self.shadow_window_state.get(slug, {})
 
         # Build signal data for saving
         signal_data = {
@@ -1238,6 +1242,17 @@ class CryptoBot:
             "shadow_live_decision": shadow_live.get("decision", "neutral"),
             "shadow_live_reason": shadow_live.get("reason", ""),
             "shadow_live_score": shadow_live.get("score", 0.0),
+            "shadow_observation_count": shadow_state.get("observation_count", 0),
+            "shadow_first_observed_progress_pct": shadow_state.get("first_progress_pct", window_features.get("window_progress_pct", 0.0)),
+            "shadow_first_candidate_progress_pct": shadow_state.get("first_candidate_progress_pct"),
+            "shadow_first_candidate_seconds_left": shadow_state.get("first_candidate_seconds_left"),
+            "shadow_first_candidate_profile": shadow_state.get("first_candidate_profile", "none"),
+            "shadow_first_candidate_score": shadow_state.get("first_candidate_score", 0.0),
+            "shadow_first_live_decision": shadow_state.get("first_live_decision", "neutral"),
+            "shadow_first_live_decision_progress_pct": shadow_state.get("first_live_decision_progress_pct"),
+            "shadow_max_score": shadow_state.get("max_score", shadow.get("score", 0.0)),
+            "shadow_max_score_profile": shadow_state.get("max_score_profile", shadow.get("profile", "none")),
+            "shadow_max_live_decision": shadow_state.get("max_live_decision", shadow_live.get("decision", "neutral")),
         }
 
         shadow_live_decision = str(shadow_live.get("decision", "neutral") or "neutral")
@@ -1444,6 +1459,77 @@ class CryptoBot:
                 signal_data["execution_taker_price"] = execution.get("taker_price")
 
         save_signal(signal_data)
+
+    def _observe_shadow_window(self, market: dict, ta: dict, seconds_left: float, allow_log: bool = True) -> dict:
+        slug = str(market.get("slug") or "")
+        history = self._record_window_tick(market, ta, seconds_left)
+        features = self._build_window_features(history, market, ta, seconds_left)
+        shadow = self._evaluate_shadow_entry(features, market, ta, seconds_left)
+        shadow_live = self._evaluate_shadow_live_decision(features, shadow, market, ta)
+
+        state = self.shadow_window_state.get(slug)
+        if state is None:
+            state = {
+                "observation_count": 0,
+                "first_progress_pct": float(features.get("window_progress_pct", 0.0) or 0.0),
+                "first_candidate_progress_pct": None,
+                "first_candidate_seconds_left": None,
+                "first_candidate_profile": "none",
+                "first_candidate_score": 0.0,
+                "first_live_decision": "neutral",
+                "first_live_decision_progress_pct": None,
+                "max_score": 0.0,
+                "max_score_profile": "none",
+                "max_live_decision": "neutral",
+                "last_logged_key": None,
+            }
+            self.shadow_window_state[slug] = state
+
+        state["observation_count"] = int(state.get("observation_count", 0) or 0) + 1
+
+        if shadow.get("candidate") and state.get("first_candidate_progress_pct") is None:
+            state["first_candidate_progress_pct"] = float(features.get("window_progress_pct", 0.0) or 0.0)
+            state["first_candidate_seconds_left"] = float(seconds_left or 0)
+            state["first_candidate_profile"] = str(shadow.get("profile", "none") or "none")
+            state["first_candidate_score"] = float(shadow.get("score", 0.0) or 0.0)
+
+        if state.get("first_live_decision_progress_pct") is None and shadow_live.get("decision") in {"watch", "allow", "strong_allow", "deny"}:
+            state["first_live_decision"] = str(shadow_live.get("decision", "neutral") or "neutral")
+            state["first_live_decision_progress_pct"] = float(features.get("window_progress_pct", 0.0) or 0.0)
+
+        shadow_score = float(shadow.get("score", 0.0) or 0.0)
+        if shadow_score >= float(state.get("max_score", 0.0) or 0.0):
+            state["max_score"] = shadow_score
+            state["max_score_profile"] = str(shadow.get("profile", "none") or "none")
+
+        live_decision = str(shadow_live.get("decision", "neutral") or "neutral")
+        decision_rank = {"neutral": 0, "watch": 1, "allow": 2, "strong_allow": 3}.get(live_decision, -1)
+        best_rank = {"neutral": 0, "watch": 1, "allow": 2, "strong_allow": 3}.get(str(state.get("max_live_decision", "neutral") or "neutral"), -1)
+        if decision_rank >= best_rank:
+            state["max_live_decision"] = live_decision
+
+        if allow_log and seconds_left > ENTRY_SECONDS_MAX:
+            profile = str(shadow.get("profile", "none") or "none")
+            progress_pct = float(features.get("window_progress_pct", 0.0) or 0.0) * 100.0
+            log_key = (live_decision, profile, str(shadow_live.get("reason", "") or shadow.get("reason", "")))
+            if live_decision in {"watch", "allow", "strong_allow", "deny"} and state.get("last_logged_key") != log_key:
+                log(
+                    f"   [{market.get('crypto', '?')}] SHADOW-OBSERVE {live_decision.upper()} — "
+                    f"profile={profile} score={shadow_score:.2f} "
+                    f"progress={progress_pct:.0f}% stable={features.get('stable_ticks', 0)} "
+                    f"streak={features.get('recent_5m_streak', 0)} "
+                    f"gap={float(features.get('pm_vs_delta_gap', 0) or 0):+.3f} "
+                    f"underpricing={float(features.get('underpricing_score', 0) or 0):+.3f} | "
+                    f"{shadow_live.get('reason', shadow.get('reason', ''))}"
+                )
+                state["last_logged_key"] = log_key
+
+        return {
+            "history": history,
+            "features": features,
+            "shadow": shadow,
+            "shadow_live": shadow_live,
+        }
 
     def _record_window_tick(self, market: dict, ta: dict, seconds_left: float) -> deque:
         slug = str(market.get("slug") or "")
@@ -1692,6 +1778,7 @@ class CryptoBot:
             to_remove.append(slug)
         for slug in to_remove:
             self.window_history.pop(slug, None)
+            self.shadow_window_state.pop(slug, None)
 
     def _enter(
         self,
