@@ -252,6 +252,7 @@ SHADOW_LIVE_MODE = str(_bot_settings.get("shadow_live_mode", "observe") or "obse
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 MIN_EDGE          = float(_bot_settings.get("min_edge", -0.05) or -0.05)
 INDICATOR_CONFIRM_MIN = float(_bot_settings.get("indicator_confirm_min", 0.0) or 0.0)
+TREND_CONFLICT_OVERRIDE_DELTA_MIN_PCT = float(_bot_settings.get("trend_conflict_override_delta_min_pct", 0.050) or 0.050)
 
 ATR_PERIODS       = 5
 ATR_MULTIPLIER    = _bot_settings.get("atr_multiplier", 1.5)
@@ -805,7 +806,7 @@ def analyze(symbol: str, window_ts: int) -> dict:
     elif higher_trend:
         trend_str = f"{higher_trend} (contradicts)"
         trend_conflict = True
-        if abs(delta) < DELTA_STRONG:
+        if delta_pct < TREND_CONFLICT_OVERRIDE_DELTA_MIN_PCT:
             return {
                 "confidence":    0,
                 "direction":     None,
@@ -820,6 +821,9 @@ def analyze(symbol: str, window_ts: int) -> dict:
                 "atr":           atr if 'atr' in locals() else 0,
                 "reason":        f"trend conflict on weak delta: {trend_str}",
             }
+        trend_aligned = True
+        trend_conflict = False
+        trend_str = f"{higher_trend} (contradicts, overridden by local delta)"
     else:
         trend_str = "unknown"
 
@@ -1169,6 +1173,7 @@ class CryptoBot:
             )
         else:
             log(f"Daily loss limit: ${self.daily_loss_limit:.2f}")
+        log(f"Trend conflict override delta: {TREND_CONFLICT_OVERRIDE_DELTA_MIN_PCT:.3f}%")
         if self.dynamic_sizing:
             log(
                 "Dynamic sizing: "
