@@ -573,6 +573,9 @@ def build_core_ev_rulebook(signals: list[dict], args) -> dict:
         "L3": args.core_min_bucket_trades_l3,
     }
     buckets = {}
+    allow_rows = []
+    deny_rows = []
+    watch_rows = []
     for key, items in groups.items():
         level = key.split(" | ", 1)[0]
         min_trades = mins.get(level, args.core_min_bucket_trades_l2)
@@ -619,7 +622,19 @@ def build_core_ev_rulebook(signals: list[dict], args) -> dict:
             "decision": decision,
         }
 
-    return {
+        row = {"key": key, **buckets[key]}
+        if decision in {"allow", "strong_allow"}:
+            allow_rows.append(row)
+        elif decision == "deny":
+            deny_rows.append(row)
+        elif decision == "watch":
+            watch_rows.append(row)
+
+    allow_rows.sort(key=lambda row: (row["roi"], row["trades"], row["win_rate"]), reverse=True)
+    deny_rows.sort(key=lambda row: (row["roi"], -row["trades"]))
+    watch_rows.sort(key=lambda row: (row["recent_roi"], row["roi"], row["trades"]))
+
+    summary = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source_type": source_label,
         "source_signals": len(signals),
@@ -630,6 +645,27 @@ def build_core_ev_rulebook(signals: list[dict], args) -> dict:
         "min_bucket_trades": mins,
         "min_recent_trades": args.core_min_recent_trades,
         "strong_roi_min": args.core_strong_roi_min,
+        "allow_bucket_count": len(allow_rows),
+        "deny_bucket_count": len(deny_rows),
+        "watch_bucket_count": len(watch_rows),
+        "bucket_count": len(buckets),
+    }
+
+    return {
+        "generated_at": summary["generated_at"],
+        "source_type": summary["source_type"],
+        "source_signals": summary["source_signals"],
+        "resolved_eligible_signals": summary["resolved_eligible_signals"],
+        "core_pm_min": summary["core_pm_min"],
+        "core_pm_max": summary["core_pm_max"],
+        "recent_hours": summary["recent_hours"],
+        "min_bucket_trades": summary["min_bucket_trades"],
+        "min_recent_trades": summary["min_recent_trades"],
+        "strong_roi_min": summary["strong_roi_min"],
+        "summary": summary,
+        "allow_rules": allow_rows,
+        "deny_rules": deny_rows,
+        "watch_rules": watch_rows,
         "buckets": buckets,
     }
 
