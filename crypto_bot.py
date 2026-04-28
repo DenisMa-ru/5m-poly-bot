@@ -200,6 +200,7 @@ FULL_WINDOW_CORE_EV_ENABLED = bool(_bot_settings.get("full_window_core_ev_enable
 WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_enabled", True))
 CORE_EV_ENTRY_TIME_MIN = float(_bot_settings.get("core_ev_entry_time_min", 10) or 10)
 CORE_EV_ENTRY_TIME_MAX = float(_bot_settings.get("core_ev_entry_time_max", max(10, OBSERVE_WINDOW_SECONDS)) or max(10, OBSERVE_WINDOW_SECONDS))
+FULL_WINDOW_CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("full_window_core_ev_time_left_max", 60) or 60)
 FULL_WINDOW_ENTRY_CONFIRM_TICKS = int(_bot_settings.get("full_window_entry_confirm_ticks", 2) or 2)
 FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_entry_commit_time_left", 19) or 19)
 FULL_WINDOW_ENTRY_MIN_SCORE_GAIN = float(_bot_settings.get("full_window_entry_min_score_gain", 0.15) or 0.15)
@@ -1798,7 +1799,7 @@ class CryptoBot:
                     f"{ta.get('reason','')[:50]}")
 
                 should_evaluate_entry = (
-                    CORE_EV_ENTRY_TIME_MIN <= seconds_left <= CORE_EV_ENTRY_TIME_MAX
+                    CORE_EV_ENTRY_TIME_MIN <= seconds_left <= min(CORE_EV_ENTRY_TIME_MAX, FULL_WINDOW_CORE_EV_TIME_LEFT_MAX)
                     if FULL_WINDOW_CORE_EV_ENABLED
                     else ENTRY_SECONDS_MIN <= seconds_left <= ENTRY_SECONDS_MAX
                 )
