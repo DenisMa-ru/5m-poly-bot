@@ -1549,17 +1549,20 @@ class CryptoBot:
         time_left = float(signal_data.get("time_left", 0) or 0)
         min_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(FULL_WINDOW_CORE_EV_MIN_LEVEL, 2)
         bucket_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(bucket_level, 0)
+        min_recent_trades_required = int(self.core_ev_rules.get("min_recent_trades", 0) or 0)
         if FULL_WINDOW_CORE_EV_ENABLED and bucket_level_rank < min_level_rank:
+            recent_positive_ok = (
+                not FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE
+                or recent_trades < min_recent_trades_required
+                or recent_roi > 0
+            )
             l1_fallback_ok = (
                 bucket_level == "L1"
                 and decision in {"allow", "strong_allow"}
                 and sample_size >= FULL_WINDOW_L1_FALLBACK_MIN_TRADES
                 and historical_roi > 0
                 and time_left <= FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX
-                and (
-                    not FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE
-                    or (recent_trades > 0 and recent_roi > 0)
-                )
+                and recent_positive_ok
             )
             if l1_fallback_ok:
                 size_fraction = CORE_EV_MAX_RISK_PCT if decision == "strong_allow" else CORE_EV_MAX_RISK_PCT * 0.5
