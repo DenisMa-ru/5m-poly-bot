@@ -230,6 +230,7 @@ CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 
 FULL_WINDOW_CORE_EV_MIN_LEVEL = str(_bot_settings.get("full_window_core_ev_min_level", "L2") or "L2").strip().upper()
 FULL_WINDOW_L1_FALLBACK_MIN_TRADES = int(_bot_settings.get("full_window_l1_fallback_min_trades", 8) or 8)
 FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE = bool(_bot_settings.get("full_window_l1_fallback_require_recent_positive", True))
+FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX = float(_bot_settings.get("full_window_l1_fallback_time_left_max", 90) or 90)
 WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 140) or 140)
 SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
 SHADOW_SOFT_STABLE_TICKS = int(_bot_settings.get("shadow_soft_stable_ticks", max(1, SHADOW_MIN_STABLE_TICKS - 1)) or max(1, SHADOW_MIN_STABLE_TICKS - 1))
@@ -1197,7 +1198,8 @@ class CryptoBot:
                 log(
                     "Full-window L1 fallback: "
                     f"min_trades={FULL_WINDOW_L1_FALLBACK_MIN_TRADES} "
-                    f"recent_positive={'ON' if FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE else 'OFF'}"
+                    f"recent_positive={'ON' if FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE else 'OFF'} "
+                    f"time_left<={FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX:.0f}s"
                 )
             if not self.core_ev_rules.get("buckets"):
                 log("WARNING: Core EV rulebook is empty; rebuild core_ev_rules.json from fresh shadow-era signals before live trading.")
@@ -1507,6 +1509,7 @@ class CryptoBot:
         historical_win_rate = float(selected_stats.get("win_rate", 0) or 0)
         recent_roi = float(selected_stats.get("recent_roi", 0) or 0)
         recent_trades = int(selected_stats.get("recent_trades", 0) or 0)
+        time_left = float(signal_data.get("time_left", 0) or 0)
         min_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(FULL_WINDOW_CORE_EV_MIN_LEVEL, 2)
         bucket_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(bucket_level, 0)
         if FULL_WINDOW_CORE_EV_ENABLED and bucket_level_rank < min_level_rank:
@@ -1515,6 +1518,7 @@ class CryptoBot:
                 and decision in {"allow", "strong_allow"}
                 and sample_size >= FULL_WINDOW_L1_FALLBACK_MIN_TRADES
                 and historical_roi > 0
+                and time_left <= FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX
                 and (
                     not FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE
                     or (recent_trades > 0 and recent_roi > 0)
