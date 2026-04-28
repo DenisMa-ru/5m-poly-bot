@@ -930,6 +930,7 @@ def get_market_for_close(slug_prefix: str, close_ts: int) -> dict | None:
 
     prices = [float(p) for p in outcome_prices]
     winner_idx = 0 if prices[0] >= prices[1] else 1
+    price_spread = abs(prices[0] - prices[1])
 
     return {
         "slug":         slug,
@@ -944,6 +945,9 @@ def get_market_for_close(slug_prefix: str, close_ts: int) -> dict | None:
         "winner_price": prices[winner_idx],
         "winner_token": clob_token_ids[winner_idx],
         "loser_price":  prices[1 - winner_idx],
+        "pm_price_spread": price_spread,
+        "pm_price_source": "gamma",
+        "clob_midpoint_refresh_count": 0,
         "condition_id": market.get("conditionId", ""),
         "liquidity":    float(event.get("liquidity", 0)),
     }
@@ -1245,6 +1249,9 @@ class CryptoBot:
         crypto = market["crypto"]
         trade_amount = self._get_trade_amount()
         market_prob = float(market["winner_price"] or 0)
+        pm_price_spread = float(market.get("pm_price_spread", 0) or 0)
+        pm_price_source = str(market.get("pm_price_source", "gamma") or "gamma")
+        clob_midpoint_refresh_count = int(market.get("clob_midpoint_refresh_count", 0) or 0)
         model_prob = estimate_model_prob(
             ta.get("direction"),
             market["winner_side"],
@@ -1291,6 +1298,9 @@ class CryptoBot:
             "signal_tier_reason": signal_tier_reason,
             "model_prob": model_prob,
             "market_prob": market_prob,
+            "pm_price_spread": pm_price_spread,
+            "pm_price_source": pm_price_source,
+            "clob_midpoint_refresh_count": clob_midpoint_refresh_count,
             "edge": edge,
             "price": ta.get("current_price", 0),
             "time_left": seconds_left,
@@ -1664,18 +1674,23 @@ class CryptoBot:
                 outcomes = list(market.get("outcomes", []))
                 prices = list(market.get("outcome_prices", []))
                 if len(token_ids) >= 2 and len(outcomes) >= 2 and len(prices) >= 2:
-                    refreshed_prices = prices[:2]
-                    for idx, token_id in enumerate(token_ids[:2]):
+                    midpoint_prices = []
+                    for token_id in token_ids[:2]:
                         clob_price = get_clob_price(token_id)
-                        if clob_price > 0:
-                            refreshed_prices[idx] = clob_price
+                        midpoint_prices.append(clob_price if clob_price > 0 else 0.0)
 
-                    winner_idx = 0 if refreshed_prices[0] >= refreshed_prices[1] else 1
-                    market["outcome_prices"] = refreshed_prices
+                    refresh_count = sum(1 for price in midpoint_prices if price > 0)
+                    use_midpoints = refresh_count >= 2
+                    resolved_prices = midpoint_prices if use_midpoints else prices[:2]
+                    winner_idx = 0 if resolved_prices[0] >= resolved_prices[1] else 1
+                    market["outcome_prices"] = resolved_prices
                     market["winner_side"] = outcomes[winner_idx]
-                    market["winner_price"] = refreshed_prices[winner_idx]
+                    market["winner_price"] = resolved_prices[winner_idx]
                     market["winner_token"] = token_ids[winner_idx]
-                    market["loser_price"] = refreshed_prices[1 - winner_idx]
+                    market["loser_price"] = resolved_prices[1 - winner_idx]
+                    market["pm_price_spread"] = abs(resolved_prices[0] - resolved_prices[1])
+                    market["pm_price_source"] = "clob_midpoint" if use_midpoints else "gamma"
+                    market["clob_midpoint_refresh_count"] = refresh_count
                 # Technical analysis with Binance — correct symbol per crypto
                 w_ts = close_ts - 300
                 crypto_name = MARKETS[prefix]
@@ -1936,8 +1951,17 @@ class CryptoBot:
         ta_dir  = ta.get("direction")
         pm_side = market["winner_side"]
         if ta_dir and ta_dir != pm_side:
-            log(f"   [{crypto}] SKIP — Binance says {ta_dir} but PM says {pm_side}")
-            signal_data["reason"] = f"direction mismatch: {ta_dir} vs {pm_side}"
+            spread = float(market.get("pm_price_spread", 0) or 0)
+            source = str(market.get("pm_price_source", "gamma") or "gamma")
+            refresh_count = int(market.get("clob_midpoint_refresh_count", 0) or 0)
+            log(
+                f"   [{crypto}] SKIP — Binance says {ta_dir} but PM says {pm_side} "
+                f"(pm={pm_price:.3f} spread={spread:.3f} source={source} clob_refresh={refresh_count}/2)"
+            )
+            signal_data["reason"] = (
+                f"direction mismatch: {ta_dir} vs {pm_side} "
+                f"(spread={spread:.3f} source={source} clob_refresh={refresh_count}/2)"
+            )
             persist_record()
             return
 
