@@ -228,6 +228,8 @@ CORE_EV_TIME_LEFT_MIN = float(_bot_settings.get("core_ev_time_left_min", CORE_EV
 CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("core_ev_time_left_max", min(20, CORE_EV_ENTRY_TIME_MAX)) or min(20, CORE_EV_ENTRY_TIME_MAX))
 CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
 FULL_WINDOW_CORE_EV_MIN_LEVEL = str(_bot_settings.get("full_window_core_ev_min_level", "L2") or "L2").strip().upper()
+FULL_WINDOW_L1_FALLBACK_MIN_TRADES = int(_bot_settings.get("full_window_l1_fallback_min_trades", 8) or 8)
+FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE = bool(_bot_settings.get("full_window_l1_fallback_require_recent_positive", True))
 WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 140) or 140)
 SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
 SHADOW_SOFT_STABLE_TICKS = int(_bot_settings.get("shadow_soft_stable_ticks", max(1, SHADOW_MIN_STABLE_TICKS - 1)) or max(1, SHADOW_MIN_STABLE_TICKS - 1))
@@ -1192,6 +1194,11 @@ class CryptoBot:
             )
             if FULL_WINDOW_CORE_EV_ENABLED:
                 log(f"Full-window Core EV min bucket level: {FULL_WINDOW_CORE_EV_MIN_LEVEL}")
+                log(
+                    "Full-window L1 fallback: "
+                    f"min_trades={FULL_WINDOW_L1_FALLBACK_MIN_TRADES} "
+                    f"recent_positive={'ON' if FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE else 'OFF'}"
+                )
             if not self.core_ev_rules.get("buckets"):
                 log("WARNING: Core EV rulebook is empty; rebuild core_ev_rules.json from fresh shadow-era signals before live trading.")
         else:
@@ -1495,19 +1502,51 @@ class CryptoBot:
 
         decision = str(selected_stats.get("decision", "deny") or "deny")
         bucket_level = str(selected_stats.get("level", "unknown") or "unknown")
+        sample_size = int(selected_stats.get("trades", 0) or 0)
+        historical_roi = float(selected_stats.get("roi", 0) or 0)
+        historical_win_rate = float(selected_stats.get("win_rate", 0) or 0)
+        recent_roi = float(selected_stats.get("recent_roi", 0) or 0)
+        recent_trades = int(selected_stats.get("recent_trades", 0) or 0)
         min_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(FULL_WINDOW_CORE_EV_MIN_LEVEL, 2)
         bucket_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(bucket_level, 0)
         if FULL_WINDOW_CORE_EV_ENABLED and bucket_level_rank < min_level_rank:
+            l1_fallback_ok = (
+                bucket_level == "L1"
+                and decision in {"allow", "strong_allow"}
+                and sample_size >= FULL_WINDOW_L1_FALLBACK_MIN_TRADES
+                and historical_roi > 0
+                and (
+                    not FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE
+                    or (recent_trades > 0 and recent_roi > 0)
+                )
+            )
+            if l1_fallback_ok:
+                size_fraction = CORE_EV_MAX_RISK_PCT if decision == "strong_allow" else CORE_EV_MAX_RISK_PCT * 0.5
+                return {
+                    "decision": decision,
+                    "reason": (
+                        f"core ev {decision} | full-window L1 fallback "
+                        f"(sample={sample_size} roi={historical_roi:+.1f}% recent={recent_roi:+.1f}%)"
+                    ),
+                    "bucket_key": selected_key,
+                    "bucket_level": bucket_level,
+                    "sample_size": sample_size,
+                    "historical_roi": historical_roi,
+                    "historical_win_rate": historical_win_rate,
+                    "recent_roi": recent_roi,
+                    "recent_trades": recent_trades,
+                    "size_fraction": size_fraction,
+                }
             return {
                 "decision": "deny",
                 "reason": f"full-window requires {FULL_WINDOW_CORE_EV_MIN_LEVEL}+ bucket specificity",
                 "bucket_key": selected_key,
                 "bucket_level": bucket_level,
-                "sample_size": int(selected_stats.get("trades", 0) or 0),
-                "historical_roi": float(selected_stats.get("roi", 0) or 0),
-                "historical_win_rate": float(selected_stats.get("win_rate", 0) or 0),
-                "recent_roi": float(selected_stats.get("recent_roi", 0) or 0),
-                "recent_trades": int(selected_stats.get("recent_trades", 0) or 0),
+                "sample_size": sample_size,
+                "historical_roi": historical_roi,
+                "historical_win_rate": historical_win_rate,
+                "recent_roi": recent_roi,
+                "recent_trades": recent_trades,
                 "size_fraction": 0.0,
             }
 
@@ -1521,11 +1560,11 @@ class CryptoBot:
             "reason": f"core ev {decision}",
             "bucket_key": selected_key,
             "bucket_level": bucket_level,
-            "sample_size": int(selected_stats.get("trades", 0) or 0),
-            "historical_roi": float(selected_stats.get("roi", 0) or 0),
-            "historical_win_rate": float(selected_stats.get("win_rate", 0) or 0),
-            "recent_roi": float(selected_stats.get("recent_roi", 0) or 0),
-            "recent_trades": int(selected_stats.get("recent_trades", 0) or 0),
+            "sample_size": sample_size,
+            "historical_roi": historical_roi,
+            "historical_win_rate": historical_win_rate,
+            "recent_roi": recent_roi,
+            "recent_trades": recent_trades,
             "size_fraction": size_fraction,
         }
 
