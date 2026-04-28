@@ -160,6 +160,26 @@ def _normalize_usdc_amount(value):
     return value
 
 
+def _coerce_payload_rows(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("data", "rows", "results", "positions"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return rows
+        return [payload]
+    return []
+
+
+def _first_present_amount(obj: dict, *keys: str):
+    for key in keys:
+        value = _normalize_usdc_amount(_safe_float(obj.get(key)))
+        if value is not None:
+            return value
+    return None
+
+
 def _looks_like_valid_portfolio(value, cash, positions_value):
     if value is None:
         return False
@@ -264,12 +284,21 @@ def fetch_polymarket_account_state() -> dict:
         )
         value_resp.raise_for_status()
         payload = value_resp.json()
-        if isinstance(payload, dict):
-            for key in ("value", "currentValue", "portfolioValue", "totalValue"):
-                portfolio = _normalize_usdc_amount(_safe_float(payload.get(key)))
-                if portfolio is not None:
-                    portfolio_from_value = portfolio
-                    break
+        value_rows = _coerce_payload_rows(payload)
+        for row in value_rows:
+            if not isinstance(row, dict):
+                continue
+            portfolio = _first_present_amount(
+                row,
+                "value",
+                "currentValue",
+                "portfolioValue",
+                "totalValue",
+                "usdValue",
+            )
+            if portfolio is not None:
+                portfolio_from_value = portfolio
+                break
     except Exception as exc:
         result["source_error"] = str(exc)
 
@@ -281,7 +310,7 @@ def fetch_polymarket_account_state() -> dict:
         )
         positions_resp.raise_for_status()
         payload = positions_resp.json()
-        positions = payload if isinstance(payload, list) else payload.get("positions", []) if isinstance(payload, dict) else []
+        positions = _coerce_payload_rows(payload)
 
         if isinstance(positions, list):
             redeemable = 0.0
@@ -294,22 +323,31 @@ def fetch_polymarket_account_state() -> dict:
                 if not isinstance(pos, dict):
                     continue
 
-                current_value = _normalize_usdc_amount(_safe_float(pos.get("currentValue")))
-                if current_value is None:
-                    current_value = _normalize_usdc_amount(_safe_float(pos.get("value")))
+                current_value = _first_present_amount(
+                    pos,
+                    "currentValue",
+                    "value",
+                    "portfolioValue",
+                    "usdValue",
+                    "amountValue",
+                )
                 if current_value is not None:
                     positions_value += current_value
                     if current_value > 0:
                         open_positions += 1
                     has_positions_value = True
 
-                redeem_value = _normalize_usdc_amount(_safe_float(pos.get("redeemableValue")))
-                if redeem_value is None:
-                    redeem_value = _normalize_usdc_amount(_safe_float(pos.get("redeemedValue")))
+                redeem_value = _first_present_amount(
+                    pos,
+                    "redeemableValue",
+                    "redeemedValue",
+                    "claimableValue",
+                    "claimable",
+                )
                 if redeem_value is None and pos.get("redeemable") is True:
                     redeem_value = current_value
                 if redeem_value is None and pos.get("redeemable") is True:
-                    redeem_value = _normalize_usdc_amount(_safe_float(pos.get("size")))
+                    redeem_value = _first_present_amount(pos, "size", "balance")
                 if redeem_value is not None:
                     redeemable += redeem_value
                     has_redeemable = True
