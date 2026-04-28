@@ -200,7 +200,7 @@ FULL_WINDOW_CORE_EV_ENABLED = bool(_bot_settings.get("full_window_core_ev_enable
 WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_enabled", True))
 CORE_EV_ENTRY_TIME_MIN = float(_bot_settings.get("core_ev_entry_time_min", 10) or 10)
 CORE_EV_ENTRY_TIME_MAX = float(_bot_settings.get("core_ev_entry_time_max", max(10, OBSERVE_WINDOW_SECONDS)) or max(10, OBSERVE_WINDOW_SECONDS))
-FULL_WINDOW_CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("full_window_core_ev_time_left_max", 60) or 60)
+FULL_WINDOW_CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("full_window_core_ev_time_left_max", 39) or 39)
 FULL_WINDOW_ENTRY_CONFIRM_TICKS = int(_bot_settings.get("full_window_entry_confirm_ticks", 2) or 2)
 FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_entry_commit_time_left", 19) or 19)
 FULL_WINDOW_ENTRY_MIN_SCORE_GAIN = float(_bot_settings.get("full_window_entry_min_score_gain", 0.15) or 0.15)
@@ -1518,6 +1518,19 @@ class CryptoBot:
 
         keys = self._build_core_ev_bucket_keys(signal_data)
         buckets = self.core_ev_rules.get("buckets", {}) if isinstance(self.core_ev_rules, dict) else {}
+
+        def describe_level(level: str) -> str:
+            key = keys[level]
+            stats = buckets.get(key)
+            if not isinstance(stats, dict):
+                return f"{level}:missing"
+            return (
+                f"{level}:{str(stats.get('decision', 'unknown') or 'unknown')}"
+                f"/n={int(stats.get('trades', 0) or 0)}"
+                f"/roi={float(stats.get('roi', 0) or 0):+.1f}%"
+                f"/recent={float(stats.get('recent_roi', 0) or 0):+.1f}%"
+            )
+
         selected_key = None
         selected_stats = None
         selected_level = None
@@ -1535,9 +1548,10 @@ class CryptoBot:
                 selected_level = level
                 break
         if selected_stats is None:
+            level_summary = ", ".join(describe_level(level) for level in ("L3", "L2", "L1"))
             return {
                 "decision": "deny",
-                "reason": "undersampled or unknown core ev bucket",
+                "reason": f"undersampled or unknown core ev bucket | {level_summary}",
                 "bucket_key": keys["L3"],
                 "bucket_level": "L3",
                 "sample_size": 0,
@@ -1613,9 +1627,13 @@ class CryptoBot:
                     "recent_trades": recent_trades,
                     "size_fraction": size_fraction,
                 }
+            level_summary = ", ".join(describe_level(level) for level in ("L3", "L2", "L1"))
             return {
                 "decision": "deny",
-                "reason": f"full-window requires {FULL_WINDOW_CORE_EV_MIN_LEVEL}+ bucket specificity",
+                "reason": (
+                    f"full-window requires {FULL_WINDOW_CORE_EV_MIN_LEVEL}+ bucket specificity"
+                    f" | {level_summary}"
+                ),
                 "bucket_key": selected_key,
                 "bucket_level": bucket_level,
                 "sample_size": sample_size,
