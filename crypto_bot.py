@@ -1954,13 +1954,28 @@ class CryptoBot:
             spread = float(market.get("pm_price_spread", 0) or 0)
             source = str(market.get("pm_price_source", "gamma") or "gamma")
             refresh_count = int(market.get("clob_midpoint_refresh_count", 0) or 0)
+            close_ts = int(market.get("close_ts", 0) or 0)
+            delta_abs = float(ta.get("delta_pct", 0) or 0)
+            score = float(ta.get("score", 0) or 0)
+            signed_delta = delta_abs if score > 0 else (-delta_abs if score < 0 else 0.0)
+            window_open = float(ta.get("window_open", 0) or 0)
+            current_price = float(ta.get("current_price", 0) or 0)
+            outcomes = list(market.get("outcomes", []))
+            outcome_prices = list(market.get("outcome_prices", []))
             log(
                 f"   [{crypto}] SKIP — Binance says {ta_dir} but PM says {pm_side} "
                 f"(pm={pm_price:.3f} spread={spread:.3f} source={source} clob_refresh={refresh_count}/2)"
             )
+            log(
+                f"   [{crypto}] MISMATCH DEBUG — slug={slug} close_ts={close_ts} "
+                f"window_open={window_open:.2f} current={current_price:.2f} "
+                f"delta_signed={signed_delta:+.4f}% score={score:+.2f} "
+                f"outcomes={outcomes} prices={outcome_prices}"
+            )
             signal_data["reason"] = (
                 f"direction mismatch: {ta_dir} vs {pm_side} "
-                f"(spread={spread:.3f} source={source} clob_refresh={refresh_count}/2)"
+                f"(spread={spread:.3f} source={source} clob_refresh={refresh_count}/2; "
+                f"delta_signed={signed_delta:+.4f}% outcomes={outcomes} prices={outcome_prices})"
             )
             persist_record()
             return
