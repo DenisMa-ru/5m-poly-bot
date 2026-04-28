@@ -1519,12 +1519,19 @@ class CryptoBot:
         buckets = self.core_ev_rules.get("buckets", {}) if isinstance(self.core_ev_rules, dict) else {}
         selected_key = None
         selected_stats = None
+        selected_level = None
+        unknown_levels = set()
         for level in ("L3", "L2", "L1"):
             key = keys[level]
             stats = buckets.get(key)
-            if isinstance(stats, dict) and str(stats.get("decision", "unknown") or "unknown") != "unknown":
+            if isinstance(stats, dict):
+                decision_value = str(stats.get("decision", "unknown") or "unknown")
+                if decision_value == "unknown":
+                    unknown_levels.add(level)
+                    continue
                 selected_key = key
                 selected_stats = stats
+                selected_level = level
                 break
         if selected_stats is None:
             return {
@@ -1548,6 +1555,18 @@ class CryptoBot:
         recent_roi = float(selected_stats.get("recent_roi", 0) or 0)
         recent_trades = int(selected_stats.get("recent_trades", 0) or 0)
         time_left = float(signal_data.get("time_left", 0) or 0)
+
+        if selected_level == "L2" and "L3" in unknown_levels and decision in {"allow", "strong_allow"}:
+            selected_stats = dict(selected_stats)
+            selected_stats["reason"] = "L3 unknown, using positive L2 fallback"
+            decision = str(selected_stats.get("decision", decision) or decision)
+            bucket_level = str(selected_stats.get("level", bucket_level) or bucket_level)
+            sample_size = int(selected_stats.get("trades", sample_size) or sample_size)
+            historical_roi = float(selected_stats.get("roi", historical_roi) or historical_roi)
+            historical_win_rate = float(selected_stats.get("win_rate", historical_win_rate) or historical_win_rate)
+            recent_roi = float(selected_stats.get("recent_roi", recent_roi) or recent_roi)
+            recent_trades = int(selected_stats.get("recent_trades", recent_trades) or recent_trades)
+
         min_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(FULL_WINDOW_CORE_EV_MIN_LEVEL, 2)
         bucket_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(bucket_level, 0)
         min_recent_trades_required = int(self.core_ev_rules.get("min_recent_trades", 0) or 0)
