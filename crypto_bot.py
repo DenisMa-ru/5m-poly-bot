@@ -934,6 +934,9 @@ def get_market_for_close(slug_prefix: str, close_ts: int) -> dict | None:
         "crypto":       MARKETS[slug_prefix],
         "title":        event.get("title", ""),
         "close_ts":     close_ts,
+        "outcomes":     outcomes,
+        "outcome_prices": prices,
+        "clob_token_ids": clob_token_ids,
         "winner_side":  outcomes[winner_idx],
         "winner_price": prices[winner_idx],
         "winner_token": clob_token_ids[winner_idx],
@@ -1614,9 +1617,22 @@ class CryptoBot:
                 market = get_market_for_close(prefix, close_ts)
                 if not market:
                     return prefix, None, None
-                clob_price = get_clob_price(market["winner_token"])
-                if clob_price > 0:
-                    market["winner_price"] = clob_price
+                token_ids = list(market.get("clob_token_ids", []))
+                outcomes = list(market.get("outcomes", []))
+                prices = list(market.get("outcome_prices", []))
+                if len(token_ids) >= 2 and len(outcomes) >= 2 and len(prices) >= 2:
+                    refreshed_prices = prices[:2]
+                    for idx, token_id in enumerate(token_ids[:2]):
+                        clob_price = get_clob_price(token_id)
+                        if clob_price > 0:
+                            refreshed_prices[idx] = clob_price
+
+                    winner_idx = 0 if refreshed_prices[0] >= refreshed_prices[1] else 1
+                    market["outcome_prices"] = refreshed_prices
+                    market["winner_side"] = outcomes[winner_idx]
+                    market["winner_price"] = refreshed_prices[winner_idx]
+                    market["winner_token"] = token_ids[winner_idx]
+                    market["loser_price"] = refreshed_prices[1 - winner_idx]
                 # Technical analysis with Binance — correct symbol per crypto
                 w_ts = close_ts - 300
                 crypto_name = MARKETS[prefix]
