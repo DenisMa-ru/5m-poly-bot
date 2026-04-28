@@ -787,7 +787,7 @@ def analyze(symbol: str, window_ts: int) -> dict:
     candles = get_binance_candles(symbol, "1m", 30)
     momentum_weight, momentum_desc = analyze_micro_momentum(candles)
     if (delta > 0 and momentum_weight > 0) or (delta < 0 and momentum_weight < 0):
-        score += abs(momentum_weight)
+        score += momentum_weight
         momentum_str = f"{momentum_desc} (confirms)"
     elif momentum_weight != 0:
         momentum_str = f"{momentum_desc} (contradicts, ignored)"
@@ -800,7 +800,7 @@ def analyze(symbol: str, window_ts: int) -> dict:
     trend_aligned = False
     trend_conflict = False
     if higher_trend and ((delta > 0 and higher_trend == "Up") or (delta < 0 and higher_trend == "Down")):
-        score += TREND_BONUS
+        score += TREND_BONUS if delta > 0 else -TREND_BONUS
         trend_str = f"{higher_trend} (+{TREND_BONUS})"
         trend_aligned = True
     elif higher_trend:
