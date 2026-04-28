@@ -1408,12 +1408,25 @@ class CryptoBot:
             return True, "full-window mode disabled"
 
         state = self.shadow_window_state.setdefault(slug, {"best_core_ev_candidate": None})
+
+        def summarize(label: str, payload: dict) -> str:
+            priority = tuple(payload.get("priority", ()))
+            return (
+                f"{label}: level={payload.get('bucket_level', '')} sample={int(payload.get('sample_size', 0) or 0)} "
+                f"roi={float(payload.get('historical_roi', 0) or 0):+.1f}% recent={float(payload.get('recent_roi', 0) or 0):+.1f}% "
+                f"ticks={int(payload.get('confirm_ticks', 0) or 0)} time_left={float(payload.get('time_left', 0) or 0):.1f}s "
+                f"shadow={payload.get('shadow_live_decision', 'neutral')}:{float(payload.get('shadow_live_score', 0) or 0):.2f} "
+                f"priority={priority} bucket={payload.get('bucket_key', '')}"
+            )
+
         candidate = {
             "priority": self._candidate_priority(signal_data, core_ev, shadow_live_decision, shadow_live_score),
             "time_left": float(seconds_left or 0),
             "confirm_ticks": int(state.get("observation_count", 0) or 0),
             "shadow_live_decision": shadow_live_decision,
             "shadow_live_score": float(shadow_live_score or 0),
+            "bucket_key": str(core_ev.get("bucket_key", "") or ""),
+            "bucket_level": str(core_ev.get("bucket_level", "") or ""),
             "historical_roi": float(core_ev.get("historical_roi", 0) or 0),
             "recent_roi": float(core_ev.get("recent_roi", 0) or 0),
             "sample_size": int(core_ev.get("sample_size", 0) or 0),
@@ -1424,15 +1437,22 @@ class CryptoBot:
         if best is None or candidate["priority"] > tuple(best.get("priority", ())):
             candidate["confirm_ticks"] = 1
             state["best_core_ev_candidate"] = candidate
+            log(f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — {summarize('new_best', candidate)}")
             return False, "tracking new best full-window candidate"
 
         if candidate["priority"] == tuple(best.get("priority", ())) and abs(candidate["time_left"] - float(best.get("time_left", 0) or 0)) <= 6.0:
             best["confirm_ticks"] = int(best.get("confirm_ticks", 0) or 0) + 1
+            best["time_left"] = candidate["time_left"]
             state["best_core_ev_candidate"] = best
+            log(f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — {summarize('hold_best', best)}")
         else:
             if candidate["priority"][-2] >= best["priority"][-2] + FULL_WINDOW_ENTRY_MIN_SCORE_GAIN:
                 candidate["confirm_ticks"] = 1
                 state["best_core_ev_candidate"] = candidate
+                log(
+                    f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — "
+                    f"{summarize('improved_best', candidate)} | replaced {summarize('prior_best', best)}"
+                )
                 return False, "tracking improved full-window candidate"
 
         best = state.get("best_core_ev_candidate")
@@ -1442,14 +1462,21 @@ class CryptoBot:
         current_priority = candidate["priority"]
         best_priority = tuple(best.get("priority", ()))
         if current_priority != best_priority:
+            log(
+                f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — "
+                f"{summarize('not_best_current', candidate)} | best={summarize('best', best)}"
+            )
             return False, "current signal is not best in window"
 
         if int(best.get("confirm_ticks", 0) or 0) >= FULL_WINDOW_ENTRY_CONFIRM_TICKS:
+            log(f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — {summarize('confirmed', best)}")
             return True, f"best candidate confirmed for {int(best.get('confirm_ticks', 0) or 0)} ticks"
 
         if float(seconds_left or 0) <= FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT:
+            log(f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — {summarize('commit_now', best)}")
             return True, f"commit threshold reached at {seconds_left:.1f}s"
 
+        log(f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — {summarize('await_confirm', best)}")
         return False, "best candidate not confirmed yet"
 
     def _build_core_ev_bucket_keys(self, signal_data: dict) -> dict[str, str]:
