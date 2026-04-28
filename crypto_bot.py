@@ -231,6 +231,8 @@ FULL_WINDOW_CORE_EV_MIN_LEVEL = str(_bot_settings.get("full_window_core_ev_min_l
 FULL_WINDOW_L1_FALLBACK_MIN_TRADES = int(_bot_settings.get("full_window_l1_fallback_min_trades", 8) or 8)
 FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE = bool(_bot_settings.get("full_window_l1_fallback_require_recent_positive", True))
 FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX = float(_bot_settings.get("full_window_l1_fallback_time_left_max", 150) or 150)
+FULL_WINDOW_L1_STRONG_EXCEPTION_MIN_TRADES = int(_bot_settings.get("full_window_l1_strong_exception_min_trades", 2) or 2)
+FULL_WINDOW_L1_STRONG_EXCEPTION_MIN_ROI = float(_bot_settings.get("full_window_l1_strong_exception_min_roi", 50.0) or 50.0)
 WINDOW_HISTORY_MAX_POINTS = int(_bot_settings.get("window_history_max_points", 140) or 140)
 SHADOW_MIN_STABLE_TICKS = int(_bot_settings.get("shadow_min_stable_ticks", 3) or 3)
 SHADOW_SOFT_STABLE_TICKS = int(_bot_settings.get("shadow_soft_stable_ticks", max(1, SHADOW_MIN_STABLE_TICKS - 1)) or max(1, SHADOW_MIN_STABLE_TICKS - 1))
@@ -1555,10 +1557,21 @@ class CryptoBot:
                 or recent_trades < min_recent_trades_required
                 or recent_roi > 0
             )
+            strong_l1_exception_ok = (
+                bucket_level == "L1"
+                and decision in {"allow", "strong_allow"}
+                and sample_size >= FULL_WINDOW_L1_STRONG_EXCEPTION_MIN_TRADES
+                and historical_roi >= FULL_WINDOW_L1_STRONG_EXCEPTION_MIN_ROI
+                and time_left <= FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX
+                and recent_positive_ok
+            )
             l1_fallback_ok = (
                 bucket_level == "L1"
                 and decision in {"allow", "strong_allow"}
-                and sample_size >= FULL_WINDOW_L1_FALLBACK_MIN_TRADES
+                and (
+                    sample_size >= FULL_WINDOW_L1_FALLBACK_MIN_TRADES
+                    or strong_l1_exception_ok
+                )
                 and historical_roi > 0
                 and time_left <= FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX
                 and recent_positive_ok
