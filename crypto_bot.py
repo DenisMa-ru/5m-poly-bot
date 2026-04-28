@@ -1974,10 +1974,14 @@ class CryptoBot:
                 persist_record()
                 return
 
-        # Filter 3: direction must match between Binance and Polymarket
+        # Filter 3: direction mismatch is now evaluated after Core EV so a
+        # positive empirical bucket can explicitly override it.
         ta_dir  = ta.get("direction")
         pm_side = market["winner_side"]
-        if ta_dir and ta_dir != pm_side:
+        mismatch_reason = ""
+        mismatch_debug = ""
+        has_direction_mismatch = bool(ta_dir and ta_dir != pm_side)
+        if has_direction_mismatch:
             spread = float(market.get("pm_price_spread", 0) or 0)
             source = str(market.get("pm_price_source", "gamma") or "gamma")
             refresh_count = int(market.get("clob_midpoint_refresh_count", 0) or 0)
@@ -1989,23 +1993,15 @@ class CryptoBot:
             current_price = float(ta.get("current_price", 0) or 0)
             outcomes = list(market.get("outcomes", []))
             outcome_prices = list(market.get("outcome_prices", []))
-            log(
-                f"   [{crypto}] SKIP — Binance says {ta_dir} but PM says {pm_side} "
-                f"(pm={pm_price:.3f} spread={spread:.3f} source={source} clob_refresh={refresh_count}/2)"
-            )
-            log(
-                f"   [{crypto}] MISMATCH DEBUG — slug={slug} close_ts={close_ts} "
-                f"window_open={window_open:.2f} current={current_price:.2f} "
-                f"delta_signed={signed_delta:+.4f}% score={score:+.2f} "
-                f"outcomes={outcomes} prices={outcome_prices}"
-            )
-            signal_data["reason"] = (
+            mismatch_reason = (
                 f"direction mismatch: {ta_dir} vs {pm_side} "
                 f"(spread={spread:.3f} source={source} clob_refresh={refresh_count}/2; "
                 f"delta_signed={signed_delta:+.4f}% outcomes={outcomes} prices={outcome_prices})"
             )
-            persist_record()
-            return
+            mismatch_debug = (
+                f"slug={slug} close_ts={close_ts} window_open={window_open:.2f} current={current_price:.2f} "
+                f"delta_signed={signed_delta:+.4f}% score={score:+.2f} outcomes={outcomes} prices={outcome_prices}"
+            )
 
         # Legacy delta/tier filters also become advisory in Core EV mode. Core EV
         # itself will reject weak signals through its own bucket/tier logic.
@@ -2047,6 +2043,23 @@ class CryptoBot:
                 f"roi={signal_data['core_ev_historical_roi']:+.1f}% recent={signal_data['core_ev_recent_roi']:+.1f}% | "
                 f"{signal_data['core_ev_reason']}"
             )
+        if has_direction_mismatch:
+            log(f"   [{crypto}] MISMATCH DEBUG — {mismatch_debug}")
+            if core_ev_decision in {"allow", "strong_allow"}:
+                log(
+                    f"   [{crypto}] CORE-EV OVERRIDE — Binance says {ta_dir} but PM says {pm_side} "
+                    f"| positive empirical bucket keeps candidate alive"
+                )
+                signal_data["direction_mismatch_overridden"] = True
+                signal_data["direction_mismatch_reason"] = mismatch_reason
+            else:
+                log(
+                    f"   [{crypto}] SKIP — Binance says {ta_dir} but PM says {pm_side} "
+                    f"| no positive empirical bucket override"
+                )
+                signal_data["reason"] = mismatch_reason
+                persist_record()
+                return
         if core_ev_decision not in {"allow", "strong_allow"}:
             signal_data["reason"] = f"core ev {core_ev_decision} | {signal_data['core_ev_reason']}"
             persist_record()
