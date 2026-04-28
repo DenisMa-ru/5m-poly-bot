@@ -696,7 +696,6 @@ def classify_signal_tier(
         pm_price >= 0.58
         and pm_price <= 0.70
         and delta_pct >= 0.008
-        and confidence >= 0.03
         and indicator_confirm >= 0.0
         and edge >= -0.04
     ):

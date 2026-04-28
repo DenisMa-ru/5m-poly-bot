@@ -485,7 +485,7 @@ def derive_core_signal_tier(signal: dict) -> str:
         return "observe"
     if pm >= 0.60 and pm <= 0.68 and delta_pct >= 0.015 and confidence >= 0.10 and indicator_confirm >= 0.15:
         return "trade"
-    if pm >= 0.58 and pm <= 0.70 and delta_pct >= 0.008 and confidence >= 0.03 and indicator_confirm >= 0.0:
+    if pm >= 0.58 and pm <= 0.70 and delta_pct >= 0.008 and indicator_confirm >= 0.0:
         return "candidate"
     if pm >= 0.60 and pm <= 0.70 and delta_pct >= 0.012 and indicator_confirm > 0:
         return "candidate"
