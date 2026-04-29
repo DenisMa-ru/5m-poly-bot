@@ -17,6 +17,7 @@ load_dotenv(BOT_DIR / ".env")
 load_dotenv()
 
 DEFAULT_LOG = Path("/root/5m-poly-bot/bot.log")
+LIVE_LOG = Path("/root/5m-poly-bot/bot-live.log")
 CONTROL_FILE = Path("/root/5m-poly-bot/control.json")
 SIGNALS_FILE = Path("/root/5m-poly-bot/signals.json")
 WINDOW_SAMPLES_FILE = Path("/root/5m-poly-bot/window_samples.json")
@@ -203,6 +204,12 @@ def _looks_like_valid_portfolio(value, cash, positions_value):
     expected_total = (cash or 0) + (positions_value or 0)
     tolerance = 0.05
     return value + tolerance >= expected_floor and value <= expected_total + tolerance
+
+
+def _fmt_money_or_unknown(value):
+    if value is None:
+        return "Unknown"
+    return f"${float(value):.2f}"
 
 
 def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
@@ -727,13 +734,21 @@ _P_STATE = {
 @st.cache_data(ttl=5, show_spinner=False)
 def parse_log_state(path):
     """Парсим логи только для определения текущего состояния бота."""
-    if path and path.exists():
+    lines = []
+    candidate_paths = []
+    for candidate in (path, LIVE_LOG, DEFAULT_LOG):
+        if candidate and candidate not in candidate_paths:
+            candidate_paths.append(candidate)
+
+    for candidate in candidate_paths:
+        if not candidate or not candidate.exists():
+            continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except:
+            lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
             lines = []
-    else:
-        lines = []
+        if lines:
+            break
 
     if not lines:
         try:
@@ -935,10 +950,10 @@ with tab_dashboard:
     st.markdown("---")
     st.markdown("#### Polymarket")
     pm1, pm2, pm3, pm4 = st.columns(4)
-    pm1.metric("💵 Cash", f"${cash:.2f}" if cash not in (None, 0) else "Unknown")
-    pm2.metric("🧾 Portfolio", f"${portfolio:.2f}" if portfolio not in (None, 0) else "Unknown")
-    pm3.metric("💸 Spendable", f"${spendable:.2f}" if spendable not in (None, 0) else "Unknown")
-    pm4.metric("🎁 Redeemable", f"${redeemable:.2f}" if redeemable not in (None, 0) else "Unknown")
+    pm1.metric("💵 Cash", _fmt_money_or_unknown(cash))
+    pm2.metric("🧾 Portfolio", _fmt_money_or_unknown(portfolio))
+    pm3.metric("💸 Spendable", _fmt_money_or_unknown(spendable))
+    pm4.metric("🎁 Redeemable", _fmt_money_or_unknown(redeemable))
     if account.get('source_error'):
         st.caption(f"Polymarket sync note: {account['source_error']}")
 
