@@ -226,7 +226,7 @@ CORE_EV_ENABLED = bool(_bot_settings.get("core_ev_enabled", True))
 CORE_EV_PM_MIN = float(_bot_settings.get("core_ev_pm_min", 0.58) or 0.58)
 CORE_EV_PM_MAX = float(_bot_settings.get("core_ev_pm_max", 0.70) or 0.70)
 CORE_EV_FLEX_PM_MIN = float(_bot_settings.get("core_ev_flex_pm_min", 0.50) or 0.50)
-CORE_EV_FLEX_PM_MAX = float(_bot_settings.get("core_ev_flex_pm_max", 0.95) or 0.95)
+CORE_EV_FLEX_PM_MAX = float(_bot_settings.get("core_ev_flex_pm_max", 0.99) or 0.99)
 CORE_EV_TIME_LEFT_MIN = float(_bot_settings.get("core_ev_time_left_min", CORE_EV_ENTRY_TIME_MIN) or CORE_EV_ENTRY_TIME_MIN)
 CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("core_ev_time_left_max", min(20, CORE_EV_ENTRY_TIME_MAX)) or min(20, CORE_EV_ENTRY_TIME_MAX))
 CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
@@ -235,7 +235,7 @@ CORE_EV_TREND_CONFLICT_MICRO_DELTA_MIN_PCT = float(_bot_settings.get("core_ev_tr
 CORE_EV_TREND_CONFLICT_MICRO_CONFIDENCE_MIN = float(_bot_settings.get("core_ev_trend_conflict_micro_confidence_min", 0.0) or 0.0)
 CORE_EV_TREND_CONFLICT_MICRO_INDICATOR_MIN = float(_bot_settings.get("core_ev_trend_conflict_micro_indicator_min", -0.10) or -0.10)
 FULL_WINDOW_CORE_EV_MIN_LEVEL = str(_bot_settings.get("full_window_core_ev_min_level", "L2") or "L2").strip().upper()
-FULL_WINDOW_MICRO_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_micro_entry_commit_time_left", max(FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6, 60)) or max(FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6, 60))
+FULL_WINDOW_MICRO_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_micro_entry_commit_time_left", 30) or 30)
 FULL_WINDOW_L1_FALLBACK_MIN_TRADES = int(_bot_settings.get("full_window_l1_fallback_min_trades", 8) or 8)
 FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE = bool(_bot_settings.get("full_window_l1_fallback_require_recent_positive", True))
 FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX = float(_bot_settings.get("full_window_l1_fallback_time_left_max", 150) or 150)
@@ -265,7 +265,7 @@ SHADOW_LIVE_MODE = str(_bot_settings.get("shadow_live_mode", "observe") or "obse
 MIN_CONFIDENCE    = _bot_settings.get("min_confidence", 0.3)
 MIN_EDGE          = float(_bot_settings.get("min_edge", -0.05) or -0.05)
 INDICATOR_CONFIRM_MIN = float(_bot_settings.get("indicator_confirm_min", 0.0) or 0.0)
-TREND_CONFLICT_OVERRIDE_DELTA_MIN_PCT = float(_bot_settings.get("trend_conflict_override_delta_min_pct", 0.050) or 0.050)
+TREND_CONFLICT_OVERRIDE_DELTA_MIN_PCT = float(_bot_settings.get("trend_conflict_override_delta_min_pct", 0.025) or 0.025)
 
 ATR_PERIODS       = 5
 ATR_MULTIPLIER    = _bot_settings.get("atr_multiplier", 1.5)
@@ -1540,6 +1540,26 @@ class CryptoBot:
         pm_in_core_zone = CORE_EV_PM_MIN <= pm <= CORE_EV_PM_MAX
         pm_in_flex_zone = CORE_EV_FLEX_PM_MIN <= pm <= CORE_EV_FLEX_PM_MAX
         if not pm_in_flex_zone:
+            trend_high_pm_micro_ok = (
+                FULL_WINDOW_CORE_EV_ENABLED
+                and pm <= 0.99
+                and time_left <= FULL_WINDOW_CORE_EV_TIME_LEFT_MAX
+                and delta_pct >= CORE_EV_TREND_CONFLICT_MICRO_DELTA_MIN_PCT
+                and indicator_confirm >= CORE_EV_TREND_CONFLICT_MICRO_INDICATOR_MIN
+            )
+            if trend_high_pm_micro_ok:
+                return {
+                    "decision": "micro_allow",
+                    "reason": f"high-pm micro entry outside flex zone ({pm:.3f})",
+                    "bucket_key": "",
+                    "bucket_level": "high_pm_micro",
+                    "sample_size": 0,
+                    "historical_roi": 0.0,
+                    "historical_win_rate": 0.0,
+                    "recent_roi": 0.0,
+                    "recent_trades": 0,
+                    "size_fraction": CORE_EV_MICRO_RISK_PCT,
+                }
             return {
                 "decision": "deny",
                 "reason": f"pm outside flexible core ev zone ({pm:.3f})",
