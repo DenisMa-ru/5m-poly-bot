@@ -408,6 +408,44 @@ def _derive_polymarket_v2_creds(client):
     return None
 
 
+def _build_legacy_polymarket_client(private_key: str, proxy_wallet: str):
+    import importlib
+
+    client_module = importlib.import_module("py_clob_client.client")
+    ClobClient = client_module.ClobClient
+    signature_type = _get_polymarket_signature_type(proxy_wallet)
+
+    return ClobClient(
+        host=CLOB_API,
+        key=private_key,
+        chain_id=137,
+        signature_type=signature_type,
+        funder=proxy_wallet,
+    )
+
+
+def _legacy_creds_to_v2_api_creds(private_key: str, proxy_wallet: str, api_creds_cls):
+    try:
+        legacy_client = _build_legacy_polymarket_client(private_key, proxy_wallet)
+        legacy_creds = legacy_client.create_or_derive_api_creds()
+        if not legacy_creds:
+            return None
+
+        api_key = getattr(legacy_creds, "api_key", None)
+        api_secret = getattr(legacy_creds, "api_secret", None)
+        api_passphrase = getattr(legacy_creds, "api_passphrase", None)
+        if not (api_key and api_secret and api_passphrase):
+            return None
+
+        return api_creds_cls(
+            api_key=api_key,
+            api_secret=api_secret,
+            api_passphrase=api_passphrase,
+        )
+    except Exception:
+        return None
+
+
 def _get_polymarket_signature_type(proxy_wallet: str) -> int:
     signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
     if signature_type_raw is not None:
@@ -466,6 +504,8 @@ def _get_v2_collateral_balance_allowance(private_key: str, proxy_wallet: str) ->
                 api_secret=env_api_secret,
                 api_passphrase=env_api_passphrase,
             )
+        elif ApiCreds:
+            creds = _legacy_creds_to_v2_api_creds(private_key, proxy_wallet, ApiCreds)
 
         client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=creds)
         if creds is None:
@@ -504,22 +544,12 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
     try:
         import importlib
 
-        client_module = importlib.import_module("py_clob_client.client")
         clob_types_module = importlib.import_module("py_clob_client.clob_types")
 
-        ClobClient = client_module.ClobClient
         BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
         AssetType = clob_types_module.AssetType
 
-        signature_type = _get_polymarket_signature_type(proxy_wallet)
-
-        client = ClobClient(
-            host=CLOB_API,
-            key=private_key,
-            chain_id=137,
-            signature_type=signature_type,
-            funder=proxy_wallet,
-        )
+        client = _build_legacy_polymarket_client(private_key, proxy_wallet)
         client.set_api_creds(client.create_or_derive_api_creds())
 
         raw = client.get_balance_allowance(
