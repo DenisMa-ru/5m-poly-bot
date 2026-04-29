@@ -27,6 +27,11 @@ PID_FILE = Path("/root/5m-poly-bot/bot.pid")
 CLOB_API = "https://clob.polymarket.com"
 POLYMARKET_DATA_API = "https://data-api.polymarket.com"
 PUSD_TOKEN = os.getenv("POLY_PUSD_TOKEN", "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
+BOT_SERVICE_CANDIDATES = [
+    {"name": "poly-bot-live.service", "default_mode": "live", "default_log": LIVE_LOG},
+    {"name": "poly-bot-test.service", "default_mode": "dry-run", "default_log": DEFAULT_LOG},
+    {"name": "poly-bot.service", "default_mode": "dry-run", "default_log": DEFAULT_LOG},
+]
 
 st.set_page_config(page_title="5m Poly Bot", page_icon="📈", layout="wide",
                     initial_sidebar_state="collapsed")
@@ -211,6 +216,129 @@ def _fmt_money_or_unknown(value):
     if value is None:
         return "Unknown"
     return f"${float(value):.2f}"
+
+
+def _infer_mode_from_execstart(exec_start: str | None, fallback: str = "Unknown") -> str:
+    text = str(exec_start or "").lower()
+    if "--live" in text:
+        return "live"
+    if "--dry-run" in text or "test" in text:
+        return "dry-run"
+    if "--paper" in text:
+        return "paper"
+    return fallback or "Unknown"
+
+
+def _extract_log_path_from_systemd(value: str | None) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for prefix in ("append:", "file:"):
+        if text.startswith(prefix):
+            raw_path = text[len(prefix):].strip()
+            return Path(raw_path) if raw_path else None
+    return None
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_runtime_service_state():
+    """Resolve the currently running bot service via systemd, not via a single log file."""
+    service_rows = []
+    for candidate in BOT_SERVICE_CANDIDATES:
+        service_name = candidate["name"]
+        fallback_mode = candidate["default_mode"]
+        fallback_log = candidate["default_log"]
+        row = {
+            "service_name": service_name,
+            "mode": fallback_mode,
+            "log_path": str(fallback_log),
+            "active_state": "Unknown",
+            "sub_state": "Unknown",
+            "load_state": "Unknown",
+            "active_enter_ts": "",
+            "active_enter_mono": 0,
+            "exec_start": "",
+            "fragment_path": "",
+        }
+        try:
+            proc = subprocess.run(
+                [
+                    "systemctl",
+                    "show",
+                    service_name,
+                    "--property=Id,LoadState,ActiveState,SubState,ExecStart,StandardOutput,StandardError,FragmentPath,ActiveEnterTimestamp,ActiveEnterTimestampMonotonic",
+                    "--no-pager",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if proc.returncode == 0:
+                data = {}
+                for line in (proc.stdout or "").splitlines():
+                    if "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    data[key] = value.strip()
+                row["load_state"] = data.get("LoadState") or "Unknown"
+                row["active_state"] = data.get("ActiveState") or "Unknown"
+                row["sub_state"] = data.get("SubState") or "Unknown"
+                row["active_enter_ts"] = data.get("ActiveEnterTimestamp") or ""
+                row["exec_start"] = data.get("ExecStart") or ""
+                row["fragment_path"] = data.get("FragmentPath") or ""
+                try:
+                    row["active_enter_mono"] = int(data.get("ActiveEnterTimestampMonotonic") or 0)
+                except Exception:
+                    row["active_enter_mono"] = 0
+
+                stdout_log = _extract_log_path_from_systemd(data.get("StandardOutput"))
+                stderr_log = _extract_log_path_from_systemd(data.get("StandardError"))
+                log_path = stdout_log or stderr_log or fallback_log
+                row["log_path"] = str(log_path)
+                row["mode"] = _infer_mode_from_execstart(row["exec_start"], fallback_mode)
+        except Exception:
+            pass
+        service_rows.append(row)
+
+    active_services = [
+        row for row in service_rows
+        if row.get("load_state") != "not-found" and row.get("active_state") == "active"
+    ]
+    selected = None
+    if active_services:
+        selected = max(active_services, key=lambda row: (int(row.get("active_enter_mono") or 0), row.get("service_name") or ""))
+    else:
+        known_services = [row for row in service_rows if row.get("load_state") != "not-found"]
+        if known_services:
+            selected = max(known_services, key=lambda row: (int(row.get("active_enter_mono") or 0), row.get("service_name") or ""))
+
+    if not selected:
+        return {
+            "service_name": "Unknown",
+            "mode": "Unknown",
+            "log_path": None,
+            "active_state": "Unknown",
+            "sub_state": "Unknown",
+            "session_start_ts": None,
+            "session_bank_start": None,
+            "state": "start",
+            "sleep": 0,
+            "nc": "--:--",
+            "round": 0,
+            "err": 0,
+            "services": service_rows,
+        }
+
+    parsed = parse_log_state(Path(selected["log_path"]) if selected.get("log_path") else None)
+    if parsed.get("mode") in (None, "", "Unknown"):
+        parsed["mode"] = selected.get("mode") or "Unknown"
+    parsed["service_name"] = selected.get("service_name") or "Unknown"
+    parsed["log_path"] = selected.get("log_path")
+    parsed["active_state"] = selected.get("active_state") or "Unknown"
+    parsed["sub_state"] = selected.get("sub_state") or "Unknown"
+    parsed["services"] = service_rows
+    return parsed
 
 
 def _normalize_wallet_address(value):
@@ -1255,8 +1383,8 @@ RL = {'btc_low': 'BTC below min', 'eth_low': 'ETH below min', 'high': 'Above max
 
 # ===== INIT =====
 settings = load_settings()
-bot_running = is_bot_running()
-L = parse_log_state(Path(os.environ.get("BOT_LOG_FILE", str(LIVE_LOG))))  # Log state только для статуса
+L = get_runtime_service_state()
+bot_running = L.get("active_state") == "active" or is_bot_running()
 D = build_dashboard_state(L.get("session_start_ts"), L.get("session_bank_start"))  # Dashboard state из текущей сессии
 
 # ===== TABS =====
@@ -1302,6 +1430,7 @@ with tab_dashboard:
     roi_pct = (net_result / D['bank_start'] * 100) if net_result is not None and D['bank_start'] else None
     summary_items = [
         ("Mode", mode),
+        ("Service", str(L.get('service_name') or 'Unknown')),
         ("Trade", f"${settings.get('amount', 10):.0f}"),
         ("Coins", ', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))),
         ("PID", PID_FILE.read_text().strip() if PID_FILE.exists() else '—'),
@@ -1324,7 +1453,10 @@ with tab_dashboard:
 
     ico = {'sleeping': '💤', 'active': '⚡', 'start': '🚀'}.get(L['state'], '⚪')
     session_label = L.get('session_start_ts') or 'Unknown'
-    st.caption(f"{ico} {L['state'].upper()} | Mode: {mode} | Session start: {session_label} | Next: {L['nc']} | Sleep: {L['sleep']}s")
+    st.caption(
+        f"{ico} {L['state'].upper()} | Service: {L.get('service_name') or 'Unknown'} | "
+        f"Mode: {mode} | Session start: {session_label} | Next: {L['nc']} | Sleep: {L['sleep']}s"
+    )
 
     st.markdown("---")
     pnl_v = D['realized_pnl']
