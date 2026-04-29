@@ -225,6 +225,8 @@ HYBRID_SHADOW_PM_MIN = float(_bot_settings.get("hybrid_shadow_pm_min", NORMAL_ZO
 CORE_EV_ENABLED = bool(_bot_settings.get("core_ev_enabled", True))
 CORE_EV_PM_MIN = float(_bot_settings.get("core_ev_pm_min", 0.58) or 0.58)
 CORE_EV_PM_MAX = float(_bot_settings.get("core_ev_pm_max", 0.70) or 0.70)
+CORE_EV_FLEX_PM_MIN = float(_bot_settings.get("core_ev_flex_pm_min", 0.55) or 0.55)
+CORE_EV_FLEX_PM_MAX = float(_bot_settings.get("core_ev_flex_pm_max", 0.80) or 0.80)
 CORE_EV_TIME_LEFT_MIN = float(_bot_settings.get("core_ev_time_left_min", CORE_EV_ENTRY_TIME_MIN) or CORE_EV_ENTRY_TIME_MIN)
 CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("core_ev_time_left_max", min(20, CORE_EV_ENTRY_TIME_MAX)) or min(20, CORE_EV_ENTRY_TIME_MAX))
 CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
@@ -233,6 +235,7 @@ CORE_EV_TREND_CONFLICT_MICRO_DELTA_MIN_PCT = float(_bot_settings.get("core_ev_tr
 CORE_EV_TREND_CONFLICT_MICRO_CONFIDENCE_MIN = float(_bot_settings.get("core_ev_trend_conflict_micro_confidence_min", 0.0) or 0.0)
 CORE_EV_TREND_CONFLICT_MICRO_INDICATOR_MIN = float(_bot_settings.get("core_ev_trend_conflict_micro_indicator_min", -0.10) or -0.10)
 FULL_WINDOW_CORE_EV_MIN_LEVEL = str(_bot_settings.get("full_window_core_ev_min_level", "L2") or "L2").strip().upper()
+FULL_WINDOW_MICRO_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_micro_entry_commit_time_left", FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6) or (FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6))
 FULL_WINDOW_L1_FALLBACK_MIN_TRADES = int(_bot_settings.get("full_window_l1_fallback_min_trades", 8) or 8)
 FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE = bool(_bot_settings.get("full_window_l1_fallback_require_recent_positive", True))
 FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX = float(_bot_settings.get("full_window_l1_fallback_time_left_max", 150) or 150)
@@ -1397,7 +1400,7 @@ class CryptoBot:
 
     def _candidate_priority(self, signal_data: dict, core_ev: dict, shadow_live_decision: str, shadow_live_score: float) -> tuple:
         decision = str(core_ev.get("decision", "unknown") or "unknown")
-        decision_rank = {"strong_allow": 3, "allow": 2, "watch": 1, "deny": 0, "unknown": -1}.get(decision, -1)
+        decision_rank = {"strong_allow": 4, "allow": 3, "micro_allow": 2, "watch": 1, "deny": 0, "unknown": -1}.get(decision, -1)
         level_rank = {"L3": 3, "L2": 2, "L1": 1}.get(str(core_ev.get("bucket_level", "") or "").upper(), 0)
         shadow_rank = {"strong_allow": 3, "allow": 2, "watch": 1, "neutral": 0, "deny": -1}.get(shadow_live_decision, 0)
         return (
@@ -1417,6 +1420,10 @@ class CryptoBot:
                                        seconds_left: float) -> tuple[bool, str]:
         if not FULL_WINDOW_CORE_EV_ENABLED:
             return True, "full-window mode disabled"
+
+        decision = str(core_ev.get("decision", "unknown") or "unknown")
+        if decision in {"allow", "strong_allow"}:
+            return True, f"immediate {decision} entry"
 
         state = self.shadow_window_state.setdefault(slug, {"best_core_ev_candidate": None})
 
@@ -1483,7 +1490,12 @@ class CryptoBot:
             log(f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — {summarize('confirmed', best)}")
             return True, f"best candidate confirmed for {int(best.get('confirm_ticks', 0) or 0)} ticks"
 
-        if float(seconds_left or 0) <= FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT:
+        commit_time_left = (
+            FULL_WINDOW_MICRO_ENTRY_COMMIT_TIME_LEFT
+            if decision == "micro_allow"
+            else FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT
+        )
+        if float(seconds_left or 0) <= commit_time_left:
             log(f"   [{signal_data.get('coin', 'UNK')}] FULL-WINDOW CANDIDATE — {summarize('commit_now', best)}")
             return True, f"commit threshold reached at {seconds_left:.1f}s"
 
@@ -1518,8 +1530,14 @@ class CryptoBot:
         delta_pct = float(signal_data.get("delta", 0) or 0)
         confidence = float(signal_data.get("confidence", 0) or 0)
         indicator_confirm = float(signal_data.get("indicator_confirm", 0) or 0)
-        if pm < CORE_EV_PM_MIN or pm > CORE_EV_PM_MAX:
-            return {"decision": "deny", "reason": f"pm outside core ev zone ({pm:.3f})", "size_fraction": 0.0}
+        pm_in_core_zone = CORE_EV_PM_MIN <= pm <= CORE_EV_PM_MAX
+        pm_in_flex_zone = CORE_EV_FLEX_PM_MIN <= pm <= CORE_EV_FLEX_PM_MAX
+        if not pm_in_flex_zone:
+            return {
+                "decision": "deny",
+                "reason": f"pm outside flexible core ev zone ({pm:.3f})",
+                "size_fraction": 0.0,
+            }
         if not bool(signal_data.get("trend_aligned")) or bool(signal_data.get("trend_conflict")):
             trend_micro_ok = (
                 FULL_WINDOW_CORE_EV_ENABLED
@@ -1603,9 +1621,12 @@ class CryptoBot:
                     break
             if undersampled_positive is not None:
                 level, stats = undersampled_positive
+                reason_prefix = "undersampled but positive core ev bucket"
+                if not pm_in_core_zone:
+                    reason_prefix = "flex pm outside base zone but undersampled-positive bucket"
                 return {
                     "decision": "micro_allow",
-                    "reason": f"undersampled but positive core ev bucket | {level_summary}",
+                    "reason": f"{reason_prefix} | {level_summary}",
                     "bucket_key": keys[level],
                     "bucket_level": level,
                     "sample_size": int(stats.get("trades", 0) or 0),
@@ -1613,6 +1634,19 @@ class CryptoBot:
                     "historical_win_rate": float(stats.get("win_rate", 0) or 0),
                     "recent_roi": float(stats.get("recent_roi", 0) or 0),
                     "recent_trades": int(stats.get("recent_trades", 0) or 0),
+                    "size_fraction": CORE_EV_MICRO_RISK_PCT,
+                }
+            if not pm_in_core_zone:
+                return {
+                    "decision": "micro_allow",
+                    "reason": f"flex pm outside base zone with unknown core ev bucket ({pm:.3f}) | {level_summary}",
+                    "bucket_key": keys["L3"],
+                    "bucket_level": "L3",
+                    "sample_size": 0,
+                    "historical_roi": 0.0,
+                    "historical_win_rate": 0.0,
+                    "recent_roi": 0.0,
+                    "recent_trades": 0,
                     "size_fraction": CORE_EV_MICRO_RISK_PCT,
                 }
             return {
@@ -1635,6 +1669,37 @@ class CryptoBot:
         historical_win_rate = float(selected_stats.get("win_rate", 0) or 0)
         recent_roi = float(selected_stats.get("recent_roi", 0) or 0)
         recent_trades = int(selected_stats.get("recent_trades", 0) or 0)
+
+        if not pm_in_core_zone:
+            if decision == "deny":
+                return {
+                    "decision": "deny",
+                    "reason": f"flex pm bucket remains historically negative ({pm:.3f})",
+                    "bucket_key": selected_key,
+                    "bucket_level": bucket_level,
+                    "sample_size": sample_size,
+                    "historical_roi": historical_roi,
+                    "historical_win_rate": historical_win_rate,
+                    "recent_roi": recent_roi,
+                    "recent_trades": recent_trades,
+                    "size_fraction": 0.0,
+                }
+            if decision in {"allow", "strong_allow", "watch"}:
+                return {
+                    "decision": "micro_allow",
+                    "reason": (
+                        f"flex pm outside base zone ({pm:.3f}) downgraded to micro-size"
+                        f" | core ev {decision}"
+                    ),
+                    "bucket_key": selected_key,
+                    "bucket_level": bucket_level,
+                    "sample_size": sample_size,
+                    "historical_roi": historical_roi,
+                    "historical_win_rate": historical_win_rate,
+                    "recent_roi": recent_roi,
+                    "recent_trades": recent_trades,
+                    "size_fraction": CORE_EV_MICRO_RISK_PCT,
+                }
 
         if selected_level == "L2" and "L3" in unknown_levels and decision in {"allow", "strong_allow"}:
             selected_stats = dict(selected_stats)
