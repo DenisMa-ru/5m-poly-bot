@@ -408,16 +408,27 @@ def _derive_polymarket_v2_creds(client):
     return None
 
 
+def _get_polymarket_signature_type(proxy_wallet: str) -> int:
+    signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
+    if signature_type_raw is not None:
+        return int(signature_type_raw)
+    return 2 if proxy_wallet else 0
+
+
 def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None):
     import importlib
 
     client_module = importlib.import_module("py_clob_client_v2")
     ClobClient = client_module.ClobClient
+    signature_type = _get_polymarket_signature_type(proxy_wallet)
 
     constructor_variants = [
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder_address": proxy_wallet or None},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder": proxy_wallet or None},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder_address": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds},
     ]
 
     last_error = None
@@ -500,11 +511,7 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
         BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
         AssetType = clob_types_module.AssetType
 
-        signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
-        if signature_type_raw is not None:
-            signature_type = int(signature_type_raw)
-        else:
-            signature_type = 2 if proxy_wallet else 0
+        signature_type = _get_polymarket_signature_type(proxy_wallet)
 
         client = ClobClient(
             host=CLOB_API,
