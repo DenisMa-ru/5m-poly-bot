@@ -212,6 +212,191 @@ def _fmt_money_or_unknown(value):
     return f"${float(value):.2f}"
 
 
+def _normalize_wallet_address(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if re.fullmatch(r"0x[a-fA-F0-9]{40}", text):
+        return text
+    return None
+
+
+def _extract_wallet_candidates(payload) -> list[str]:
+    found = []
+
+    def add(value):
+        addr = _normalize_wallet_address(value)
+        if addr and addr not in found:
+            found.append(addr)
+
+    def walk(value):
+        if isinstance(value, dict):
+            for nested in value.values():
+                walk(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                walk(nested)
+        elif isinstance(value, str):
+            add(value)
+            for match in re.findall(r"0x[a-fA-F0-9]{40}", value):
+                add(match)
+
+    walk(payload)
+    return found
+
+
+def _resolve_polymarket_addresses(seed_addresses: list[str]) -> list[str]:
+    addresses = []
+    for value in seed_addresses:
+        addr = _normalize_wallet_address(value)
+        if addr and addr not in addresses:
+            addresses.append(addr)
+
+    discovered = list(addresses)
+    for address in discovered:
+        try:
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/public-profile",
+                params={"wallet": address},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            for candidate in _extract_wallet_candidates(resp.json()):
+                if candidate not in addresses:
+                    addresses.append(candidate)
+        except Exception:
+            continue
+    return addresses
+
+
+def _fetch_polymarket_user_snapshot(user_address: str) -> dict:
+    snapshot = {
+        "cash": None,
+        "portfolio": None,
+        "redeemable": None,
+        "positions_value": None,
+        "open_positions": None,
+        "wallet": user_address,
+        "source_error": None,
+    }
+    portfolio_from_value = None
+
+    try:
+        value_resp = requests.get(
+            f"{POLYMARKET_DATA_API}/value",
+            params={"user": user_address},
+            timeout=5,
+        )
+        value_resp.raise_for_status()
+        payload = value_resp.json()
+        value_rows = _coerce_payload_rows(payload)
+        for row in value_rows:
+            if not isinstance(row, dict):
+                continue
+            portfolio = _first_present_amount(
+                row,
+                "value",
+                "currentValue",
+                "portfolioValue",
+                "totalValue",
+                "usdValue",
+            )
+            if portfolio is not None:
+                portfolio_from_value = portfolio
+                break
+    except Exception as exc:
+        snapshot["source_error"] = str(exc)
+
+    try:
+        positions_resp = requests.get(
+            f"{POLYMARKET_DATA_API}/positions",
+            params={"user": user_address, "sizeThreshold": 0},
+            timeout=5,
+        )
+        positions_resp.raise_for_status()
+        payload = positions_resp.json()
+        positions = _coerce_payload_rows(payload)
+
+        if isinstance(positions, list):
+            redeemable = 0.0
+            positions_value = 0.0
+            open_positions = 0
+            has_redeemable = False
+            has_positions_value = False
+
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+
+                current_value = _first_present_amount(
+                    pos,
+                    "currentValue",
+                    "value",
+                    "portfolioValue",
+                    "usdValue",
+                    "amountValue",
+                )
+                if current_value is not None:
+                    positions_value += current_value
+                    if current_value > 0:
+                        open_positions += 1
+                    has_positions_value = True
+
+                redeem_value = _first_present_amount(
+                    pos,
+                    "redeemableValue",
+                    "redeemedValue",
+                    "claimableValue",
+                    "claimable",
+                )
+                if redeem_value is None and pos.get("redeemable") is True:
+                    redeem_value = current_value
+                if redeem_value is None and pos.get("redeemable") is True:
+                    redeem_value = _first_present_amount(pos, "size", "balance")
+                if redeem_value is not None:
+                    redeemable += redeem_value
+                    has_redeemable = True
+
+            if has_positions_value:
+                snapshot["positions_value"] = positions_value
+            snapshot["open_positions"] = open_positions
+            if has_redeemable:
+                snapshot["redeemable"] = redeemable
+    except Exception as exc:
+        if snapshot["source_error"] is None:
+            snapshot["source_error"] = str(exc)
+
+    if _looks_like_valid_portfolio(portfolio_from_value, snapshot["cash"], snapshot["positions_value"]):
+        snapshot["portfolio"] = portfolio_from_value
+    else:
+        snapshot["portfolio"] = snapshot["positions_value"]
+
+    if snapshot["redeemable"] is None and snapshot["positions_value"] is not None:
+        snapshot["redeemable"] = 0.0
+
+    return snapshot
+
+
+def _score_polymarket_snapshot(snapshot: dict) -> tuple:
+    portfolio = _safe_float(snapshot.get("portfolio")) or 0.0
+    cash = _safe_float(snapshot.get("cash")) or 0.0
+    positions_value = _safe_float(snapshot.get("positions_value")) or 0.0
+    redeemable = _safe_float(snapshot.get("redeemable")) or 0.0
+    open_positions = int(snapshot.get("open_positions") or 0)
+    has_error = 1 if snapshot.get("source_error") else 0
+    return (
+        portfolio > 0,
+        cash > 0,
+        positions_value > 0,
+        redeemable > 0,
+        open_positions,
+        portfolio,
+        cash,
+        positions_value,
+        -has_error,
+    )
+
+
 def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
     """Return available collateral balance and allowance from Polymarket, if available."""
     try:
@@ -266,7 +451,8 @@ def fetch_polymarket_account_state() -> dict:
     """Fetch real Polymarket cash and portfolio values for dashboard display."""
     private_key = os.getenv("POLY_PRIVATE_KEY", "")
     proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
-    user_address = proxy_wallet or os.getenv("POLY_WALLET", "")
+    poly_wallet = os.getenv("POLY_WALLET", "")
+    user_address = proxy_wallet or poly_wallet
 
     result = {
         "cash": None,
@@ -296,105 +482,32 @@ def fetch_polymarket_account_state() -> dict:
             result["source_error"] = "Missing POLY_PROXY_WALLET"
         return result
 
-    portfolio_from_value = None
+    candidate_addresses = _resolve_polymarket_addresses([proxy_wallet, poly_wallet])
+    best_snapshot = None
+    for candidate in candidate_addresses:
+        snapshot = _fetch_polymarket_user_snapshot(candidate)
+        if best_snapshot is None or _score_polymarket_snapshot(snapshot) > _score_polymarket_snapshot(best_snapshot):
+            best_snapshot = snapshot
 
-    try:
-        value_resp = requests.get(
-            f"{POLYMARKET_DATA_API}/value",
-            params={"user": user_address},
-            timeout=5,
-        )
-        value_resp.raise_for_status()
-        payload = value_resp.json()
-        value_rows = _coerce_payload_rows(payload)
-        for row in value_rows:
-            if not isinstance(row, dict):
-                continue
-            portfolio = _first_present_amount(
-                row,
-                "value",
-                "currentValue",
-                "portfolioValue",
-                "totalValue",
-                "usdValue",
-            )
-            if portfolio is not None:
-                portfolio_from_value = portfolio
-                break
-    except Exception as exc:
-        result["source_error"] = str(exc)
+    if best_snapshot is not None:
+        result["wallet"] = best_snapshot.get("wallet") or result["wallet"]
+        result["positions_value"] = best_snapshot.get("positions_value")
+        result["open_positions"] = best_snapshot.get("open_positions")
+        result["redeemable"] = best_snapshot.get("redeemable")
+        positions_value = best_snapshot.get("positions_value")
+        fallback_portfolio = None
+        if result["cash"] is not None or positions_value is not None:
+            fallback_portfolio = (result["cash"] or 0) + (positions_value or 0)
 
-    try:
-        positions_resp = requests.get(
-            f"{POLYMARKET_DATA_API}/positions",
-            params={"user": user_address, "sizeThreshold": 0},
-            timeout=5,
-        )
-        positions_resp.raise_for_status()
-        payload = positions_resp.json()
-        positions = _coerce_payload_rows(payload)
+        if _looks_like_valid_portfolio(best_snapshot.get("portfolio"), result["cash"], positions_value):
+            result["portfolio"] = best_snapshot.get("portfolio")
+        else:
+            result["portfolio"] = fallback_portfolio
 
-        if isinstance(positions, list):
-            redeemable = 0.0
-            positions_value = 0.0
-            open_positions = 0
-            has_redeemable = False
-            has_positions_value = False
-
-            for pos in positions:
-                if not isinstance(pos, dict):
-                    continue
-
-                current_value = _first_present_amount(
-                    pos,
-                    "currentValue",
-                    "value",
-                    "portfolioValue",
-                    "usdValue",
-                    "amountValue",
-                )
-                if current_value is not None:
-                    positions_value += current_value
-                    if current_value > 0:
-                        open_positions += 1
-                    has_positions_value = True
-
-                redeem_value = _first_present_amount(
-                    pos,
-                    "redeemableValue",
-                    "redeemedValue",
-                    "claimableValue",
-                    "claimable",
-                )
-                if redeem_value is None and pos.get("redeemable") is True:
-                    redeem_value = current_value
-                if redeem_value is None and pos.get("redeemable") is True:
-                    redeem_value = _first_present_amount(pos, "size", "balance")
-                if redeem_value is not None:
-                    redeemable += redeem_value
-                    has_redeemable = True
-
-            if has_positions_value:
-                result["positions_value"] = positions_value
-            result["open_positions"] = open_positions
-            if has_redeemable:
-                result["redeemable"] = redeemable
-    except Exception as exc:
+        if result["redeemable"] is None:
+            result["redeemable"] = 0.0 if positions_value is not None else None
         if result["source_error"] is None:
-            result["source_error"] = str(exc)
-
-    positions_value = result["positions_value"]
-    fallback_portfolio = None
-    if result["cash"] is not None or positions_value is not None:
-        fallback_portfolio = (result["cash"] or 0) + (positions_value or 0)
-
-    if _looks_like_valid_portfolio(portfolio_from_value, result["cash"], positions_value):
-        result["portfolio"] = portfolio_from_value
-    else:
-        result["portfolio"] = fallback_portfolio
-
-    if result["redeemable"] is None:
-        result["redeemable"] = 0.0 if positions_value is not None else None
+            result["source_error"] = best_snapshot.get("source_error")
 
     return result
 
