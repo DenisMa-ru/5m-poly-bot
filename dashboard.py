@@ -5,6 +5,7 @@
 """
 import streamlit as st
 import re, os, json
+import subprocess
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -392,14 +393,25 @@ def build_dashboard_state():
     last_window_samples = window_samples[-20:]
     full_window_waits = [s for s in signals if str(s.get("reason", "")).startswith("full window wait |")]
     last_full_window_waits = full_window_waits[-12:]
+    last_core_ev_signals = [s for s in signals if s.get("core_ev_decision")][-10:]
 
-    core_ev_decision_counts = {"strong_allow": 0, "allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
+    core_ev_decision_counts = {"strong_allow": 0, "allow": 0, "micro_allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
     for s in signals[-200:]:
         decision = str(s.get("core_ev_decision", "unknown") or "unknown")
         if decision in core_ev_decision_counts:
             core_ev_decision_counts[decision] += 1
         else:
             core_ev_decision_counts["other"] += 1
+
+    core_ev_recent_rows = []
+    for s in reversed(last_core_ev_signals):
+        core_ev_recent_rows.append({
+            "Time": s.get("timestamp", ""),
+            "Decision": str(s.get("core_ev_decision", "") or ""),
+            "Level": str(s.get("core_ev_bucket_level", "") or ""),
+            "Time Left": f"{float(s.get('time_left', 0) or 0):.1f}s",
+            "Reason": str(s.get("core_ev_reason", s.get("reason", "")) or "")[:84],
+        })
 
     bucket_rows = [{"key": key, **stats} for key, stats in (core_ev_rules.get("buckets", {}) or {}).items() if isinstance(stats, dict)]
     rulebook_decisions = {"strong_allow": 0, "allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
@@ -409,6 +421,14 @@ def build_dashboard_state():
             rulebook_decisions[decision] += 1
         else:
             rulebook_decisions["other"] += 1
+
+    bucket_level_counts = {"L1": 0, "L2": 0, "L3": 0, "trend_conflict": 0, "high_pm_micro": 0, "other": 0}
+    for s in signals[-200:]:
+        level = str(s.get("core_ev_bucket_level", "") or "other")
+        if level in bucket_level_counts:
+            bucket_level_counts[level] += 1
+        else:
+            bucket_level_counts["other"] += 1
 
     time_bucket_counts = {}
     for s in window_samples[-200:]:
@@ -433,6 +453,27 @@ def build_dashboard_state():
     top_allow_buckets.sort(key=lambda row: (float(row.get("roi", 0) or 0), int(row.get("trades", 0) or 0)), reverse=True)
     top_deny_buckets = [row for row in bucket_rows if row.get("decision") == "deny"]
     top_deny_buckets.sort(key=lambda row: (float(row.get("roi", 0) or 0), -int(row.get("trades", 0) or 0)))
+
+    core_ev_deny_reasons = {}
+    for s in signals:
+        if str(s.get("core_ev_decision", "") or "") != "deny":
+            continue
+        reason = str(s.get("core_ev_reason", s.get("reason", "other")) or "other").lower()
+        if "pm outside flexible core ev zone" in reason:
+            key = "pm outside flex zone"
+        elif "aligned non-conflicting trend" in reason or "trend conflict" in reason:
+            key = "trend conflict"
+        elif "l1 fallback" in reason or "below l2+ specificity" in reason or "requires l2" in reason:
+            key = "l1/l2/l3 specificity"
+        elif "undersampled" in reason or "unknown core ev bucket" in reason:
+            key = "undersampled / unknown"
+        elif "historically negative" in reason:
+            key = "historically negative bucket"
+        elif "shadow live deny" in reason:
+            key = "shadow live deny"
+        else:
+            key = "other"
+        core_ev_deny_reasons[key] = core_ev_deny_reasons.get(key, 0) + 1
 
     # Считаем invested и pnl из вошедших сигналов
     settings = load_settings()
@@ -459,14 +500,72 @@ def build_dashboard_state():
     losses = [s for s in entered if s.get("won") == False]
     pending = [s for s in entered if "realized_pnl" not in s or s.get("realized_pnl") is None]
 
+    l1_fallback_signals = [
+        s for s in signals
+        if "full-window L1 fallback" in str(s.get("core_ev_reason", "") or "")
+    ]
+    l1_fallback_resolved = [s for s in l1_fallback_signals if s.get("realized_pnl") is not None]
+    l1_fallback_avg_roi = None
+    if l1_fallback_resolved:
+        l1_fallback_avg_roi = sum(float(s.get("realized_pnl", 0) or 0) for s in l1_fallback_resolved) / len(l1_fallback_resolved)
+
+    micro_allow_signals = [s for s in signals if str(s.get("core_ev_decision", "") or "") == "micro_allow"]
+    micro_allow_entered = [s for s in micro_allow_signals if s.get("entered")]
+    micro_allow_resolved = [s for s in micro_allow_entered if s.get("realized_pnl") is not None]
+    micro_allow_wins = len([s for s in micro_allow_resolved if s.get("won") == True])
+    micro_allow_avg_roi = None
+    if micro_allow_resolved:
+        micro_allow_avg_roi = sum(float(s.get("realized_pnl", 0) or 0) for s in micro_allow_resolved) / len(micro_allow_resolved)
+
+    wait_slugs = {str(s.get("market_slug", "") or "") for s in full_window_waits if s.get("market_slug")}
+    wait_enter_count = len([s for s in entered if str(s.get("market_slug", "") or "") in wait_slugs])
+
+    realized_pnl_by_bucket_level = {}
+    for s in entered:
+        if s.get("realized_pnl") is None:
+            continue
+        level = str(s.get("core_ev_bucket_level", "unknown") or "unknown")
+        realized_pnl_by_bucket_level[level] = realized_pnl_by_bucket_level.get(level, 0.0) + float(s.get("realized_pnl", 0) or 0)
+
+    realized_pnl_by_decision = {}
+    for s in entered:
+        if s.get("realized_pnl") is None:
+            continue
+        decision = str(s.get("core_ev_decision", "unknown") or "unknown")
+        realized_pnl_by_decision[decision] = realized_pnl_by_decision.get(decision, 0.0) + float(s.get("realized_pnl", 0) or 0)
+
+    win_rate_by_time_bucket = {}
+    for s in entered:
+        if s.get("won") is None:
+            continue
+        t = _safe_float(s.get("time_left"))
+        if t is None:
+            key = "unknown"
+        elif t < 20:
+            key = "10-19s"
+        elif t < 30:
+            key = "20-29s"
+        elif t < 60:
+            key = "30-59s"
+        elif t < 120:
+            key = "60-119s"
+        else:
+            key = "120-300s"
+        row = win_rate_by_time_bucket.setdefault(key, {"wins": 0, "losses": 0})
+        if s.get("won") == True:
+            row["wins"] += 1
+        elif s.get("won") == False:
+            row["losses"] += 1
+
     # Skip reasons breakdown
     skip_reasons = {}
     for s in skipped:
         reason = s.get("reason", "other")
+        coin = str(s.get("coin", "") or "").upper()
         # Нормализуем причины
-        if "PM price <" in reason or "btc_low" in reason.lower():
+        if "btc_low" in reason.lower() or ("PM price <" in reason and coin == "BTC"):
             key = "btc_low"
-        elif "PM price <" in reason or "eth_low" in reason.lower():
+        elif "eth_low" in reason.lower() or ("PM price <" in reason and coin == "ETH"):
             key = "eth_low"
         elif "PM price >" in reason or ">0.99" in reason.lower():
             key = "high"
@@ -548,6 +647,7 @@ def build_dashboard_state():
         "last_entered": last_entered,
         "last_skipped": last_skipped,
         "last_full_window_waits": last_full_window_waits,
+        "core_ev_recent_rows": core_ev_recent_rows,
         "last_shadow_live": last_shadow_live,
         "shadow_live_mode": shadow_live_mode,
         "shadow_live_counts": shadow_live_counts,
@@ -559,9 +659,22 @@ def build_dashboard_state():
         "core_ev_generated_at": str(core_ev_rules.get("generated_at", "unknown") or "unknown"),
         "core_ev_resolved_eligible": int(core_ev_rules.get("resolved_eligible_signals", 0) or 0),
         "core_ev_runtime_decisions": core_ev_decision_counts,
+        "core_ev_deny_reasons": core_ev_deny_reasons,
+        "bucket_level_counts": bucket_level_counts,
         "window_time_bucket_counts": time_bucket_counts,
         "top_allow_buckets": top_allow_buckets[:10],
         "top_deny_buckets": top_deny_buckets[:10],
+        "l1_fallback_count": len(l1_fallback_signals),
+        "l1_fallback_avg_roi": l1_fallback_avg_roi,
+        "micro_allow_count": len(micro_allow_signals),
+        "micro_allow_entered": len(micro_allow_entered),
+        "micro_allow_resolved": len(micro_allow_resolved),
+        "micro_allow_wins": micro_allow_wins,
+        "micro_allow_avg_roi": micro_allow_avg_roi,
+        "wait_enter_count": wait_enter_count,
+        "realized_pnl_by_bucket_level": realized_pnl_by_bucket_level,
+        "realized_pnl_by_decision": realized_pnl_by_decision,
+        "win_rate_by_time_bucket": win_rate_by_time_bucket,
         "btc_signals": [s for s in signals if s.get("coin") == "BTC"],
         "eth_signals": [s for s in signals if s.get("coin") == "ETH"],
         "btc_entered": [s for s in entered if s.get("coin") == "BTC"],
@@ -612,13 +725,31 @@ def load_settings():
     except:
         return get_default_settings()
 
+
+def restart_bot_service(service_name: str = "poly-bot-live.service") -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "restart", service_name],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return True, f"{service_name} restarted"
+        detail = (proc.stderr or proc.stdout or "systemctl restart failed").strip()
+        return False, detail
+    except Exception as e:
+        return False, str(e)
+
 def get_default_settings():
     """Возвращает дефолтные настройки бота."""
     return {
         "bank": 100,
-        "mode": "live",
+        "mode": "dry-run",
         "amount": 5,
         "enabled_coins": ["BTC"],
+        "observe_window_seconds": 305,
         "daily_loss_limit": 10.0,
         "daily_loss_limit_pct": 0.20,
         "dynamic_sizing": True,
@@ -628,16 +759,35 @@ def get_default_settings():
         "dynamic_step_bank_gain_pct": 0.70,
         "dynamic_step_risk_pct": 0.01,
         "dynamic_max_risk_pct": 0.08,
-        "min_confidence": 0.0,
-        "entry_min": 15,
-        "entry_max": 20,
-        "price_min_btc": 0.45,
-        "price_min_eth": 0.70,
-        "price_max": 0.70,
-        "min_edge": -0.05,
-        "indicator_confirm_min": 0.0,
-        "delta_skip": 0.0,
-        "atr_multiplier": 1.5,
+        "core_ev_enabled": True,
+        "core_ev_pm_min": 0.58,
+        "core_ev_pm_max": 0.70,
+        "core_ev_flex_pm_min": 0.50,
+        "core_ev_flex_pm_max": 0.99,
+        "core_ev_entry_time_min": 10,
+        "core_ev_entry_time_max": 305,
+        "core_ev_time_left_min": 10,
+        "core_ev_time_left_max": 20,
+        "core_ev_max_risk_pct": 0.02,
+        "core_ev_micro_risk_pct": 0.005,
+        "core_ev_trend_conflict_micro_delta_min_pct": 0.012,
+        "core_ev_trend_conflict_micro_confidence_min": 0.0,
+        "core_ev_trend_conflict_micro_indicator_min": -0.10,
+        "full_window_core_ev_enabled": True,
+        "full_window_core_ev_time_left_max": 180,
+        "full_window_core_ev_min_level": "L2",
+        "full_window_entry_confirm_ticks": 2,
+        "full_window_entry_commit_time_left": 19,
+        "full_window_entry_min_score_gain": 0.15,
+        "full_window_micro_entry_commit_time_left": 30,
+        "full_window_l1_fallback_min_trades": 8,
+        "full_window_l1_fallback_require_recent_positive": True,
+        "full_window_l1_fallback_time_left_max": 150,
+        "full_window_l1_strong_exception_min_trades": 2,
+        "full_window_l1_strong_exception_min_roi": 50.0,
+        "window_sample_logging_enabled": True,
+        "trend_conflict_override_delta_min_pct": 0.025,
+        "shadow_live_mode": "observe",
     }
 
 def save_settings(settings):
@@ -772,18 +922,6 @@ with tab_dashboard:
         "Polymarket Cash/Portfolio are shown only as reference and are not changed by simulated trades."
     )
 
-    # ---- SHADOW LIVE ----
-    st.markdown("---")
-    st.markdown("#### Shadow Live")
-    sh1, sh2, sh3, sh4, sh5 = st.columns(5)
-    shadow_counts = D['shadow_live_counts']
-    sh1.metric("Mode", D['shadow_live_mode'])
-    sh2.metric("Strong/Allow", shadow_counts.get('strong_allow', 0) + shadow_counts.get('allow', 0))
-    sh3.metric("Watch", shadow_counts.get('watch', 0))
-    sh4.metric("Deny", shadow_counts.get('deny', 0))
-    sh5.metric("Shadow Signals", D['shadow_live_total'])
-    st.caption("Shadow live decisions are currently for observation/controlled rollout, depending on bot settings.")
-
     # ---- CORE EV / FULL-WINDOW ----
     st.markdown("---")
     st.markdown("#### Core EV / Full-Window")
@@ -801,6 +939,17 @@ with tab_dashboard:
         f"allow={rulebook_counts.get('strong_allow', 0) + rulebook_counts.get('allow', 0)} "
         f"watch={rulebook_counts.get('watch', 0)} deny={rulebook_counts.get('deny', 0)} unknown={rulebook_counts.get('unknown', 0)}"
     )
+
+    st.markdown("**Core EV Runtime (last 200 signals)**")
+    rt1, rt2, rt3, rt4 = st.columns(4)
+    rt1.metric("ALLOW", runtime_counts.get('allow', 0))
+    rt2.metric("STRONG_ALLOW", runtime_counts.get('strong_allow', 0))
+    rt3.metric("MICRO_ALLOW", runtime_counts.get('micro_allow', 0))
+    rt4.metric("DENY", runtime_counts.get('deny', 0))
+
+    if D['core_ev_recent_rows']:
+        st.markdown("**Recent Core EV Decisions**")
+        st.dataframe(D['core_ev_recent_rows'], use_container_width=True, hide_index=True, height=240)
 
     # ---- WIN/LOSS (only when resolved trades exist) ----
     if D['wins'] > 0 or D['losses'] > 0:
@@ -822,20 +971,35 @@ with tab_dashboard:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Polymarket**")
-        for sig, name, mn in [
-            (D['btc_pm'], "BTC", settings.get("price_min_btc", 0.94)),
-            (D['eth_pm'], "ETH", settings.get("price_min_eth", 0.92)),
+        base_pm_min = float(settings.get("core_ev_pm_min", 0.58) or 0.58)
+        base_pm_max = float(settings.get("core_ev_pm_max", 0.70) or 0.70)
+        flex_pm_min = float(settings.get("core_ev_flex_pm_min", base_pm_min) or base_pm_min)
+        flex_pm_max = float(settings.get("core_ev_flex_pm_max", 0.99) or 0.99)
+        for sig, name in [
+            (D['btc_pm'], "BTC"),
+            (D['eth_pm'], "ETH"),
         ]:
             if sig and sig.get('pm'):
                 p = sig['pm']
-                ok = mn <= p <= settings.get("price_max", 0.99)
-                col = "#51cf66" if ok else "#ff6b6b"
-                lbl = "✓" if ok else "✗"
+                if base_pm_min <= p <= base_pm_max:
+                    col = "#51cf66"
+                    lbl = "✓"
+                    zone = "base"
+                elif flex_pm_min <= p <= flex_pm_max:
+                    col = "#f1c40f"
+                    lbl = "~"
+                    zone = "flex"
+                else:
+                    col = "#ff6b6b"
+                    lbl = "✗"
+                    zone = "out"
                 st.markdown(f'`{name}` <span style="color:{col};font-weight:bold">{p:.3f} {lbl}</span> '
+                            f'<span style="color:{col}">[{zone}]</span> '
                             f'δ{sig.get("delta", 0):.2f}% C{int(sig.get("confidence", 0)*100)}%',
                             unsafe_allow_html=True)
             else:
                 st.markdown(f"`{name}` —")
+        st.caption(f"Base PM zone: {base_pm_min:.2f}-{base_pm_max:.2f} | Flex PM zone: {flex_pm_min:.2f}-{flex_pm_max:.2f}")
     with c2:
         if D['skip_reasons']:
             st.markdown("**Why skipping**")
@@ -843,6 +1007,12 @@ with tab_dashboard:
             for rr, cnt in sorted(D['skip_reasons'].items(), key=lambda x: -x[1]):
                 pct = cnt / max(tot, 1)
                 st.progress(pct, text=f"{RL.get(rr, rr)}: {cnt} ({pct*100:.0f}%)")
+            if D['core_ev_deny_reasons']:
+                st.markdown("**Core EV deny reasons**")
+                core_ev_total = sum(D['core_ev_deny_reasons'].values())
+                for rr, cnt in sorted(D['core_ev_deny_reasons'].items(), key=lambda x: -x[1]):
+                    pct = cnt / max(core_ev_total, 1)
+                    st.progress(pct, text=f"{rr}: {cnt} ({pct*100:.0f}%)")
         else:
             st.caption("No skips")
 
@@ -890,15 +1060,30 @@ with tab_dashboard:
         st.markdown("**Recent Full-Window Waits**")
         wait_rows = []
         for x in reversed(D['last_full_window_waits'][-8:]):
+            wait_slug = str(x.get('market_slug', '') or '')
+            committed = any(str(e.get('market_slug', '') or '') == wait_slug for e in D['last_entered']) if wait_slug else False
             wait_rows.append({
                 "Time": x.get('timestamp', ''),
                 "Coin": x.get('coin', ''),
                 "PM": f"{x.get('pm', 0):.3f}",
                 "Time Left": f"{x.get('time_left', 0):.1f}s",
                 "Core EV": x.get('core_ev_decision', ''),
+                "Commit?": "Yes" if committed else "No",
                 "Reason": str(x.get('full_window_entry_reason', x.get('reason', '')) or '')[:64],
             })
         st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=220)
+
+    # ---- SHADOW LIVE ----
+    st.markdown("---")
+    st.markdown("#### Shadow Live")
+    sh1, sh2, sh3, sh4, sh5 = st.columns(5)
+    shadow_counts = D['shadow_live_counts']
+    sh1.metric("Mode", D['shadow_live_mode'])
+    sh2.metric("Strong/Allow", shadow_counts.get('strong_allow', 0) + shadow_counts.get('allow', 0))
+    sh3.metric("Watch", shadow_counts.get('watch', 0))
+    sh4.metric("Deny", shadow_counts.get('deny', 0))
+    sh5.metric("Shadow Signals", D['shadow_live_total'])
+    st.caption("Shadow live decisions are currently for observation/controlled rollout, depending on bot settings.")
 
     # ---- SIGNALS TABLE ----
     if D['last_signals']:
@@ -1005,6 +1190,20 @@ with tab_window:
     wi6.metric("Source", D['core_ev_source_type'])
 
     st.markdown("---")
+    mw1, mw2, mw3, mw4 = st.columns(4)
+    mw1.metric("L1 Fallback Entries", D['l1_fallback_count'])
+    mw2.metric("L1 Fallback Avg Realized", f"${D['l1_fallback_avg_roi']:+.2f}" if D['l1_fallback_avg_roi'] is not None else "—")
+    mw3.metric("WAIT → ENTER", f"{D['wait_enter_count']}/{len(D['last_full_window_waits'])}")
+    mw4.metric("Micro-Allow Resolved", D['micro_allow_resolved'])
+
+    st.markdown("**Bucket Level Distribution (last 200 signals)**")
+    level_rows = [{"Bucket Level": key, "Count": count} for key, count in D['bucket_level_counts'].items() if count > 0]
+    if level_rows:
+        st.dataframe(level_rows, use_container_width=True, hide_index=True, height=180)
+    else:
+        st.caption("No bucket level data yet.")
+
+    st.markdown("---")
     rw1, rw2 = st.columns(2)
     with rw1:
         st.markdown("**Top Allow Buckets**")
@@ -1055,16 +1254,28 @@ with tab_window:
         if D['last_full_window_waits']:
             wait_rows = []
             for x in reversed(D['last_full_window_waits'][-10:]):
+                wait_slug = str(x.get("market_slug", "") or "")
+                committed = any(str(e.get("market_slug", "") or "") == wait_slug for e in D['last_entered']) if wait_slug else False
                 wait_rows.append({
                     "Time": x.get("timestamp", ""),
                     "Coin": x.get("coin", ""),
                     "Core EV": x.get("core_ev_decision", ""),
                     "Time Left": f"{x.get('time_left', 0):.1f}s",
+                    "Commit?": "Yes" if committed else "No",
                     "Reason": str(x.get("full_window_entry_reason", x.get("reason", "")) or "")[:72],
                 })
             st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=220)
         else:
             st.caption("No full-window waits yet.")
+
+    st.markdown("---")
+    st.markdown("**Micro-Allow Performance**")
+    mp1, mp2, mp3, mp4 = st.columns(4)
+    micro_wr = (D['micro_allow_wins'] / max(D['micro_allow_resolved'], 1) * 100) if D['micro_allow_resolved'] else None
+    mp1.metric("Signals", D['micro_allow_count'])
+    mp2.metric("Entered", D['micro_allow_entered'])
+    mp3.metric("Win Rate", f"{micro_wr:.0f}%" if micro_wr is not None else "—")
+    mp4.metric("Avg Realized", f"${D['micro_allow_avg_roi']:+.2f}" if D['micro_allow_avg_roi'] is not None else "—")
 
     st.markdown("---")
     st.markdown("**Window Sample History**")
@@ -1144,6 +1355,21 @@ with tab_stats:
                 bucket_rows.append({"Time Bucket": key, "Samples": count})
             st.dataframe(bucket_rows, use_container_width=True, hide_index=True, height=210)
 
+        if D['win_rate_by_time_bucket']:
+            st.markdown("**Win Rate by Time Left Bucket**")
+            wr_rows = []
+            for key, payload in D['win_rate_by_time_bucket'].items():
+                wins = int(payload.get("wins", 0) or 0)
+                losses = int(payload.get("losses", 0) or 0)
+                total = wins + losses
+                wr_rows.append({
+                    "Time Bucket": key,
+                    "Wins": wins,
+                    "Losses": losses,
+                    "Win Rate": f"{(wins / total * 100):.0f}%" if total else "—",
+                })
+            st.dataframe(wr_rows, use_container_width=True, hide_index=True, height=220)
+
         st.markdown("---")
 
         # Win rate by coin
@@ -1185,6 +1411,16 @@ with tab_stats:
                 st.progress(pct, text=f"{RL.get(rr, rr)}: {cnt} ({pct*100:.0f}%)")
         else:
             st.caption("No skip data")
+
+        st.markdown("---")
+        st.markdown("**Core EV Denial Reasons Breakdown**")
+        if D['core_ev_deny_reasons']:
+            total_core_ev_denies = sum(D['core_ev_deny_reasons'].values())
+            for rr, cnt in sorted(D['core_ev_deny_reasons'].items(), key=lambda x: -x[1]):
+                pct = cnt / max(total_core_ev_denies, 1)
+                st.progress(pct, text=f"{rr}: {cnt} ({pct*100:.0f}%)")
+        else:
+            st.caption("No Core EV deny data")
 
         # Summary
         st.markdown("---")
@@ -1253,6 +1489,25 @@ with tab_stats:
             st.metric("Realized PnL", f"${eth_realized:+.2f}")
             st.caption(f"Wins: {eth_wins} | Losses: {eth_losses}")
 
+        st.markdown("---")
+        st.markdown("**Realized PnL by Bucket Level**")
+        if D['realized_pnl_by_bucket_level']:
+            pnl_bucket_rows = []
+            for key, value in D['realized_pnl_by_bucket_level'].items():
+                pnl_bucket_rows.append({"Bucket Level": key, "Realized PnL": f"${value:+.2f}"})
+            st.dataframe(pnl_bucket_rows, use_container_width=True, hide_index=True, height=220)
+        else:
+            st.caption("No resolved PnL by bucket level yet.")
+
+        st.markdown("**Realized PnL by Core EV Decision**")
+        if D['realized_pnl_by_decision']:
+            pnl_decision_rows = []
+            for key, value in D['realized_pnl_by_decision'].items():
+                pnl_decision_rows.append({"Decision": key, "Realized PnL": f"${value:+.2f}"})
+            st.dataframe(pnl_decision_rows, use_container_width=True, hide_index=True, height=200)
+        else:
+            st.caption("No resolved PnL by decision yet.")
+
         st.caption("Statistics reset is disabled in the dashboard to protect live runtime data.")
     else:
         st.info("No statistics yet. Statistics are built from saved signals.")
@@ -1264,9 +1519,10 @@ with tab_settings:
     st.markdown("### ⚙️ Settings")
     st.markdown(
         "<div class='safe-box'><strong>Safe editing mode.</strong> "
-        "Only the active strategy parameters are shown here. Current tested values are also the dashboard defaults.</div>",
+        "Only runtime-relevant parameters for the current Core EV / full-window architecture are shown here.</div>",
         unsafe_allow_html=True,
     )
+    st.warning("Настройки применяются после ввода пароля и перезапуска бота через systemd.")
 
     settings_password = os.getenv("DASHBOARD_SETTINGS_PASSWORD", "")
     settings_unlocked = not settings_password
@@ -1274,8 +1530,9 @@ with tab_settings:
     # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
 
-    s1, s2 = st.columns(2)
+    s1, s2, s3 = st.columns(3)
     with s1:
+        st.markdown("**Bank / Mode / Sizing**")
         new_settings["bank"] = st.number_input("Банк (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("bank", 100)), step=10.0)
         new_settings["mode"] = st.selectbox("Режим", ["dry-run", "paper", "live"], index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")))
         new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
@@ -1283,24 +1540,47 @@ with tab_settings:
         new_settings["daily_loss_limit"] = st.number_input("Дневной стоп-лосс (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("daily_loss_limit", 15.0)), step=1.0)
         new_settings["daily_loss_limit_pct"] = st.slider("Дневной стоп-лосс (% от банка)", min_value=0.0, max_value=0.50, value=float(settings.get("daily_loss_limit_pct", 0.0)), step=0.05, format="%.2f")
         new_settings["dynamic_sizing"] = st.checkbox("Динамический размер ставки", value=bool(settings.get("dynamic_sizing", True)))
-        new_settings["entry_min"] = st.number_input("Вход мин (сек)", min_value=1, max_value=120, value=int(settings.get("entry_min", 10)), step=1)
-        new_settings["entry_max"] = st.number_input("Вход макс (сек)", min_value=5, max_value=300, value=int(settings.get("entry_max", 30)), step=5)
-
-    with s2:
-        new_settings["price_min_btc"] = st.number_input("BTC мин цена", min_value=0.01, max_value=1.0, value=float(settings.get("price_min_btc", 0.45)), step=0.01, format="%.2f")
-        new_settings["price_min_eth"] = st.number_input("ETH мин цена", min_value=0.01, max_value=1.0, value=float(settings.get("price_min_eth", 0.70)), step=0.01, format="%.2f")
-        new_settings["price_max"] = st.number_input("Макс цена", min_value=0.50, max_value=1.0, value=float(settings.get("price_max", 0.70)), step=0.01, format="%.2f")
-        new_settings["min_confidence"] = st.slider("Мин уверенность", min_value=0.0, max_value=1.0, value=float(settings.get("min_confidence", 0.0)), step=0.05)
-        new_settings["min_edge"] = st.number_input("Мин edge", min_value=-0.50, max_value=0.50, value=float(settings.get("min_edge", -0.05)), step=0.01, format="%.2f")
-        new_settings["indicator_confirm_min"] = st.number_input("Мин 1m confirm", min_value=-1.0, max_value=1.0, value=float(settings.get("indicator_confirm_min", 0.0)), step=0.05, format="%.2f")
-        new_settings["delta_skip"] = st.number_input("Мин дельта", min_value=0.0, max_value=0.01, value=float(settings.get("delta_skip", 0.0)), step=0.0001, format="%.4f")
-        new_settings["atr_multiplier"] = st.number_input("ATR множитель", min_value=0.5, max_value=5.0, value=float(settings.get("atr_multiplier", 1.5)), step=0.1)
         new_settings["dynamic_min_amount"] = st.number_input("Мин ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_min_amount", 5.0)), step=1.0)
         new_settings["dynamic_max_amount"] = st.number_input("Макс ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_max_amount", 15.0)), step=1.0)
         new_settings["dynamic_base_risk_pct"] = st.slider("Базовый риск", min_value=0.01, max_value=0.10, value=float(settings.get("dynamic_base_risk_pct", 0.05)), step=0.01, format="%.2f")
         new_settings["dynamic_step_bank_gain_pct"] = st.slider("Шаг роста банка", min_value=0.10, max_value=2.0, value=float(settings.get("dynamic_step_bank_gain_pct", 0.70)), step=0.05, format="%.2f")
         new_settings["dynamic_step_risk_pct"] = st.slider("Прирост риска за шаг", min_value=0.0, max_value=0.05, value=float(settings.get("dynamic_step_risk_pct", 0.01)), step=0.01, format="%.2f")
         new_settings["dynamic_max_risk_pct"] = st.slider("Макс риск", min_value=0.01, max_value=0.15, value=float(settings.get("dynamic_max_risk_pct", 0.08)), step=0.01, format="%.2f")
+
+    with s2:
+        st.markdown("**Core EV / Full-Window**")
+        new_settings["core_ev_enabled"] = st.checkbox("Core EV enabled", value=bool(settings.get("core_ev_enabled", True)))
+        new_settings["core_ev_pm_min"] = st.number_input("Base PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_min", 0.58)), step=0.01, format="%.2f")
+        new_settings["core_ev_pm_max"] = st.number_input("Base PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_max", 0.70)), step=0.01, format="%.2f")
+        new_settings["core_ev_flex_pm_min"] = st.number_input("Flex PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_min", 0.50)), step=0.01, format="%.2f")
+        new_settings["core_ev_flex_pm_max"] = st.number_input("Flex PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_max", 0.99)), step=0.01, format="%.2f")
+        new_settings["core_ev_entry_time_min"] = st.number_input("Core EV entry time min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_entry_time_min", 10)), step=1)
+        new_settings["core_ev_entry_time_max"] = st.number_input("Core EV entry time max (s)", min_value=10, max_value=305, value=int(settings.get("core_ev_entry_time_max", 305)), step=5)
+        new_settings["core_ev_time_left_min"] = st.number_input("Core EV active time-left min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_time_left_min", settings.get("core_ev_entry_time_min", 10))), step=1)
+        new_settings["core_ev_time_left_max"] = st.number_input("Core EV active time-left max (s)", min_value=1, max_value=305, value=int(settings.get("core_ev_time_left_max", 20)), step=1)
+        new_settings["full_window_core_ev_enabled"] = st.checkbox("Full-window Core EV enabled", value=bool(settings.get("full_window_core_ev_enabled", True)))
+        new_settings["full_window_core_ev_time_left_max"] = st.number_input("Full-window eval max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_core_ev_time_left_max", 180)), step=5)
+        new_settings["full_window_core_ev_min_level"] = st.selectbox("Min Core EV bucket level", ["L1", "L2", "L3"], index=["L1", "L2", "L3"].index(str(settings.get("full_window_core_ev_min_level", "L2"))))
+        new_settings["full_window_entry_confirm_ticks"] = st.number_input("Confirm ticks", min_value=1, max_value=10, value=int(settings.get("full_window_entry_confirm_ticks", 2)), step=1)
+        new_settings["full_window_entry_commit_time_left"] = st.number_input("Commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_entry_commit_time_left", 19)), step=1)
+        new_settings["full_window_entry_min_score_gain"] = st.number_input("Min score gain to keep waiting", min_value=0.0, max_value=5.0, value=float(settings.get("full_window_entry_min_score_gain", 0.15)), step=0.05, format="%.2f")
+        new_settings["full_window_micro_entry_commit_time_left"] = st.number_input("Micro commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_micro_entry_commit_time_left", 30)), step=1)
+
+    with s3:
+        st.markdown("**L1 Fallback / Risk / Trend Conflict**")
+        new_settings["full_window_l1_fallback_min_trades"] = st.number_input("L1 fallback min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_fallback_min_trades", 8)), step=1)
+        new_settings["full_window_l1_fallback_require_recent_positive"] = st.checkbox("L1 fallback require recent positive", value=bool(settings.get("full_window_l1_fallback_require_recent_positive", True)))
+        new_settings["full_window_l1_fallback_time_left_max"] = st.number_input("L1 fallback max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_l1_fallback_time_left_max", 150)), step=5)
+        new_settings["full_window_l1_strong_exception_min_trades"] = st.number_input("L1 strong exception min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_strong_exception_min_trades", 2)), step=1)
+        new_settings["full_window_l1_strong_exception_min_roi"] = st.number_input("L1 strong exception min ROI %", min_value=-100.0, max_value=500.0, value=float(settings.get("full_window_l1_strong_exception_min_roi", 50.0)), step=1.0, format="%.1f")
+        new_settings["core_ev_max_risk_pct"] = st.slider("Core EV max risk %", min_value=0.001, max_value=0.05, value=float(settings.get("core_ev_max_risk_pct", 0.02)), step=0.001, format="%.3f")
+        new_settings["core_ev_micro_risk_pct"] = st.slider("Core EV micro risk %", min_value=0.001, max_value=0.02, value=float(settings.get("core_ev_micro_risk_pct", 0.005)), step=0.001, format="%.3f")
+        new_settings["core_ev_trend_conflict_micro_delta_min_pct"] = st.number_input("Trend-conflict micro delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("core_ev_trend_conflict_micro_delta_min_pct", 0.012)), step=0.001, format="%.3f")
+        new_settings["core_ev_trend_conflict_micro_confidence_min"] = st.number_input("Trend-conflict micro confidence min", min_value=0.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_confidence_min", 0.0)), step=0.01, format="%.2f")
+        new_settings["core_ev_trend_conflict_micro_indicator_min"] = st.number_input("Trend-conflict micro indicator min", min_value=-1.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_indicator_min", -0.10)), step=0.01, format="%.2f")
+        new_settings["trend_conflict_override_delta_min_pct"] = st.number_input("Trend conflict override delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("trend_conflict_override_delta_min_pct", 0.025)), step=0.001, format="%.3f")
+        new_settings["shadow_live_mode"] = st.selectbox("Shadow live mode", ["observe", "off", "block_deny", "hybrid"], index=["observe", "off", "block_deny", "hybrid"].index(str(settings.get("shadow_live_mode", "observe"))))
+        new_settings["window_sample_logging_enabled"] = st.checkbox("Window sample logging enabled", value=bool(settings.get("window_sample_logging_enabled", True)))
 
     # ===== BUTTONS =====
     st.markdown("---")
@@ -1319,7 +1599,7 @@ with tab_settings:
         else:
             st.info("Введите пароль и затем нажмите нужную кнопку ниже")
 
-    btn_cols = st.columns([1, 1])
+    btn_cols = st.columns([1, 1, 1])
 
     with btn_cols[0]:
         if st.button("💾 Сохранить", type="primary", use_container_width=True):
@@ -1340,6 +1620,17 @@ with tab_settings:
                 st.success("✅ Восстановлены безопасные дефолтные настройки текущей стратегии.")
                 st.rerun()
 
-    st.caption("Настройки сохраняются в `settings.json` атомарно. Для применения используйте перезапуск сервиса через systemd, а не из dashboard.")
+    with btn_cols[2]:
+        if st.button("🔁 Restart bot", use_container_width=True):
+            if not settings_unlocked:
+                st.error("Введите правильный пароль для перезапуска бота")
+            else:
+                ok, detail = restart_bot_service("poly-bot-live.service")
+                if ok:
+                    st.success(f"✅ {detail}")
+                else:
+                    st.error(f"Restart failed: {detail}")
+
+    st.caption("Настройки сохраняются в `settings.json` атомарно. Для применения нужен перезапуск systemd service.")
     if not settings_password:
         st.caption("Защита настроек не включена. Чтобы включить пароль, задайте переменную `DASHBOARD_SETTINGS_PASSWORD` в systemd service.")
