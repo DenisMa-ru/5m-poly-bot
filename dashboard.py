@@ -114,6 +114,7 @@ def is_bot_running():
         return False
 
 # ===== DATA HELPERS — runtime data =====
+@st.cache_data(ttl=10, show_spinner=False)
 def load_saved_signals():
     """Load all saved signals from signals.json."""
     try:
@@ -123,6 +124,7 @@ def load_saved_signals():
         return []
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def load_window_samples():
     """Load full-window observation samples."""
     try:
@@ -132,6 +134,7 @@ def load_window_samples():
         return []
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_core_ev_rules():
     """Load runtime Core EV rulebook metadata."""
     try:
@@ -241,6 +244,7 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
         return None, None
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def fetch_polymarket_account_state() -> dict:
     """Fetch real Polymarket cash and portfolio values for dashboard display."""
     private_key = os.getenv("POLY_PRIVATE_KEY", "")
@@ -377,6 +381,7 @@ def fetch_polymarket_account_state() -> dict:
 
     return result
 
+@st.cache_data(ttl=10, show_spinner=False)
 def build_dashboard_state():
     """
     Строим состояние Dashboard из signals.json + window_samples.json.
@@ -395,23 +400,31 @@ def build_dashboard_state():
     last_full_window_waits = full_window_waits[-12:]
     last_core_ev_signals = [s for s in signals if s.get("core_ev_decision")][-10:]
 
-    core_ev_decision_counts = {"strong_allow": 0, "allow": 0, "micro_allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
-    for s in signals[-200:]:
-        decision = str(s.get("core_ev_decision", "unknown") or "unknown")
-        if decision in core_ev_decision_counts:
-            core_ev_decision_counts[decision] += 1
-        else:
-            core_ev_decision_counts["other"] += 1
+    core_ev_runtime_decisions_by_n = {}
+    core_ev_recent_rows_by_n = {}
+    for window_size in (50, 100, 200):
+        decision_counts = {"strong_allow": 0, "allow": 0, "micro_allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
+        recent_rows = []
+        scoped_signals = signals[-window_size:]
+        for s in scoped_signals:
+            decision = str(s.get("core_ev_decision", "unknown") or "unknown")
+            if decision in decision_counts:
+                decision_counts[decision] += 1
+            else:
+                decision_counts["other"] += 1
+        for s in reversed([x for x in scoped_signals if x.get("core_ev_decision")][-10:]):
+            recent_rows.append({
+                "Time": s.get("timestamp", ""),
+                "Decision": str(s.get("core_ev_decision", "") or ""),
+                "Level": str(s.get("core_ev_bucket_level", "") or ""),
+                "Time Left": f"{float(s.get('time_left', 0) or 0):.1f}s",
+                "Reason": str(s.get("core_ev_reason", s.get("reason", "")) or "")[:84],
+            })
+        core_ev_runtime_decisions_by_n[window_size] = decision_counts
+        core_ev_recent_rows_by_n[window_size] = recent_rows
 
-    core_ev_recent_rows = []
-    for s in reversed(last_core_ev_signals):
-        core_ev_recent_rows.append({
-            "Time": s.get("timestamp", ""),
-            "Decision": str(s.get("core_ev_decision", "") or ""),
-            "Level": str(s.get("core_ev_bucket_level", "") or ""),
-            "Time Left": f"{float(s.get('time_left', 0) or 0):.1f}s",
-            "Reason": str(s.get("core_ev_reason", s.get("reason", "")) or "")[:84],
-        })
+    core_ev_decision_counts = core_ev_runtime_decisions_by_n[200]
+    core_ev_recent_rows = core_ev_recent_rows_by_n[200]
 
     bucket_rows = [{"key": key, **stats} for key, stats in (core_ev_rules.get("buckets", {}) or {}).items() if isinstance(stats, dict)]
     rulebook_decisions = {"strong_allow": 0, "allow": 0, "watch": 0, "deny": 0, "unknown": 0, "other": 0}
@@ -659,7 +672,9 @@ def build_dashboard_state():
         "core_ev_generated_at": str(core_ev_rules.get("generated_at", "unknown") or "unknown"),
         "core_ev_resolved_eligible": int(core_ev_rules.get("resolved_eligible_signals", 0) or 0),
         "core_ev_runtime_decisions": core_ev_decision_counts,
+        "core_ev_runtime_decisions_by_n": core_ev_runtime_decisions_by_n,
         "core_ev_deny_reasons": core_ev_deny_reasons,
+        "core_ev_recent_rows_by_n": core_ev_recent_rows_by_n,
         "bucket_level_counts": bucket_level_counts,
         "window_time_bucket_counts": time_bucket_counts,
         "top_allow_buckets": top_allow_buckets[:10],
@@ -691,6 +706,7 @@ _P_STATE = {
     "closed": re.compile(r'Market closed'),
 }
 
+@st.cache_data(ttl=5, show_spinner=False)
 def parse_log_state(path):
     """Парсим логи только для определения текущего состояния бота."""
     if not path or not path.exists():
@@ -718,6 +734,7 @@ def parse_log_state(path):
             state['err'] += 1
     return state
 
+@st.cache_data(ttl=10, show_spinner=False)
 def load_settings():
     """Load bot settings."""
     try:
@@ -806,21 +823,18 @@ D = build_dashboard_state()  # Dashboard state из signals.json
 L = parse_log_state(Path(os.environ.get("BOT_LOG_FILE", str(DEFAULT_LOG))))  # Log state только для статуса
 
 # ===== TABS =====
-tab_dashboard, tab_history, tab_window, tab_stats, tab_settings = st.tabs([
-    "📊 Dashboard",
-    "📋 History",
-    "🪟 Window Intelligence",
-    "📈 Statistics",
-    "⚙️ Settings",
+tab_dashboard, tab_stats, tab_settings = st.tabs([
+    "📊 Обзор",
+    "📈 Статистика",
+    "⚙️ Настройки",
 ])
 
 # ==========================================
 # TAB 1: DASHBOARD
 # ==========================================
 with tab_dashboard:
-    # ---- CONTROL BAR ----
-    st.markdown("### 🎮 Bot Status")
-    ctrl_cols = st.columns([1, 4, 1])
+    st.markdown("### 📊 Обзор")
+    ctrl_cols = st.columns([1, 3, 1])
 
     with ctrl_cols[0]:
         status_label = "🟢 Running" if bot_running else "🔴 Stopped"
@@ -828,8 +842,8 @@ with tab_dashboard:
 
     with ctrl_cols[1]:
         st.markdown(
-            "<div class='safe-box'><strong>Managed by systemd.</strong> "
-            "The dashboard is read-only for runtime control to avoid duplicate bot processes and broken signal history.</div>",
+            "<div class='safe-box'><strong>Лёгкий обзор бота.</strong> "
+            "Ключевые метрики, последние сделки и быстрый refresh без перегруженной аналитики.</div>",
             unsafe_allow_html=True,
         )
 
@@ -863,497 +877,105 @@ with tab_dashboard:
     if account.get('source_error'):
         st.caption(f"Polymarket sync note: {account['source_error']}")
 
-    st.markdown("---")
-
-    # ---- STATUS BAR ----
     ico = {'sleeping': '💤', 'active': '⚡', 'start': '🚀'}.get(L['state'], '⚪')
-    st.markdown(f"### {ico} {L['state'].upper()} — Next: {L['nc']} | Sleep: {L['sleep']}s")
+    st.caption(f"{ico} {L['state'].upper()} | Next: {L['nc']} | Sleep: {L['sleep']}s")
 
-    skip_rate = D['total_skipped'] / max(D['total_signals'], 1) * 100
-    a1, a2, a3, a4, a5, a6 = st.columns(6)
-    a1.metric("Signals", D['total_signals'])
-    a2.metric("Rounds", L['round'])
-    a3.metric("Entries", D['total_entered'])
-    a4.metric("Binance", "❌ Err" if L['err'] else "✅ OK")
-    a5.metric("Skip Rate", f"{skip_rate:.0f}%")
-    a6.metric("Updated", D['time'])
-
-    # ---- WALLET ----
     st.markdown("---")
     pnl_v = D['realized_pnl']
-    st.markdown("#### Wallet")
-    w1, w2, w3, w4 = st.columns(4)
-    w1.metric(
-        "💵 Polymarket Cash" if is_live_mode else "💵 Polymarket Cash (ref)",
-        f"${cash:.2f}" if cash is not None else "—"
-    )
-    w2.metric(
-        "🧾 Polymarket Portfolio" if is_live_mode else "🧾 Polymarket Portfolio (ref)",
-        f"${portfolio:.2f}" if portfolio is not None else "—"
-    )
-    w3.metric("💸 Spendable", f"${spendable:.2f}" if spendable is not None else "—")
-    w4.metric("🎁 Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—")
+    total_resolved = D['wins'] + D['losses']
+    trade_roi_pct = (pnl_v / D['bank_start'] * 100) if D['bank_start'] else None
+    win_rate = (D['wins'] / total_resolved * 100) if total_resolved else None
 
-    # ---- STRATEGY ----
-    st.markdown("#### Strategy")
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric("🏁 Start Bank", f"${D['bank_start']:.2f}")
-    s2.metric(
-        "🤖 Strategy Bank",
-        f"${bank:.2f}",
-        delta=f"{bank_change:+.2f}",
-        delta_color="normal" if bank_change >= 0 else "inverse"
-    )
-    s3.metric("💰 Realized PnL", f"${pnl_v:+.2f}",
-              delta=f"{pnl_v:+.2f}",
-              delta_color="normal" if pnl_v >= 0 else "inverse")
-    s4.metric(
-        "📈 Portfolio vs Start" if is_live_mode else "📈 Portfolio vs Start (ref)",
-        f"${net_result:+.2f}" if net_result is not None else "—",
-        delta=f"{roi_pct:+.2f}%" if roi_pct is not None else None,
-        delta_color="normal" if net_result is None or net_result >= 0 else "inverse",
-    )
-    st.caption(
-        "Live mode: Polymarket Cash/Portfolio are real wallet values; "
-        "Strategy Bank and Realized PnL come from resolved bot signals. "
-        "Portfolio vs Start = current Polymarket portfolio minus the starting bank from Settings."
-        if is_live_mode else
-        "Paper / dry-run mode: Strategy Bank and Realized PnL are simulated from bot signals. "
-        "Polymarket Cash/Portfolio are shown only as reference and are not changed by simulated trades."
-    )
+    o1, o2, o3, o4, o5, o6 = st.columns(6)
+    o1.metric("🏁 Стартовый банк", f"${D['bank_start']:.2f}")
+    o2.metric("💼 Текущий банк", f"${bank:.2f}", delta=f"{bank_change:+.2f}")
+    o3.metric("💰 Realized PnL", f"${pnl_v:+.2f}")
+    o4.metric("📈 ROI", f"{trade_roi_pct:+.2f}%" if trade_roi_pct is not None else "—")
+    o5.metric("🎯 Сделки", D['total_entered'])
+    o6.metric("✅ Win rate", f"{win_rate:.0f}%" if win_rate is not None else "—")
 
-    # ---- CORE EV / FULL-WINDOW ----
     st.markdown("---")
-    st.markdown("#### Core EV / Full-Window")
-    ce1, ce2, ce3, ce4, ce5, ce6 = st.columns(6)
-    rulebook_counts = D['core_ev_rulebook_decisions']
-    runtime_counts = D['core_ev_runtime_decisions']
-    ce1.metric("Window Samples", D['total_window_samples'])
-    ce2.metric("Resolved Samples", D['resolved_window_samples'])
-    ce3.metric("Rulebook Buckets", D['core_ev_rulebook_bucket_count'])
-    ce4.metric("Rulebook Eligible", D['core_ev_resolved_eligible'])
-    ce5.metric("Runtime Allow", runtime_counts.get('strong_allow', 0) + runtime_counts.get('allow', 0))
-    ce6.metric("Runtime Deny", runtime_counts.get('deny', 0))
-    st.caption(
-        f"Rulebook source: {D['core_ev_source_type']} | generated: {D['core_ev_generated_at']} | "
-        f"allow={rulebook_counts.get('strong_allow', 0) + rulebook_counts.get('allow', 0)} "
-        f"watch={rulebook_counts.get('watch', 0)} deny={rulebook_counts.get('deny', 0)} unknown={rulebook_counts.get('unknown', 0)}"
-    )
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Wins", D['wins'])
+    g2.metric("Losses", D['losses'])
+    g3.metric("Pending", D['pending'])
+    g4.metric("Mode", mode)
 
-    st.markdown("**Core EV Runtime (last 200 signals)**")
-    rt1, rt2, rt3, rt4 = st.columns(4)
-    rt1.metric("ALLOW", runtime_counts.get('allow', 0))
-    rt2.metric("STRONG_ALLOW", runtime_counts.get('strong_allow', 0))
-    rt3.metric("MICRO_ALLOW", runtime_counts.get('micro_allow', 0))
-    rt4.metric("DENY", runtime_counts.get('deny', 0))
-
-    if D['core_ev_recent_rows']:
-        st.markdown("**Recent Core EV Decisions**")
-        st.dataframe(D['core_ev_recent_rows'], use_container_width=True, hide_index=True, height=240)
-
-    # ---- WIN/LOSS (only when resolved trades exist) ----
-    if D['wins'] > 0 or D['losses'] > 0:
-        st.markdown("#### Strategy Quality")
-        q1, q2, q3 = st.columns(3)
-        win_rate = D['wins'] / max(D['wins'] + D['losses'], 1) * 100
-        q1.metric("✅ Wins", D['wins'])
-        q2.metric("❌ Losses", D['losses'])
-        q3.metric("🎯 Win Rate", f"{win_rate:.0f}%")
-
-    # ---- PRICES ----
     st.markdown("---")
-    p1, p2 = st.columns(2)
-    p1.metric("BTC", f"${D['btc_price']:.0f}" if D['btc_price'] else "—")
-    p2.metric("ETH", f"${D['eth_price']:.0f}" if D['eth_price'] else "—")
-
-    # ---- PM PRICES + SKIP REASONS ----
-    st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Polymarket**")
-        base_pm_min = float(settings.get("core_ev_pm_min", 0.58) or 0.58)
-        base_pm_max = float(settings.get("core_ev_pm_max", 0.70) or 0.70)
-        flex_pm_min = float(settings.get("core_ev_flex_pm_min", base_pm_min) or base_pm_min)
-        flex_pm_max = float(settings.get("core_ev_flex_pm_max", 0.99) or 0.99)
-        for sig, name in [
-            (D['btc_pm'], "BTC"),
-            (D['eth_pm'], "ETH"),
-        ]:
-            if sig and sig.get('pm'):
-                p = sig['pm']
-                if base_pm_min <= p <= base_pm_max:
-                    col = "#51cf66"
-                    lbl = "✓"
-                    zone = "base"
-                elif flex_pm_min <= p <= flex_pm_max:
-                    col = "#f1c40f"
-                    lbl = "~"
-                    zone = "flex"
-                else:
-                    col = "#ff6b6b"
-                    lbl = "✗"
-                    zone = "out"
-                st.markdown(f'`{name}` <span style="color:{col};font-weight:bold">{p:.3f} {lbl}</span> '
-                            f'<span style="color:{col}">[{zone}]</span> '
-                            f'δ{sig.get("delta", 0):.2f}% C{int(sig.get("confidence", 0)*100)}%',
-                            unsafe_allow_html=True)
-            else:
-                st.markdown(f"`{name}` —")
-        st.caption(f"Base PM zone: {base_pm_min:.2f}-{base_pm_max:.2f} | Flex PM zone: {flex_pm_min:.2f}-{flex_pm_max:.2f}")
-    with c2:
-        if D['skip_reasons']:
-            st.markdown("**Why skipping**")
-            tot = D['total_skipped']
-            for rr, cnt in sorted(D['skip_reasons'].items(), key=lambda x: -x[1]):
-                pct = cnt / max(tot, 1)
-                st.progress(pct, text=f"{RL.get(rr, rr)}: {cnt} ({pct*100:.0f}%)")
-            if D['core_ev_deny_reasons']:
-                st.markdown("**Core EV deny reasons**")
-                core_ev_total = sum(D['core_ev_deny_reasons'].values())
-                for rr, cnt in sorted(D['core_ev_deny_reasons'].items(), key=lambda x: -x[1]):
-                    pct = cnt / max(core_ev_total, 1)
-                    st.progress(pct, text=f"{rr}: {cnt} ({pct*100:.0f}%)")
-        else:
-            st.caption("No skips")
-
-    # ---- TRADES + SKIP CHIPS ----
-    if D['last_entered'] or D['last_skipped']:
-        st.markdown("---")
-        d1, d2 = st.columns(2)
-        with d1:
-            if D['last_entered']:
-                st.markdown("**Last Entries**")
-                trade_html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">'
-                for x in reversed(D['last_entered'][-8:]):
-                    pnl = x.get("pnl_expected", 0)
-                    sign = "+" if pnl >= 0 else ""
-                    trade_html += f'<span class="trade-chip">{x.get("coin", "")} {sign}${pnl:.2f}</span>'
-                trade_html += '</div>'
-                st.markdown(trade_html, unsafe_allow_html=True)
-        with d2:
-            if D['last_skipped']:
-                st.markdown("**Last Skips**")
-                skip_html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">'
-                for x in reversed(D['last_skipped'][-12:]):
-                    reason = x.get("reason", "?")[:20]
-                    skip_html += f'<span class="skip-chip">{x.get("coin", "")} {reason}</span>'
-                skip_html += '</div>'
-                st.markdown(skip_html, unsafe_allow_html=True)
-
-    if D['last_shadow_live']:
-        st.markdown("---")
-        st.markdown("**Recent Shadow Decisions**")
-        shadow_rows = []
-        for x in reversed(D['last_shadow_live'][-8:]):
-            shadow_rows.append({
-                "Time": x.get('timestamp', ''),
-                "Coin": x.get('coin', ''),
-                "Decision": x.get('shadow_live_decision', ''),
-                "Profile": x.get('shadow_entry_profile', ''),
-                "Mode": x.get('shadow_live_mode', ''),
-                "Reason": str(x.get('shadow_live_reason', '') or '')[:48],
-            })
-        st.dataframe(shadow_rows, use_container_width=True, hide_index=True, height=220)
-
-    if D['last_full_window_waits']:
-        st.markdown("---")
-        st.markdown("**Recent Full-Window Waits**")
-        wait_rows = []
-        for x in reversed(D['last_full_window_waits'][-8:]):
-            wait_slug = str(x.get('market_slug', '') or '')
-            committed = any(str(e.get('market_slug', '') or '') == wait_slug for e in D['last_entered']) if wait_slug else False
-            wait_rows.append({
-                "Time": x.get('timestamp', ''),
-                "Coin": x.get('coin', ''),
-                "PM": f"{x.get('pm', 0):.3f}",
-                "Time Left": f"{x.get('time_left', 0):.1f}s",
-                "Core EV": x.get('core_ev_decision', ''),
-                "Commit?": "Yes" if committed else "No",
-                "Reason": str(x.get('full_window_entry_reason', x.get('reason', '')) or '')[:64],
-            })
-        st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=220)
-
-    # ---- SHADOW LIVE ----
-    st.markdown("---")
-    st.markdown("#### Shadow Live")
-    sh1, sh2, sh3, sh4, sh5 = st.columns(5)
-    shadow_counts = D['shadow_live_counts']
-    sh1.metric("Mode", D['shadow_live_mode'])
-    sh2.metric("Strong/Allow", shadow_counts.get('strong_allow', 0) + shadow_counts.get('allow', 0))
-    sh3.metric("Watch", shadow_counts.get('watch', 0))
-    sh4.metric("Deny", shadow_counts.get('deny', 0))
-    sh5.metric("Shadow Signals", D['shadow_live_total'])
-    st.caption("Shadow live decisions are currently for observation/controlled rollout, depending on bot settings.")
-
-    # ---- SIGNALS TABLE ----
-    if D['last_signals']:
-        with st.expander(f"📋 Last Signals ({len(D['last_signals'])})", expanded=False):
-            rows = []
-            for x in reversed(D['last_signals']):
-                rows.append({
-                    "Coin": x.get('coin', ''),
-                    "Side": x.get('side', ''),
-                    "PM": f"{x.get('pm', 0):.3f}",
-                    "Δ%": f"{x.get('delta', 0):.3f}",
-                    "Conf%": f"{x.get('confidence', 0)*100:.0f}",
-                    "CoreEV": x.get('core_ev_decision', ''),
-                    "FW Reason": str(x.get('full_window_entry_reason', '') or '')[:24],
-                    "Price": f"{x.get('price', 0):.0f}",
-                    "Shadow": x.get('shadow_live_decision', ''),
-                    "Entered": "✅" if x.get("entered") else "❌",
-                })
-            st.dataframe(rows, use_container_width=True, hide_index=True, height=200)
-
-    if D['last_window_samples']:
-        with st.expander(f"🪟 Last Window Samples ({len(D['last_window_samples'])})", expanded=False):
-            rows = []
-            for x in reversed(D['last_window_samples']):
-                rows.append({
-                    "Time": x.get('timestamp', ''),
-                    "Coin": x.get('coin', ''),
-                    "PM": f"{x.get('pm', 0):.3f}",
-                    "Δ%": f"{x.get('delta', 0):.3f}",
-                    "Time Left": f"{x.get('time_left', 0):.1f}s",
-                    "Tier": x.get('signal_tier', ''),
-                    "CoreEV": x.get('core_ev_decision', ''),
-                    "Shadow": x.get('shadow_live_decision', ''),
-                    "Outcome": x.get('counterfactual_result', ''),
-                })
-            st.dataframe(rows, use_container_width=True, hide_index=True, height=220)
-
-# ==========================================
-# TAB 2: HISTORY
-# ==========================================
-with tab_history:
-    st.markdown("### 📋 All Signals History")
-
-    all_signals = load_saved_signals()
-
-    if all_signals:
-        st.caption(f"Total signals saved: {len(all_signals)}")
-
-        # Filter controls
-        f1, f2, f3 = st.columns(3)
-        with f1:
-            coin_filter = st.selectbox("Coin", ["All", "BTC", "ETH"], key="hf_coin")
-        with f2:
-            side_filter = st.selectbox("Side", ["All", "Up", "Down"], key="hf_side")
-        with f3:
-            show_count = st.slider("Show last N", 10, 500, 50, key="hf_count")
-
-        filtered = all_signals
-        if coin_filter != "All":
-            filtered = [s for s in filtered if s.get("coin") == coin_filter]
-        if side_filter != "All":
-            filtered = [s for s in filtered if s.get("side") == side_filter]
-        filtered = filtered[-show_count:]
-
-        if filtered:
-            rows = []
-            for x in reversed(filtered):
-                rows.append({
-                    "Time": x.get("timestamp", ""),
-                    "Coin": x.get("coin", ""),
-                    "Side": x.get("side", ""),
-                    "PM Price": f"{x.get('pm', 0):.3f}",
-                    "Delta %": f"{x.get('delta', 0):.3f}",
-                    "Confidence": f"{x.get('confidence', 0):.0%}",
-                    "Price": f"{x.get('price', 0):.0f}",
-                    "Seconds Left": f"{x.get('time_left', 0):.0f}s",
-                    "Shadow Mode": x.get("shadow_live_mode", ""),
-                    "Shadow Decision": x.get("shadow_live_decision", ""),
-                    "Shadow Profile": x.get("shadow_entry_profile", ""),
-                    "Entered": "✅" if x.get("entered") else "❌",
-                    "Reason": x.get("reason", "")[:50],
-                })
-            st.dataframe(rows, use_container_width=True, hide_index=True, height=400)
-        else:
-            st.info("No signals match filter")
-
-        st.caption("History reset is disabled in the dashboard to protect live runtime data.")
+    st.markdown("#### Последние 5 сделок")
+    recent_trade_rows = []
+    for x in reversed(D['last_entered'][-5:]):
+        realized = x.get("realized_pnl")
+        status = "WIN" if x.get("won") is True else "LOSS" if x.get("won") is False else "PENDING"
+        recent_trade_rows.append({
+            "Time": x.get("timestamp", ""),
+            "Coin": x.get("coin", ""),
+            "Side": x.get("side", ""),
+            "PnL": f"${float(realized or 0):+.2f}" if realized is not None else "—",
+            "Status": status,
+        })
+    if recent_trade_rows:
+        st.dataframe(recent_trade_rows, use_container_width=True, hide_index=True, height=220)
     else:
-        st.info("No saved signals yet. Signals are saved when the bot processes them.")
-
-# ==========================================
-# TAB 3: WINDOW INTELLIGENCE
-# ==========================================
-with tab_window:
-    st.markdown("### 🪟 Window Intelligence")
-    st.caption("Full-window observation flow, Core EV rulebook state, and best-entry wait logic.")
-
-    wi1, wi2, wi3, wi4, wi5, wi6 = st.columns(6)
-    wi1.metric("Samples", D['total_window_samples'])
-    wi2.metric("Resolved", D['resolved_window_samples'])
-    wi3.metric("Rulebook Buckets", D['core_ev_rulebook_bucket_count'])
-    wi4.metric("Eligible", D['core_ev_resolved_eligible'])
-    wi5.metric("Recent Waits", len(D['last_full_window_waits']))
-    wi6.metric("Source", D['core_ev_source_type'])
+        st.caption("Сделок пока нет.")
 
     st.markdown("---")
-    mw1, mw2, mw3, mw4 = st.columns(4)
-    mw1.metric("L1 Fallback Entries", D['l1_fallback_count'])
-    mw2.metric("L1 Fallback Avg Realized", f"${D['l1_fallback_avg_roi']:+.2f}" if D['l1_fallback_avg_roi'] is not None else "—")
-    mw3.metric("WAIT → ENTER", f"{D['wait_enter_count']}/{len(D['last_full_window_waits'])}")
-    mw4.metric("Micro-Allow Resolved", D['micro_allow_resolved'])
+    quick1, quick2, quick3, quick4 = st.columns(4)
+    quick1.metric("BTC", f"${D['btc_price']:.0f}" if D['btc_price'] else "—")
+    quick2.metric("ETH", f"${D['eth_price']:.0f}" if D['eth_price'] else "—")
+    quick3.metric("Signals", D['total_signals'])
+    quick4.metric("Binance", "❌ Err" if L['err'] else "✅ OK")
 
-    st.markdown("**Bucket Level Distribution (last 200 signals)**")
-    level_rows = [{"Bucket Level": key, "Count": count} for key, count in D['bucket_level_counts'].items() if count > 0]
-    if level_rows:
-        st.dataframe(level_rows, use_container_width=True, hide_index=True, height=180)
-    else:
-        st.caption("No bucket level data yet.")
+    with st.expander("Показать дополнительные runtime-метрики", expanded=False):
+        extra1, extra2, extra3, extra4 = st.columns(4)
+        extra1.metric("Polymarket Cash", f"${cash:.2f}" if cash is not None else "—")
+        extra2.metric("Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—")
+        extra3.metric("Spendable", f"${spendable:.2f}" if spendable is not None else "—")
+        extra4.metric("Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—")
 
-    st.markdown("---")
-    rw1, rw2 = st.columns(2)
-    with rw1:
-        st.markdown("**Top Allow Buckets**")
-        if D['top_allow_buckets']:
-            allow_rows = []
-            for row in D['top_allow_buckets']:
-                allow_rows.append({
-                    "Decision": row.get("decision", ""),
-                    "Trades": row.get("trades", 0),
-                    "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
-                    "Recent ROI": f"{float(row.get('recent_roi', 0) or 0):+.1f}%",
-                    "Bucket": str(row.get("key", ""))[:92],
-                })
-            st.dataframe(allow_rows, use_container_width=True, hide_index=True, height=260)
-        else:
-            st.caption("No allow buckets yet.")
-
-    with rw2:
-        st.markdown("**Top Deny Buckets**")
-        if D['top_deny_buckets']:
-            deny_rows = []
-            for row in D['top_deny_buckets']:
-                deny_rows.append({
-                    "Decision": row.get("decision", ""),
-                    "Trades": row.get("trades", 0),
-                    "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
-                    "Recent ROI": f"{float(row.get('recent_roi', 0) or 0):+.1f}%",
-                    "Bucket": str(row.get("key", ""))[:92],
-                })
-            st.dataframe(deny_rows, use_container_width=True, hide_index=True, height=260)
-        else:
-            st.caption("No deny buckets yet.")
-
-    st.markdown("---")
-    tw1, tw2 = st.columns(2)
-    with tw1:
-        st.markdown("**Recent Timing Coverage**")
-        if D['window_time_bucket_counts']:
-            timing_rows = []
-            for key, count in sorted(D['window_time_bucket_counts'].items(), key=lambda item: item[0]):
-                timing_rows.append({"Time Bucket": key, "Samples": count})
-            st.dataframe(timing_rows, use_container_width=True, hide_index=True, height=220)
-        else:
-            st.caption("No timing data yet.")
-
-    with tw2:
-        st.markdown("**Recent Full-Window Wait Reasons**")
         if D['last_full_window_waits']:
             wait_rows = []
-            for x in reversed(D['last_full_window_waits'][-10:]):
-                wait_slug = str(x.get("market_slug", "") or "")
-                committed = any(str(e.get("market_slug", "") or "") == wait_slug for e in D['last_entered']) if wait_slug else False
+            for x in reversed(D['last_full_window_waits'][-5:]):
                 wait_rows.append({
-                    "Time": x.get("timestamp", ""),
-                    "Coin": x.get("coin", ""),
-                    "Core EV": x.get("core_ev_decision", ""),
+                    "Time": x.get('timestamp', ''),
+                    "Coin": x.get('coin', ''),
+                    "Core EV": x.get('core_ev_decision', ''),
                     "Time Left": f"{x.get('time_left', 0):.1f}s",
-                    "Commit?": "Yes" if committed else "No",
-                    "Reason": str(x.get("full_window_entry_reason", x.get("reason", "")) or "")[:72],
+                    "Reason": str(x.get('full_window_entry_reason', x.get('reason', '')) or '')[:56],
                 })
-            st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=220)
-        else:
-            st.caption("No full-window waits yet.")
-
-    st.markdown("---")
-    st.markdown("**Micro-Allow Performance**")
-    mp1, mp2, mp3, mp4 = st.columns(4)
-    micro_wr = (D['micro_allow_wins'] / max(D['micro_allow_resolved'], 1) * 100) if D['micro_allow_resolved'] else None
-    mp1.metric("Signals", D['micro_allow_count'])
-    mp2.metric("Entered", D['micro_allow_entered'])
-    mp3.metric("Win Rate", f"{micro_wr:.0f}%" if micro_wr is not None else "—")
-    mp4.metric("Avg Realized", f"${D['micro_allow_avg_roi']:+.2f}" if D['micro_allow_avg_roi'] is not None else "—")
-
-    st.markdown("---")
-    st.markdown("**Window Sample History**")
-    window_samples = load_window_samples()
-    if window_samples:
-        wf1, wf2, wf3, wf4 = st.columns(4)
-        with wf1:
-            coin_filter = st.selectbox("Coin", ["All", "BTC", "ETH"], key="ws_coin")
-        with wf2:
-            core_filter = st.selectbox("Core EV", ["All", "strong_allow", "allow", "watch", "deny", "unknown"], key="ws_core")
-        with wf3:
-            outcome_filter = st.selectbox("Outcome", ["All", "WIN", "LOSS", "Unresolved"], key="ws_outcome")
-        with wf4:
-            sample_count = st.slider("Show last N samples", 20, 500, 80, key="ws_count")
-
-        filtered_samples = window_samples
-        if coin_filter != "All":
-            filtered_samples = [s for s in filtered_samples if s.get("coin") == coin_filter]
-        if core_filter != "All":
-            filtered_samples = [s for s in filtered_samples if str(s.get("core_ev_decision", "unknown") or "unknown") == core_filter]
-        if outcome_filter == "WIN":
-            filtered_samples = [s for s in filtered_samples if str(s.get("counterfactual_result", "")) == "WIN"]
-        elif outcome_filter == "LOSS":
-            filtered_samples = [s for s in filtered_samples if str(s.get("counterfactual_result", "")) == "LOSS"]
-        elif outcome_filter == "Unresolved":
-            filtered_samples = [s for s in filtered_samples if s.get("pnl_if_entered") is None]
-
-        sample_rows = []
-        for x in reversed(filtered_samples[-sample_count:]):
-            sample_rows.append({
-                "Time": x.get("timestamp", ""),
-                "Coin": x.get("coin", ""),
-                "Side": x.get("side", ""),
-                "PM": f"{x.get('pm', 0):.3f}",
-                "Δ%": f"{x.get('delta', 0):.3f}",
-                "Conf%": f"{x.get('confidence', 0) * 100:.0f}",
-                "Time Left": f"{x.get('time_left', 0):.1f}s",
-                "Tier": x.get("signal_tier", ""),
-                "Core EV": x.get("core_ev_decision", ""),
-                "Shadow": x.get("shadow_live_decision", ""),
-                "Outcome": x.get("counterfactual_result", ""),
-            })
-        st.dataframe(sample_rows, use_container_width=True, hide_index=True, height=360)
-    else:
-        st.info("No window samples yet. Let the updated bot observe more windows.")
+            st.markdown("**Последние ожидания full-window**")
+            st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=180)
 
 # ==========================================
 # TAB 4: STATISTICS
 # ==========================================
 with tab_stats:
     st.markdown("### 📈 Statistics")
-    st.caption("Данные из signals.json + window_samples.json — синхронизированы с текущей full-window Core EV версией бота")
+    st.caption("Глубокая аналитика по Core EV, отказам и времени входа.")
 
     if D['total_signals'] > 0:
+        stat_n = st.selectbox("Период Core EV runtime", [50, 100, 200], index=2)
+        runtime_counts = D['core_ev_runtime_decisions_by_n'].get(stat_n, D['core_ev_runtime_decisions'])
+        runtime_rows = D['core_ev_recent_rows_by_n'].get(stat_n, D['core_ev_recent_rows'])
         s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Total Signals", D['total_signals'])
-        s2.metric("BTC Signals", len(D['btc_signals']))
-        s3.metric("ETH Signals", len(D['eth_signals']))
-        s4.metric("Entries", D['total_entered'])
+        s1.metric("Signals", D['total_signals'])
+        s2.metric("Entries", D['total_entered'])
+        s3.metric("Resolved Windows", D['resolved_window_samples'])
+        s4.metric("Rulebook Buckets", D['core_ev_rulebook_bucket_count'])
 
         st.markdown("---")
 
-        st.markdown("**Core EV / Full-Window Summary**")
-        fw1, fw2, fw3, fw4, fw5, fw6 = st.columns(6)
-        fw1.metric("Window Samples", D['total_window_samples'])
-        fw2.metric("Resolved Samples", D['resolved_window_samples'])
-        fw3.metric("Rulebook Buckets", D['core_ev_rulebook_bucket_count'])
-        fw4.metric("Rulebook Eligible", D['core_ev_resolved_eligible'])
-        fw5.metric("Rulebook Allow", D['core_ev_rulebook_decisions'].get('strong_allow', 0) + D['core_ev_rulebook_decisions'].get('allow', 0))
-        fw6.metric("Rulebook Deny", D['core_ev_rulebook_decisions'].get('deny', 0))
-        st.caption(f"Source: {D['core_ev_source_type']} | Generated: {D['core_ev_generated_at']}")
+        st.markdown(f"**Core EV решения за последние {stat_n} сигналов**")
+        rt1, rt2, rt3, rt4 = st.columns(4)
+        rt1.metric("ALLOW", runtime_counts.get('allow', 0))
+        rt2.metric("STRONG_ALLOW", runtime_counts.get('strong_allow', 0))
+        rt3.metric("MICRO_ALLOW", runtime_counts.get('micro_allow', 0))
+        rt4.metric("DENY", runtime_counts.get('deny', 0))
 
-        if D['window_time_bucket_counts']:
-            st.markdown("**Recent Window Sample Timing**")
-            bucket_rows = []
-            for key, count in sorted(D['window_time_bucket_counts'].items(), key=lambda item: item[0]):
-                bucket_rows.append({"Time Bucket": key, "Samples": count})
-            st.dataframe(bucket_rows, use_container_width=True, hide_index=True, height=210)
+        if runtime_rows:
+            st.dataframe(runtime_rows, use_container_width=True, hide_index=True, height=240)
+
+        st.markdown("---")
 
         if D['win_rate_by_time_bucket']:
             st.markdown("**Win Rate by Time Left Bucket**")
@@ -1371,48 +993,6 @@ with tab_stats:
             st.dataframe(wr_rows, use_container_width=True, hide_index=True, height=220)
 
         st.markdown("---")
-
-        # Win rate by coin
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**BTC Stats**")
-            if D['btc_entered']:
-                st.metric("Entries", len(D['btc_entered']))
-                avg_conf = sum(x.get("confidence", 0) for x in D['btc_entered']) / len(D['btc_entered'])
-                st.metric("Avg Confidence", f"{avg_conf:.0%}")
-                avg_delta = sum(x.get("delta", 0) for x in D['btc_entered']) / len(D['btc_entered'])
-                st.metric("Avg Delta", f"{avg_delta:.4f}%")
-                btc_pnl = sum(x.get("pnl_expected", 0) for x in D['btc_entered'])
-                st.metric("Total PnL", f"${btc_pnl:+.2f}", delta=f"{btc_pnl:+.2f}")
-            else:
-                st.caption("No BTC entries yet")
-
-        with col2:
-            st.markdown("**ETH Stats**")
-            if D['eth_entered']:
-                st.metric("Entries", len(D['eth_entered']))
-                avg_conf = sum(x.get("confidence", 0) for x in D['eth_entered']) / len(D['eth_entered'])
-                st.metric("Avg Confidence", f"{avg_conf:.0%}")
-                avg_delta = sum(x.get("delta", 0) for x in D['eth_entered']) / len(D['eth_entered'])
-                st.metric("Avg Delta", f"{avg_delta:.4f}%")
-                eth_pnl = sum(x.get("pnl_expected", 0) for x in D['eth_entered'])
-                st.metric("Total PnL", f"${eth_pnl:+.2f}", delta=f"{eth_pnl:+.2f}")
-            else:
-                st.caption("No ETH entries yet")
-
-        st.markdown("---")
-
-        # Skip reasons breakdown
-        st.markdown("**Skip Reasons Breakdown**")
-        if D['skip_reasons']:
-            tot = D['total_skipped']
-            for rr, cnt in sorted(D['skip_reasons'].items(), key=lambda x: -x[1]):
-                pct = cnt / max(tot, 1)
-                st.progress(pct, text=f"{RL.get(rr, rr)}: {cnt} ({pct*100:.0f}%)")
-        else:
-            st.caption("No skip data")
-
-        st.markdown("---")
         st.markdown("**Core EV Denial Reasons Breakdown**")
         if D['core_ev_deny_reasons']:
             total_core_ev_denies = sum(D['core_ev_deny_reasons'].values())
@@ -1422,91 +1002,37 @@ with tab_stats:
         else:
             st.caption("No Core EV deny data")
 
-        # Summary
         st.markdown("---")
-        st.markdown("**Summary**")
-        su1, su2, su3, su4 = st.columns(4)
-        su1.metric("💵 Cash", f"${D['account']['cash']:.2f}" if D['account']['cash'] is not None else "—")
-        su2.metric("🧾 Portfolio", f"${D['account']['portfolio']:.2f}" if D['account']['portfolio'] is not None else "—")
-        su3.metric("🏦 Bot Bank", f"${D['bank_current']:.2f}", delta=f"{D['bank_current']-D['bank_start']:+.2f}")
-        su4.metric("💰 Realized PnL", f"${D['realized_pnl']:+.2f}")
+        r1, r2 = st.columns(2)
+        with r1:
+            st.markdown("**Top Allow Buckets**")
+            if D['top_allow_buckets']:
+                allow_rows = []
+                for row in D['top_allow_buckets'][:10]:
+                    allow_rows.append({
+                        "Decision": row.get("decision", ""),
+                        "Trades": row.get("trades", 0),
+                        "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
+                        "Bucket": str(row.get("key", ""))[:80],
+                    })
+                st.dataframe(allow_rows, use_container_width=True, hide_index=True, height=260)
+            else:
+                st.caption("No allow buckets yet.")
 
-        su5, su6, su7, su8 = st.columns(4)
-        su5.metric("📊 Invested", f"${D['invested']:.2f}")
-        su6.metric("📈 Expected PnL", f"${D['pnl']:+.2f}")
-        su7.metric("🔓 Spendable", f"${D['account']['spendable']:.2f}" if D['account']['spendable'] is not None else "—")
-        su8.metric("🎟 Redeemable", f"${D['account']['redeemable']:.2f}" if D['account']['redeemable'] is not None else "—")
-
-        st.markdown("---")
-        st.markdown("**Shadow Live Summary**")
-        sl1, sl2, sl3, sl4, sl5 = st.columns(5)
-        shadow_counts = D['shadow_live_counts']
-        sl1.metric("Mode", D['shadow_live_mode'])
-        sl2.metric("Allow", shadow_counts.get('strong_allow', 0) + shadow_counts.get('allow', 0))
-        sl3.metric("Watch", shadow_counts.get('watch', 0))
-        sl4.metric("Deny", shadow_counts.get('deny', 0))
-        sl5.metric("Observed", D['shadow_live_total'])
-
-        if D['last_shadow_live']:
-            shadow_recent_rows = []
-            for x in reversed(D['last_shadow_live'][-6:]):
-                shadow_recent_rows.append({
-                    "Time": x.get("timestamp", ""),
-                    "Coin": x.get("coin", ""),
-                    "Decision": x.get("shadow_live_decision", ""),
-                    "Profile": x.get("shadow_entry_profile", ""),
-                    "Reason": str(x.get("shadow_live_reason", "") or "")[:42],
-                })
-            st.dataframe(shadow_recent_rows, use_container_width=True, hide_index=True, height=190)
-
-        # Win/Loss breakdown
-        st.markdown("---")
-        st.markdown("**Win/Loss Breakdown**")
-        wl1, wl2, wl3, wl4 = st.columns(4)
-        wl1.metric("✅ Wins", D['wins'])
-        wl2.metric("❌ Losses", D['losses'])
-        total_resolved = D['wins'] + D['losses']
-        win_rate = D['wins'] / max(total_resolved, 1) * 100
-        wl3.metric("🎯 Win Rate", f"{win_rate:.0f}%" if total_resolved > 0 else "—")
-        wl4.metric("⏳ Pending Results", D['pending'])
-
-        # Per-coin realized PnL
-        st.markdown("---")
-        st.markdown("**Realized PnL by Coin**")
-        rp1, rp2 = st.columns(2)
-        with rp1:
-            st.markdown("**BTC**")
-            btc_realized = sum(x.get("realized_pnl", 0) for x in D['btc_entered'] if x.get("realized_pnl") is not None)
-            btc_wins = len([x for x in D['btc_entered'] if x.get("won") == True])
-            btc_losses = len([x for x in D['btc_entered'] if x.get("won") == False])
-            st.metric("Realized PnL", f"${btc_realized:+.2f}")
-            st.caption(f"Wins: {btc_wins} | Losses: {btc_losses}")
-        with rp2:
-            st.markdown("**ETH**")
-            eth_realized = sum(x.get("realized_pnl", 0) for x in D['eth_entered'] if x.get("realized_pnl") is not None)
-            eth_wins = len([x for x in D['eth_entered'] if x.get("won") == True])
-            eth_losses = len([x for x in D['eth_entered'] if x.get("won") == False])
-            st.metric("Realized PnL", f"${eth_realized:+.2f}")
-            st.caption(f"Wins: {eth_wins} | Losses: {eth_losses}")
-
-        st.markdown("---")
-        st.markdown("**Realized PnL by Bucket Level**")
-        if D['realized_pnl_by_bucket_level']:
-            pnl_bucket_rows = []
-            for key, value in D['realized_pnl_by_bucket_level'].items():
-                pnl_bucket_rows.append({"Bucket Level": key, "Realized PnL": f"${value:+.2f}"})
-            st.dataframe(pnl_bucket_rows, use_container_width=True, hide_index=True, height=220)
-        else:
-            st.caption("No resolved PnL by bucket level yet.")
-
-        st.markdown("**Realized PnL by Core EV Decision**")
-        if D['realized_pnl_by_decision']:
-            pnl_decision_rows = []
-            for key, value in D['realized_pnl_by_decision'].items():
-                pnl_decision_rows.append({"Decision": key, "Realized PnL": f"${value:+.2f}"})
-            st.dataframe(pnl_decision_rows, use_container_width=True, hide_index=True, height=200)
-        else:
-            st.caption("No resolved PnL by decision yet.")
+        with r2:
+            st.markdown("**Top Deny Buckets**")
+            if D['top_deny_buckets']:
+                deny_rows = []
+                for row in D['top_deny_buckets'][:10]:
+                    deny_rows.append({
+                        "Decision": row.get("decision", ""),
+                        "Trades": row.get("trades", 0),
+                        "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
+                        "Bucket": str(row.get("key", ""))[:80],
+                    })
+                st.dataframe(deny_rows, use_container_width=True, hide_index=True, height=260)
+            else:
+                st.caption("No deny buckets yet.")
 
         st.caption("Statistics reset is disabled in the dashboard to protect live runtime data.")
     else:
@@ -1517,12 +1043,8 @@ with tab_stats:
 # ==========================================
 with tab_settings:
     st.markdown("### ⚙️ Settings")
-    st.markdown(
-        "<div class='safe-box'><strong>Safe editing mode.</strong> "
-        "Only runtime-relevant parameters for the current Core EV / full-window architecture are shown here.</div>",
-        unsafe_allow_html=True,
-    )
-    st.warning("Настройки применяются после ввода пароля и перезапуска бота через systemd.")
+    st.markdown("<div class='safe-box'><strong>Основные настройки сверху.</strong> Тонкая калибровка спрятана в расширенный блок.</div>", unsafe_allow_html=True)
+    st.warning("Сохранение и перезапуск доступны только после ввода пароля, если он включён.")
 
     settings_password = os.getenv("DASHBOARD_SETTINGS_PASSWORD", "")
     settings_unlocked = not settings_password
@@ -1530,57 +1052,62 @@ with tab_settings:
     # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
 
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        st.markdown("**Bank / Mode / Sizing**")
-        new_settings["bank"] = st.number_input("Банк (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("bank", 100)), step=10.0)
+    basic1, basic2 = st.columns(2)
+    with basic1:
         new_settings["mode"] = st.selectbox("Режим", ["dry-run", "paper", "live"], index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")))
+        new_settings["amount"] = st.number_input("Размер ставки (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
+    with basic2:
+        new_settings["bank"] = st.number_input("Начальный банк (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("bank", 100)), step=10.0)
         new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
-        new_settings["amount"] = st.number_input("Ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
-        new_settings["daily_loss_limit"] = st.number_input("Дневной стоп-лосс (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("daily_loss_limit", 15.0)), step=1.0)
-        new_settings["daily_loss_limit_pct"] = st.slider("Дневной стоп-лосс (% от банка)", min_value=0.0, max_value=0.50, value=float(settings.get("daily_loss_limit_pct", 0.0)), step=0.05, format="%.2f")
-        new_settings["dynamic_sizing"] = st.checkbox("Динамический размер ставки", value=bool(settings.get("dynamic_sizing", True)))
-        new_settings["dynamic_min_amount"] = st.number_input("Мин ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_min_amount", 5.0)), step=1.0)
-        new_settings["dynamic_max_amount"] = st.number_input("Макс ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_max_amount", 15.0)), step=1.0)
-        new_settings["dynamic_base_risk_pct"] = st.slider("Базовый риск", min_value=0.01, max_value=0.10, value=float(settings.get("dynamic_base_risk_pct", 0.05)), step=0.01, format="%.2f")
-        new_settings["dynamic_step_bank_gain_pct"] = st.slider("Шаг роста банка", min_value=0.10, max_value=2.0, value=float(settings.get("dynamic_step_bank_gain_pct", 0.70)), step=0.05, format="%.2f")
-        new_settings["dynamic_step_risk_pct"] = st.slider("Прирост риска за шаг", min_value=0.0, max_value=0.05, value=float(settings.get("dynamic_step_risk_pct", 0.01)), step=0.01, format="%.2f")
-        new_settings["dynamic_max_risk_pct"] = st.slider("Макс риск", min_value=0.01, max_value=0.15, value=float(settings.get("dynamic_max_risk_pct", 0.08)), step=0.01, format="%.2f")
 
-    with s2:
-        st.markdown("**Core EV / Full-Window**")
-        new_settings["core_ev_enabled"] = st.checkbox("Core EV enabled", value=bool(settings.get("core_ev_enabled", True)))
-        new_settings["core_ev_pm_min"] = st.number_input("Base PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_min", 0.58)), step=0.01, format="%.2f")
-        new_settings["core_ev_pm_max"] = st.number_input("Base PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_max", 0.70)), step=0.01, format="%.2f")
-        new_settings["core_ev_flex_pm_min"] = st.number_input("Flex PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_min", 0.50)), step=0.01, format="%.2f")
-        new_settings["core_ev_flex_pm_max"] = st.number_input("Flex PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_max", 0.99)), step=0.01, format="%.2f")
-        new_settings["core_ev_entry_time_min"] = st.number_input("Core EV entry time min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_entry_time_min", 10)), step=1)
-        new_settings["core_ev_entry_time_max"] = st.number_input("Core EV entry time max (s)", min_value=10, max_value=305, value=int(settings.get("core_ev_entry_time_max", 305)), step=5)
-        new_settings["core_ev_time_left_min"] = st.number_input("Core EV active time-left min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_time_left_min", settings.get("core_ev_entry_time_min", 10))), step=1)
-        new_settings["core_ev_time_left_max"] = st.number_input("Core EV active time-left max (s)", min_value=1, max_value=305, value=int(settings.get("core_ev_time_left_max", 20)), step=1)
-        new_settings["full_window_core_ev_enabled"] = st.checkbox("Full-window Core EV enabled", value=bool(settings.get("full_window_core_ev_enabled", True)))
-        new_settings["full_window_core_ev_time_left_max"] = st.number_input("Full-window eval max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_core_ev_time_left_max", 180)), step=5)
-        new_settings["full_window_core_ev_min_level"] = st.selectbox("Min Core EV bucket level", ["L1", "L2", "L3"], index=["L1", "L2", "L3"].index(str(settings.get("full_window_core_ev_min_level", "L2"))))
-        new_settings["full_window_entry_confirm_ticks"] = st.number_input("Confirm ticks", min_value=1, max_value=10, value=int(settings.get("full_window_entry_confirm_ticks", 2)), step=1)
-        new_settings["full_window_entry_commit_time_left"] = st.number_input("Commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_entry_commit_time_left", 19)), step=1)
-        new_settings["full_window_entry_min_score_gain"] = st.number_input("Min score gain to keep waiting", min_value=0.0, max_value=5.0, value=float(settings.get("full_window_entry_min_score_gain", 0.15)), step=0.05, format="%.2f")
-        new_settings["full_window_micro_entry_commit_time_left"] = st.number_input("Micro commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_micro_entry_commit_time_left", 30)), step=1)
+    with st.expander("Расширенные настройки: Core EV / full-window / L1 fallback / risk", expanded=False):
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            st.markdown("**Bank / Sizing**")
+            new_settings["daily_loss_limit"] = st.number_input("Дневной стоп-лосс (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("daily_loss_limit", 15.0)), step=1.0)
+            new_settings["daily_loss_limit_pct"] = st.slider("Дневной стоп-лосс (% от банка)", min_value=0.0, max_value=0.50, value=float(settings.get("daily_loss_limit_pct", 0.0)), step=0.05, format="%.2f")
+            new_settings["dynamic_sizing"] = st.checkbox("Динамический размер ставки", value=bool(settings.get("dynamic_sizing", True)))
+            new_settings["dynamic_min_amount"] = st.number_input("Мин ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_min_amount", 5.0)), step=1.0)
+            new_settings["dynamic_max_amount"] = st.number_input("Макс ставка (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("dynamic_max_amount", 15.0)), step=1.0)
+            new_settings["dynamic_base_risk_pct"] = st.slider("Базовый риск", min_value=0.01, max_value=0.10, value=float(settings.get("dynamic_base_risk_pct", 0.05)), step=0.01, format="%.2f")
+            new_settings["dynamic_step_bank_gain_pct"] = st.slider("Шаг роста банка", min_value=0.10, max_value=2.0, value=float(settings.get("dynamic_step_bank_gain_pct", 0.70)), step=0.05, format="%.2f")
+            new_settings["dynamic_step_risk_pct"] = st.slider("Прирост риска за шаг", min_value=0.0, max_value=0.05, value=float(settings.get("dynamic_step_risk_pct", 0.01)), step=0.01, format="%.2f")
+            new_settings["dynamic_max_risk_pct"] = st.slider("Макс риск", min_value=0.01, max_value=0.15, value=float(settings.get("dynamic_max_risk_pct", 0.08)), step=0.01, format="%.2f")
 
-    with s3:
-        st.markdown("**L1 Fallback / Risk / Trend Conflict**")
-        new_settings["full_window_l1_fallback_min_trades"] = st.number_input("L1 fallback min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_fallback_min_trades", 8)), step=1)
-        new_settings["full_window_l1_fallback_require_recent_positive"] = st.checkbox("L1 fallback require recent positive", value=bool(settings.get("full_window_l1_fallback_require_recent_positive", True)))
-        new_settings["full_window_l1_fallback_time_left_max"] = st.number_input("L1 fallback max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_l1_fallback_time_left_max", 150)), step=5)
-        new_settings["full_window_l1_strong_exception_min_trades"] = st.number_input("L1 strong exception min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_strong_exception_min_trades", 2)), step=1)
-        new_settings["full_window_l1_strong_exception_min_roi"] = st.number_input("L1 strong exception min ROI %", min_value=-100.0, max_value=500.0, value=float(settings.get("full_window_l1_strong_exception_min_roi", 50.0)), step=1.0, format="%.1f")
-        new_settings["core_ev_max_risk_pct"] = st.slider("Core EV max risk %", min_value=0.001, max_value=0.05, value=float(settings.get("core_ev_max_risk_pct", 0.02)), step=0.001, format="%.3f")
-        new_settings["core_ev_micro_risk_pct"] = st.slider("Core EV micro risk %", min_value=0.001, max_value=0.02, value=float(settings.get("core_ev_micro_risk_pct", 0.005)), step=0.001, format="%.3f")
-        new_settings["core_ev_trend_conflict_micro_delta_min_pct"] = st.number_input("Trend-conflict micro delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("core_ev_trend_conflict_micro_delta_min_pct", 0.012)), step=0.001, format="%.3f")
-        new_settings["core_ev_trend_conflict_micro_confidence_min"] = st.number_input("Trend-conflict micro confidence min", min_value=0.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_confidence_min", 0.0)), step=0.01, format="%.2f")
-        new_settings["core_ev_trend_conflict_micro_indicator_min"] = st.number_input("Trend-conflict micro indicator min", min_value=-1.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_indicator_min", -0.10)), step=0.01, format="%.2f")
-        new_settings["trend_conflict_override_delta_min_pct"] = st.number_input("Trend conflict override delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("trend_conflict_override_delta_min_pct", 0.025)), step=0.001, format="%.3f")
-        new_settings["shadow_live_mode"] = st.selectbox("Shadow live mode", ["observe", "off", "block_deny", "hybrid"], index=["observe", "off", "block_deny", "hybrid"].index(str(settings.get("shadow_live_mode", "observe"))))
-        new_settings["window_sample_logging_enabled"] = st.checkbox("Window sample logging enabled", value=bool(settings.get("window_sample_logging_enabled", True)))
+        with s2:
+            st.markdown("**Core EV / Full-Window**")
+            new_settings["core_ev_enabled"] = st.checkbox("Core EV enabled", value=bool(settings.get("core_ev_enabled", True)))
+            new_settings["core_ev_pm_min"] = st.number_input("Base PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_min", 0.58)), step=0.01, format="%.2f")
+            new_settings["core_ev_pm_max"] = st.number_input("Base PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_max", 0.70)), step=0.01, format="%.2f")
+            new_settings["core_ev_flex_pm_min"] = st.number_input("Flex PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_min", 0.50)), step=0.01, format="%.2f")
+            new_settings["core_ev_flex_pm_max"] = st.number_input("Flex PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_max", 0.99)), step=0.01, format="%.2f")
+            new_settings["core_ev_entry_time_min"] = st.number_input("Core EV entry time min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_entry_time_min", 10)), step=1)
+            new_settings["core_ev_entry_time_max"] = st.number_input("Core EV entry time max (s)", min_value=10, max_value=305, value=int(settings.get("core_ev_entry_time_max", 305)), step=5)
+            new_settings["core_ev_time_left_min"] = st.number_input("Core EV active time-left min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_time_left_min", settings.get("core_ev_entry_time_min", 10))), step=1)
+            new_settings["core_ev_time_left_max"] = st.number_input("Core EV active time-left max (s)", min_value=1, max_value=305, value=int(settings.get("core_ev_time_left_max", 20)), step=1)
+            new_settings["full_window_core_ev_enabled"] = st.checkbox("Full-window Core EV enabled", value=bool(settings.get("full_window_core_ev_enabled", True)))
+            new_settings["full_window_core_ev_time_left_max"] = st.number_input("Full-window eval max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_core_ev_time_left_max", 180)), step=5)
+            new_settings["full_window_core_ev_min_level"] = st.selectbox("Min Core EV bucket level", ["L1", "L2", "L3"], index=["L1", "L2", "L3"].index(str(settings.get("full_window_core_ev_min_level", "L2"))))
+            new_settings["full_window_entry_confirm_ticks"] = st.number_input("Confirm ticks", min_value=1, max_value=10, value=int(settings.get("full_window_entry_confirm_ticks", 2)), step=1)
+            new_settings["full_window_entry_commit_time_left"] = st.number_input("Commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_entry_commit_time_left", 19)), step=1)
+            new_settings["full_window_entry_min_score_gain"] = st.number_input("Min score gain to keep waiting", min_value=0.0, max_value=5.0, value=float(settings.get("full_window_entry_min_score_gain", 0.15)), step=0.05, format="%.2f")
+            new_settings["full_window_micro_entry_commit_time_left"] = st.number_input("Micro commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_micro_entry_commit_time_left", 30)), step=1)
+
+        with s3:
+            st.markdown("**L1 Fallback / Risk / Trend Conflict**")
+            new_settings["full_window_l1_fallback_min_trades"] = st.number_input("L1 fallback min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_fallback_min_trades", 8)), step=1)
+            new_settings["full_window_l1_fallback_require_recent_positive"] = st.checkbox("L1 fallback require recent positive", value=bool(settings.get("full_window_l1_fallback_require_recent_positive", True)))
+            new_settings["full_window_l1_fallback_time_left_max"] = st.number_input("L1 fallback max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_l1_fallback_time_left_max", 150)), step=5)
+            new_settings["full_window_l1_strong_exception_min_trades"] = st.number_input("L1 strong exception min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_strong_exception_min_trades", 2)), step=1)
+            new_settings["full_window_l1_strong_exception_min_roi"] = st.number_input("L1 strong exception min ROI %", min_value=-100.0, max_value=500.0, value=float(settings.get("full_window_l1_strong_exception_min_roi", 50.0)), step=1.0, format="%.1f")
+            new_settings["core_ev_max_risk_pct"] = st.slider("Core EV max risk %", min_value=0.001, max_value=0.05, value=float(settings.get("core_ev_max_risk_pct", 0.02)), step=0.001, format="%.3f")
+            new_settings["core_ev_micro_risk_pct"] = st.slider("Core EV micro risk %", min_value=0.001, max_value=0.02, value=float(settings.get("core_ev_micro_risk_pct", 0.005)), step=0.001, format="%.3f")
+            new_settings["core_ev_trend_conflict_micro_delta_min_pct"] = st.number_input("Trend-conflict micro delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("core_ev_trend_conflict_micro_delta_min_pct", 0.012)), step=0.001, format="%.3f")
+            new_settings["core_ev_trend_conflict_micro_confidence_min"] = st.number_input("Trend-conflict micro confidence min", min_value=0.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_confidence_min", 0.0)), step=0.01, format="%.2f")
+            new_settings["core_ev_trend_conflict_micro_indicator_min"] = st.number_input("Trend-conflict micro indicator min", min_value=-1.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_indicator_min", -0.10)), step=0.01, format="%.2f")
+            new_settings["trend_conflict_override_delta_min_pct"] = st.number_input("Trend conflict override delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("trend_conflict_override_delta_min_pct", 0.025)), step=0.001, format="%.3f")
+            new_settings["shadow_live_mode"] = st.selectbox("Shadow live mode", ["observe", "off", "block_deny", "hybrid"], index=["observe", "off", "block_deny", "hybrid"].index(str(settings.get("shadow_live_mode", "observe"))))
+            new_settings["window_sample_logging_enabled"] = st.checkbox("Window sample logging enabled", value=bool(settings.get("window_sample_logging_enabled", True)))
 
     # ===== BUTTONS =====
     st.markdown("---")
