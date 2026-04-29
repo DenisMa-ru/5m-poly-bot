@@ -1182,7 +1182,7 @@ def _extract_balance_allowance(raw: dict) -> tuple[float | None, float | None]:
         try:
             if value is None:
                 return None
-            return float(value)
+            return float(value) / 1_000_000
         except Exception:
             return None
 
