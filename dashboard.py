@@ -1122,31 +1122,10 @@ _P_STATE = {
 def parse_log_state(path):
     """Парсим логи только для определения текущего состояния бота."""
     lines = []
-    candidate_paths = []
-    for candidate in (path, LIVE_LOG, DEFAULT_LOG):
-        if candidate and candidate not in candidate_paths:
-            candidate_paths.append(candidate)
-
-    for candidate in candidate_paths:
-        if not candidate or not candidate.exists():
-            continue
+    candidate = path
+    if candidate and candidate.exists():
         try:
             lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception:
-            lines = []
-        if lines:
-            break
-
-    if not lines:
-        try:
-            proc = subprocess.run(
-                ["journalctl", "-u", "poly-bot-live.service", "-n", "2000", "--no-pager", "-o", "cat"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-            lines = (proc.stdout or "").splitlines()
         except Exception:
             lines = []
 
@@ -1277,7 +1256,7 @@ RL = {'btc_low': 'BTC below min', 'eth_low': 'ETH below min', 'high': 'Above max
 # ===== INIT =====
 settings = load_settings()
 bot_running = is_bot_running()
-L = parse_log_state(Path(os.environ.get("BOT_LOG_FILE", str(DEFAULT_LOG))))  # Log state только для статуса
+L = parse_log_state(Path(os.environ.get("BOT_LOG_FILE", str(LIVE_LOG))))  # Log state только для статуса
 D = build_dashboard_state(L.get("session_start_ts"), L.get("session_bank_start"))  # Dashboard state из текущей сессии
 
 # ===== TABS =====
