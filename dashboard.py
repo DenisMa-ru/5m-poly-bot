@@ -11,15 +11,16 @@ from datetime import datetime
 from dotenv import load_dotenv
 from pathlib import Path
 
+# ===== CONFIG =====
+BOT_DIR = Path("/root/5m-poly-bot")
+load_dotenv(BOT_DIR / ".env")
 load_dotenv()
 
-# ===== CONFIG =====
 DEFAULT_LOG = Path("/root/5m-poly-bot/bot.log")
 CONTROL_FILE = Path("/root/5m-poly-bot/control.json")
 SIGNALS_FILE = Path("/root/5m-poly-bot/signals.json")
 WINDOW_SAMPLES_FILE = Path("/root/5m-poly-bot/window_samples.json")
 CORE_EV_RULES_FILE = Path("/root/5m-poly-bot/core_ev_rules.json")
-BOT_DIR = Path("/root/5m-poly-bot")
 BOT_SCRIPT = "crypto_bot.py"
 PID_FILE = Path("/root/5m-poly-bot/bot.pid")
 CLOB_API = "https://clob.polymarket.com"
@@ -726,11 +727,28 @@ _P_STATE = {
 @st.cache_data(ttl=5, show_spinner=False)
 def parse_log_state(path):
     """Парсим логи только для определения текущего состояния бота."""
-    if not path or not path.exists():
-        return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0, 'mode': 'Unknown', 'session_start_ts': None, 'session_bank_start': None}
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except:
+    if path and path.exists():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except:
+            lines = []
+    else:
+        lines = []
+
+    if not lines:
+        try:
+            proc = subprocess.run(
+                ["journalctl", "-u", "poly-bot-live.service", "-n", "2000", "--no-pager", "-o", "cat"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            lines = (proc.stdout or "").splitlines()
+        except Exception:
+            lines = []
+
+    if not lines:
         return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0, 'mode': 'Unknown', 'session_start_ts': None, 'session_bank_start': None}
 
     state = {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0, 'mode': 'Unknown', 'session_start_ts': None, 'session_bank_start': None}
