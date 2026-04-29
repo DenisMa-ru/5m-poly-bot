@@ -266,9 +266,55 @@ def _fetch_erc20_balance(wallet: str, token_address: str, rpc_url: str) -> float
         return None
 
 
+def _fetch_erc20_balance_diagnostic(wallet: str, token_address: str, rpc_url: str) -> tuple[float | None, str | None]:
+    wallet_addr = _normalize_wallet_address(wallet)
+    token_addr = _normalize_wallet_address(token_address)
+    if not wallet_addr:
+        return None, "Invalid wallet address"
+    if not token_addr:
+        return None, "Invalid token address"
+    if not rpc_url:
+        return None, "Missing POLYGON_RPC_URL"
+
+    call_data = "0x70a08231" + wallet_addr[2:].lower().rjust(64, "0")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {
+                "to": token_addr,
+                "data": call_data,
+            },
+            "latest",
+        ],
+    }
+
+    try:
+        resp = requests.post(rpc_url, json=payload, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return None, f"pUSD RPC request failed for {wallet_addr}: {exc}"
+
+    if isinstance(data, dict) and data.get("error"):
+        return None, f"pUSD RPC returned error for {wallet_addr}: {data.get('error')}"
+
+    raw = _rpc_hex_to_int(data.get("result") if isinstance(data, dict) else None)
+    if raw is None:
+        return None, f"pUSD RPC returned invalid balance payload for {wallet_addr}: {data}"
+
+    return raw / 1_000_000, None
+
+
 def _fetch_polymarket_pusd_balance(wallet: str) -> float | None:
     rpc_url = os.getenv("POLYGON_RPC_URL", "")
     return _fetch_erc20_balance(wallet, PUSD_TOKEN, rpc_url)
+
+
+def _fetch_polymarket_pusd_balance_diagnostic(wallet: str) -> tuple[float | None, str | None]:
+    rpc_url = os.getenv("POLYGON_RPC_URL", "")
+    return _fetch_erc20_balance_diagnostic(wallet, PUSD_TOKEN, rpc_url)
 
 
 def _extract_wallet_candidates(payload) -> list[str]:
@@ -653,14 +699,6 @@ def fetch_polymarket_account_state() -> dict:
         elif cash is not None:
             result["spendable"] = cash
 
-    direct_pusd_cash = _fetch_polymarket_pusd_balance(user_address) if user_address else None
-    if direct_pusd_cash is not None and (result["cash"] is None or result["cash"] <= 0):
-        result["cash"] = direct_pusd_cash
-        if result["allowance"] is not None:
-            result["spendable"] = min(direct_pusd_cash, result["allowance"])
-        else:
-            result["spendable"] = direct_pusd_cash
-
     if not user_address:
         if not private_key:
             result["source_error"] = "Missing POLY_PRIVATE_KEY/POLY_PROXY_WALLET"
@@ -669,6 +707,23 @@ def fetch_polymarket_account_state() -> dict:
         return result
 
     candidate_addresses = _resolve_polymarket_addresses([proxy_wallet, poly_wallet])
+    best_pusd_cash = None
+    pusd_notes = []
+    for candidate in candidate_addresses:
+        candidate_pusd_cash, candidate_pusd_error = _fetch_polymarket_pusd_balance_diagnostic(candidate)
+        if candidate_pusd_cash is not None and (best_pusd_cash is None or candidate_pusd_cash > best_pusd_cash):
+            best_pusd_cash = candidate_pusd_cash
+            result["wallet"] = candidate
+        if candidate_pusd_error:
+            pusd_notes.append(candidate_pusd_error)
+
+    if best_pusd_cash is not None and (result["cash"] is None or result["cash"] <= 0):
+        result["cash"] = best_pusd_cash
+        if result["allowance"] is not None:
+            result["spendable"] = min(best_pusd_cash, result["allowance"])
+        else:
+            result["spendable"] = best_pusd_cash
+
     best_snapshot = None
     for candidate in candidate_addresses:
         snapshot = _fetch_polymarket_user_snapshot(candidate)
@@ -694,6 +749,9 @@ def fetch_polymarket_account_state() -> dict:
             result["redeemable"] = 0.0 if positions_value is not None else None
         if result["source_error"] is None:
             result["source_error"] = best_snapshot.get("source_error")
+
+    if result["source_error"] is None and pusd_notes and best_pusd_cash is None:
+        result["source_error"] = "; ".join(pusd_notes[:3])
 
     return result
 
