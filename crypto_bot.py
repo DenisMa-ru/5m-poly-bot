@@ -200,7 +200,7 @@ FULL_WINDOW_CORE_EV_ENABLED = bool(_bot_settings.get("full_window_core_ev_enable
 WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_enabled", True))
 CORE_EV_ENTRY_TIME_MIN = float(_bot_settings.get("core_ev_entry_time_min", 10) or 10)
 CORE_EV_ENTRY_TIME_MAX = float(_bot_settings.get("core_ev_entry_time_max", max(10, OBSERVE_WINDOW_SECONDS)) or max(10, OBSERVE_WINDOW_SECONDS))
-FULL_WINDOW_CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("full_window_core_ev_time_left_max", 60) or 60)
+FULL_WINDOW_CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("full_window_core_ev_time_left_max", 180) or 180)
 FULL_WINDOW_ENTRY_CONFIRM_TICKS = int(_bot_settings.get("full_window_entry_confirm_ticks", 2) or 2)
 FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_entry_commit_time_left", 19) or 19)
 FULL_WINDOW_ENTRY_MIN_SCORE_GAIN = float(_bot_settings.get("full_window_entry_min_score_gain", 0.15) or 0.15)
@@ -226,7 +226,7 @@ CORE_EV_ENABLED = bool(_bot_settings.get("core_ev_enabled", True))
 CORE_EV_PM_MIN = float(_bot_settings.get("core_ev_pm_min", 0.58) or 0.58)
 CORE_EV_PM_MAX = float(_bot_settings.get("core_ev_pm_max", 0.70) or 0.70)
 CORE_EV_FLEX_PM_MIN = float(_bot_settings.get("core_ev_flex_pm_min", 0.50) or 0.50)
-CORE_EV_FLEX_PM_MAX = float(_bot_settings.get("core_ev_flex_pm_max", 0.90) or 0.90)
+CORE_EV_FLEX_PM_MAX = float(_bot_settings.get("core_ev_flex_pm_max", 0.95) or 0.95)
 CORE_EV_TIME_LEFT_MIN = float(_bot_settings.get("core_ev_time_left_min", CORE_EV_ENTRY_TIME_MIN) or CORE_EV_ENTRY_TIME_MIN)
 CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("core_ev_time_left_max", min(20, CORE_EV_ENTRY_TIME_MAX)) or min(20, CORE_EV_ENTRY_TIME_MAX))
 CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
@@ -235,7 +235,7 @@ CORE_EV_TREND_CONFLICT_MICRO_DELTA_MIN_PCT = float(_bot_settings.get("core_ev_tr
 CORE_EV_TREND_CONFLICT_MICRO_CONFIDENCE_MIN = float(_bot_settings.get("core_ev_trend_conflict_micro_confidence_min", 0.0) or 0.0)
 CORE_EV_TREND_CONFLICT_MICRO_INDICATOR_MIN = float(_bot_settings.get("core_ev_trend_conflict_micro_indicator_min", -0.10) or -0.10)
 FULL_WINDOW_CORE_EV_MIN_LEVEL = str(_bot_settings.get("full_window_core_ev_min_level", "L2") or "L2").strip().upper()
-FULL_WINDOW_MICRO_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_micro_entry_commit_time_left", max(FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6, 45)) or max(FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6, 45))
+FULL_WINDOW_MICRO_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_micro_entry_commit_time_left", max(FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6, 60)) or max(FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT + 6, 60))
 FULL_WINDOW_L1_FALLBACK_MIN_TRADES = int(_bot_settings.get("full_window_l1_fallback_min_trades", 8) or 8)
 FULL_WINDOW_L1_FALLBACK_REQUIRE_RECENT_POSITIVE = bool(_bot_settings.get("full_window_l1_fallback_require_recent_positive", True))
 FULL_WINDOW_L1_FALLBACK_TIME_LEFT_MAX = float(_bot_settings.get("full_window_l1_fallback_time_left_max", 150) or 150)
@@ -1429,6 +1429,8 @@ class CryptoBot:
         decision = str(core_ev.get("decision", "unknown") or "unknown")
         if decision in {"allow", "strong_allow"}:
             return True, f"immediate {decision} entry"
+        if decision == "micro_allow" and float(seconds_left or 0) <= FULL_WINDOW_MICRO_ENTRY_COMMIT_TIME_LEFT:
+            return True, f"immediate micro entry at {seconds_left:.1f}s"
 
         state = self.shadow_window_state.setdefault(slug, {"best_core_ev_candidate": None})
 
