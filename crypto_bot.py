@@ -2268,6 +2268,11 @@ class CryptoBot:
         # Entry approved. Mark it as entered only after a successful execution.
         expected_pnl = (trade_amount / market["winner_price"]) - trade_amount
         signal_data["pnl_expected"] = expected_pnl
+        log(
+            f"   [{crypto}] ENTRY HANDOFF — amount=${trade_amount:.2f} pm={market['winner_price']:.3f} "
+            f"seconds_left={seconds_left:.1f}s decision={core_ev_decision} "
+            f"shadow={shadow_live_decision}"
+        )
 
         execution = self._enter(
             market,
@@ -2296,6 +2301,11 @@ class CryptoBot:
                 signal_data["execution_size"] = execution.get("size")
             if execution.get("taker_price") is not None:
                 signal_data["execution_taker_price"] = execution.get("taker_price")
+            log(
+                f"   [{crypto}] EXECUTION FAILED — type={signal_data['execution_failure_type']} "
+                f"status={signal_data['execution_order_status'] or 'unknown'} "
+                f"detail={signal_data['execution_failure_detail'] or '-'}"
+            )
 
         persist_record(force=True)
 
