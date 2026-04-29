@@ -155,6 +155,15 @@ def _safe_float(value):
         return None
 
 
+def parse_ts(value: str):
+    try:
+        if not value:
+            return None
+        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
+
+
 def _normalize_usdc_amount(value):
     """Normalize raw USDC values when APIs return 6-decimal base units."""
     if value is None:
@@ -382,7 +391,7 @@ def fetch_polymarket_account_state() -> dict:
     return result
 
 @st.cache_data(ttl=10, show_spinner=False)
-def build_dashboard_state():
+def build_dashboard_state(session_start_ts: str | None = None, session_bank_start: float | None = None):
     """
     Строим состояние Dashboard из signals.json + window_samples.json.
     Возвращает dict с метриками, последними сигналами, full-window наблюдениями и rulebook state.
@@ -390,6 +399,11 @@ def build_dashboard_state():
     signals = load_saved_signals()
     window_samples = load_window_samples()
     core_ev_rules = load_core_ev_rules()
+    session_start_dt = parse_ts(session_start_ts) if session_start_ts else None
+
+    if session_start_dt is not None:
+        signals = [s for s in signals if (parse_ts(str(s.get("timestamp", "") or "")) or datetime.min) >= session_start_dt]
+        window_samples = [s for s in window_samples if (parse_ts(str(s.get("timestamp", "") or "")) or datetime.min) >= session_start_dt]
 
     # Разделяем на вошедшие и пропущенные
     entered = [s for s in signals if s.get("entered")]
@@ -491,7 +505,7 @@ def build_dashboard_state():
     # Считаем invested и pnl из вошедших сигналов
     settings = load_settings()
     amount = settings.get("amount", 10)
-    bank_start = float(settings.get("bank", 100))
+    bank_start = float(session_bank_start if session_bank_start is not None else settings.get("bank", 100))
     total_invested = sum(s.get("amount", amount) for s in entered)
 
     # PnL: берём из signal data, или рассчитываем из pm цены для старых сигналов
@@ -695,6 +709,7 @@ def build_dashboard_state():
         "btc_entered": [s for s in entered if s.get("coin") == "BTC"],
         "eth_entered": [s for s in entered if s.get("coin") == "ETH"],
         "account": account_state,
+        "session_start_ts": session_start_ts,
         "time": datetime.now().strftime('%H:%M:%S'),
     }
 
@@ -704,19 +719,43 @@ _P_STATE = {
     "sleep":  re.compile(r'Sleeping\s+(\d+)s'),
     "snc":    re.compile(r'next close\s+([\d:]+)'),
     "closed": re.compile(r'Market closed'),
+    "startup": re.compile(r'^\[(.*?)\]\s+Crypto Up/Down Bot\s+\|\s+(.*?)\s+\|'),
+    "bank": re.compile(r'^\[(.*?)\]\s+Bank:\s+\$([\-\d.]+)'),
 }
 
 @st.cache_data(ttl=5, show_spinner=False)
 def parse_log_state(path):
     """Парсим логи только для определения текущего состояния бота."""
     if not path or not path.exists():
-        return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0}
+        return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0, 'mode': 'Unknown', 'session_start_ts': None, 'session_bank_start': None}
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except:
-        return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0}
+        return {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0, 'mode': 'Unknown', 'session_start_ts': None, 'session_bank_start': None}
 
-    state = {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0}
+    state = {'state': 'start', 'sleep': 0, 'nc': '--:--', 'round': 0, 'err': 0, 'mode': 'Unknown', 'session_start_ts': None, 'session_bank_start': None}
+    startup_idx = None
+    for idx, line in enumerate(lines):
+        startup_match = _P_STATE["startup"].search(line)
+        if startup_match:
+            startup_idx = idx
+            raw_mode = startup_match.group(2).strip()
+            state['session_start_ts'] = startup_match.group(1).strip()
+            if 'DRY RUN' in raw_mode.upper():
+                state['mode'] = 'dry-run'
+            elif 'PAPER' in raw_mode.upper():
+                state['mode'] = 'paper'
+            elif 'LIVE' in raw_mode.upper():
+                state['mode'] = 'live'
+            else:
+                state['mode'] = raw_mode or 'Unknown'
+    if startup_idx is not None:
+        for line in lines[startup_idx:startup_idx + 8]:
+            bank_match = _P_STATE["bank"].search(line)
+            if bank_match:
+                state['session_bank_start'] = _safe_float(bank_match.group(2))
+                break
+
     for line in lines[-200:]:  # последние 200 строк достаточно для статуса
         if _P_STATE["active"].search(line):
             state['state'] = 'active'
@@ -819,8 +858,8 @@ RL = {'btc_low': 'BTC below min', 'eth_low': 'ETH below min', 'high': 'Above max
 # ===== INIT =====
 settings = load_settings()
 bot_running = is_bot_running()
-D = build_dashboard_state()  # Dashboard state из signals.json
 L = parse_log_state(Path(os.environ.get("BOT_LOG_FILE", str(DEFAULT_LOG))))  # Log state только для статуса
+D = build_dashboard_state(L.get("session_start_ts"), L.get("session_bank_start"))  # Dashboard state из текущей сессии
 
 # ===== TABS =====
 tab_dashboard, tab_stats, tab_settings = st.tabs([
@@ -853,7 +892,7 @@ with tab_dashboard:
         st.caption(f"Updated: {D['time']}")
 
     account = D['account']
-    mode = settings.get('mode', 'dry-run')
+    mode = str(L.get('mode') or settings.get('mode', 'dry-run'))
     is_live_mode = mode == 'live'
     cash = account.get('cash')
     portfolio = account.get('portfolio')
@@ -874,11 +913,20 @@ with tab_dashboard:
         summary_html += f'<span class="summary-chip"><strong>{label}</strong> {value}</span>'
     summary_html += '</div>'
     st.markdown(summary_html, unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("#### Polymarket")
+    pm1, pm2, pm3, pm4 = st.columns(4)
+    pm1.metric("💵 Cash", f"${cash:.2f}" if cash not in (None, 0) else "Unknown")
+    pm2.metric("🧾 Portfolio", f"${portfolio:.2f}" if portfolio not in (None, 0) else "Unknown")
+    pm3.metric("💸 Spendable", f"${spendable:.2f}" if spendable not in (None, 0) else "Unknown")
+    pm4.metric("🎁 Redeemable", f"${redeemable:.2f}" if redeemable not in (None, 0) else "Unknown")
     if account.get('source_error'):
         st.caption(f"Polymarket sync note: {account['source_error']}")
 
     ico = {'sleeping': '💤', 'active': '⚡', 'start': '🚀'}.get(L['state'], '⚪')
-    st.caption(f"{ico} {L['state'].upper()} | Next: {L['nc']} | Sleep: {L['sleep']}s")
+    session_label = L.get('session_start_ts') or 'Unknown'
+    st.caption(f"{ico} {L['state'].upper()} | Mode: {mode} | Session start: {session_label} | Next: {L['nc']} | Sleep: {L['sleep']}s")
 
     st.markdown("---")
     pnl_v = D['realized_pnl']
@@ -928,10 +976,10 @@ with tab_dashboard:
 
     with st.expander("Показать дополнительные runtime-метрики", expanded=False):
         extra1, extra2, extra3, extra4 = st.columns(4)
-        extra1.metric("Polymarket Cash", f"${cash:.2f}" if cash is not None else "—")
-        extra2.metric("Portfolio", f"${portfolio:.2f}" if portfolio is not None else "—")
-        extra3.metric("Spendable", f"${spendable:.2f}" if spendable is not None else "—")
-        extra4.metric("Redeemable", f"${redeemable:.2f}" if redeemable is not None else "—")
+        extra1.metric("Session Bank Start", f"${float(L.get('session_bank_start') or D['bank_start']):.2f}")
+        extra2.metric("Signals in Session", D['total_signals'])
+        extra3.metric("Portfolio vs Start", f"${net_result:+.2f}" if net_result is not None else "—")
+        extra4.metric("Updated", D['time'])
 
         if D['last_full_window_waits']:
             wait_rows = []
