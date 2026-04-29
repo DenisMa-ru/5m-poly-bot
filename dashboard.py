@@ -1222,7 +1222,6 @@ def get_default_settings():
     """Возвращает дефолтные настройки бота."""
     return {
         "bank": 100,
-        "mode": "dry-run",
         "amount": 5,
         "enabled_coins": ["BTC"],
         "observe_window_seconds": 305,
@@ -1312,7 +1311,7 @@ with tab_dashboard:
         st.caption(f"Updated: {D['time']}")
 
     account = D['account']
-    mode = str(L.get('mode') or settings.get('mode', 'dry-run'))
+    mode = str(L.get('mode') or 'Unknown')
     is_live_mode = mode == 'live'
     cash = account.get('cash')
     portfolio = account.get('portfolio')
@@ -1522,7 +1521,6 @@ with tab_settings:
 
     basic1, basic2 = st.columns(2)
     with basic1:
-        new_settings["mode"] = st.selectbox("Режим", ["dry-run", "paper", "live"], index=["dry-run", "paper", "live"].index(settings.get("mode", "dry-run")))
         new_settings["amount"] = st.number_input("Размер ставки (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
     with basic2:
         new_settings["bank"] = st.number_input("Начальный банк (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("bank", 100)), step=10.0)
