@@ -26,6 +26,7 @@ BOT_SCRIPT = "crypto_bot.py"
 PID_FILE = Path("/root/5m-poly-bot/bot.pid")
 CLOB_API = "https://clob.polymarket.com"
 POLYMARKET_DATA_API = "https://data-api.polymarket.com"
+PUSD_TOKEN = os.getenv("POLY_PUSD_TOKEN", "0xe2222d279d744050d28e00520010520000310F59")
 
 st.set_page_config(page_title="5m Poly Bot", page_icon="📈", layout="wide",
                     initial_sidebar_state="collapsed")
@@ -219,6 +220,55 @@ def _normalize_wallet_address(value):
     if re.fullmatch(r"0x[a-fA-F0-9]{40}", text):
         return text
     return None
+
+
+def _rpc_hex_to_int(value):
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text.startswith("0x"):
+        return None
+    try:
+        return int(text, 16)
+    except Exception:
+        return None
+
+
+def _fetch_erc20_balance(wallet: str, token_address: str, rpc_url: str) -> float | None:
+    wallet_addr = _normalize_wallet_address(wallet)
+    token_addr = _normalize_wallet_address(token_address)
+    if not wallet_addr or not token_addr or not rpc_url:
+        return None
+
+    call_data = "0x70a08231" + wallet_addr[2:].lower().rjust(64, "0")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {
+                "to": token_addr,
+                "data": call_data,
+            },
+            "latest",
+        ],
+    }
+
+    try:
+        resp = requests.post(rpc_url, json=payload, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        raw = _rpc_hex_to_int(data.get("result"))
+        if raw is None:
+            return None
+        return raw / 1_000_000
+    except Exception:
+        return None
+
+
+def _fetch_polymarket_pusd_balance(wallet: str) -> float | None:
+    rpc_url = os.getenv("POLYGON_RPC_URL", "")
+    return _fetch_erc20_balance(wallet, PUSD_TOKEN, rpc_url)
 
 
 def _extract_wallet_candidates(payload) -> list[str]:
@@ -602,6 +652,14 @@ def fetch_polymarket_account_state() -> dict:
             result["spendable"] = min(cash, allowance)
         elif cash is not None:
             result["spendable"] = cash
+
+    direct_pusd_cash = _fetch_polymarket_pusd_balance(user_address) if user_address else None
+    if direct_pusd_cash is not None and (result["cash"] is None or result["cash"] <= 0):
+        result["cash"] = direct_pusd_cash
+        if result["allowance"] is not None:
+            result["spendable"] = min(direct_pusd_cash, result["allowance"])
+        else:
+            result["spendable"] = direct_pusd_cash
 
     if not user_address:
         if not private_key:
