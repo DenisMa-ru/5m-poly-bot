@@ -397,8 +397,99 @@ def _score_polymarket_snapshot(snapshot: dict) -> tuple:
     )
 
 
+def _derive_polymarket_v2_creds(client):
+    for method_name in ("create_or_derive_api_key", "create_api_key", "create_or_derive_api_creds"):
+        method = getattr(client, method_name, None)
+        if not callable(method):
+            continue
+        creds = method()
+        if creds:
+            return creds
+    return None
+
+
+def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None):
+    import importlib
+
+    client_module = importlib.import_module("py_clob_client_v2")
+    ClobClient = client_module.ClobClient
+
+    constructor_variants = [
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder_address": proxy_wallet or None},
+    ]
+
+    last_error = None
+    for kwargs in constructor_variants:
+        clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        try:
+            return ClobClient(**clean_kwargs)
+        except TypeError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unable to initialize py_clob_client_v2 ClobClient")
+
+
+def _get_v2_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
+    """Return collateral balance/allowance using py_clob_client_v2 when available."""
+    try:
+        import importlib
+
+        client_module = importlib.import_module("py_clob_client_v2")
+        BalanceAllowanceParams = client_module.BalanceAllowanceParams
+        AssetType = client_module.AssetType
+        ApiCreds = getattr(client_module, "ApiCreds", None)
+
+        env_api_key = os.getenv("CLOB_API_KEY", "")
+        env_api_secret = os.getenv("CLOB_SECRET", "")
+        env_api_passphrase = os.getenv("CLOB_PASS_PHRASE", "")
+
+        creds = None
+        if ApiCreds and env_api_key and env_api_secret and env_api_passphrase:
+            creds = ApiCreds(
+                api_key=env_api_key,
+                api_secret=env_api_secret,
+                api_passphrase=env_api_passphrase,
+            )
+
+        client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=creds)
+        if creds is None:
+            derived_creds = _derive_polymarket_v2_creds(client)
+            if derived_creds:
+                client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=derived_creds)
+
+        raw = client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+        if not isinstance(raw, dict):
+            return None, None
+
+        balance = _normalize_usdc_amount(_safe_float(raw.get("balance")))
+        allowance = _normalize_usdc_amount(_safe_float(raw.get("allowance")))
+
+        if allowance is None:
+            nested_allowances = raw.get("allowances") or raw.get("allowanceData") or {}
+            if isinstance(nested_allowances, dict):
+                values = [_normalize_usdc_amount(_safe_float(v)) for v in nested_allowances.values()]
+                values = [v for v in values if v is not None]
+                if values:
+                    allowance = max(values)
+
+        return balance, allowance
+    except Exception:
+        return None, None
+
+
 def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
     """Return available collateral balance and allowance from Polymarket, if available."""
+    v2_balance, v2_allowance = _get_v2_collateral_balance_allowance(private_key, proxy_wallet)
+    if v2_balance is not None or v2_allowance is not None:
+        return v2_balance, v2_allowance
+
     try:
         import importlib
 
