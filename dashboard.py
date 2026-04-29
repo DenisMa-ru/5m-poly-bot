@@ -26,7 +26,7 @@ BOT_SCRIPT = "crypto_bot.py"
 PID_FILE = Path("/root/5m-poly-bot/bot.pid")
 CLOB_API = "https://clob.polymarket.com"
 POLYMARKET_DATA_API = "https://data-api.polymarket.com"
-PUSD_TOKEN = os.getenv("POLY_PUSD_TOKEN", "0xe2222d279d744050d28e00520010520000310F59")
+PUSD_TOKEN = os.getenv("POLY_PUSD_TOKEN", "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
 
 st.set_page_config(page_title="5m Poly Bot", page_icon="📈", layout="wide",
                     initial_sidebar_state="collapsed")
@@ -234,6 +234,22 @@ def _rpc_hex_to_int(value):
         return None
 
 
+def _get_polygon_rpc_urls() -> list[str]:
+    raw_values = [
+        os.getenv("POLYGON_RPC_URL", ""),
+        os.getenv("POLYGON_RPC_URLS", ""),
+    ]
+    urls = []
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in re.split(r"[\s,;]+", raw.strip()):
+            url = part.strip()
+            if url and url not in urls:
+                urls.append(url)
+    return urls
+
+
 def _fetch_erc20_balance(wallet: str, token_address: str, rpc_url: str) -> float | None:
     wallet_addr = _normalize_wallet_address(wallet)
     token_addr = _normalize_wallet_address(token_address)
@@ -308,13 +324,27 @@ def _fetch_erc20_balance_diagnostic(wallet: str, token_address: str, rpc_url: st
 
 
 def _fetch_polymarket_pusd_balance(wallet: str) -> float | None:
-    rpc_url = os.getenv("POLYGON_RPC_URL", "")
-    return _fetch_erc20_balance(wallet, PUSD_TOKEN, rpc_url)
+    for rpc_url in _get_polygon_rpc_urls():
+        balance = _fetch_erc20_balance(wallet, PUSD_TOKEN, rpc_url)
+        if balance is not None:
+            return balance
+    return None
 
 
 def _fetch_polymarket_pusd_balance_diagnostic(wallet: str) -> tuple[float | None, str | None]:
-    rpc_url = os.getenv("POLYGON_RPC_URL", "")
-    return _fetch_erc20_balance_diagnostic(wallet, PUSD_TOKEN, rpc_url)
+    rpc_urls = _get_polygon_rpc_urls()
+    if not rpc_urls:
+        return None, "Missing POLYGON_RPC_URL/POLYGON_RPC_URLS"
+
+    errors = []
+    for rpc_url in rpc_urls:
+        balance, error = _fetch_erc20_balance_diagnostic(wallet, PUSD_TOKEN, rpc_url)
+        if balance is not None:
+            return balance, None
+        if error:
+            errors.append(f"{rpc_url} -> {error}")
+
+    return None, "; ".join(errors[:3]) if errors else "Unknown Polygon RPC error"
 
 
 def _extract_wallet_candidates(payload) -> list[str]:

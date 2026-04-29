@@ -969,6 +969,186 @@ def get_clob_price(token_id: str) -> float:
     except Exception:
         return 0.0
 
+
+def _get_polymarket_signature_type(proxy_wallet: str) -> int:
+    signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
+    if signature_type_raw is not None:
+        return int(signature_type_raw)
+    return 2 if proxy_wallet else 0
+
+
+def _build_legacy_polymarket_client(private_key: str, proxy_wallet: str):
+    import importlib
+
+    client_module = importlib.import_module("py_clob_client.client")
+    ClobClient = client_module.ClobClient
+    signature_type = _get_polymarket_signature_type(proxy_wallet)
+    return ClobClient(
+        host=CLOB_API,
+        key=private_key,
+        chain_id=137,
+        signature_type=signature_type,
+        funder=proxy_wallet,
+    )
+
+
+def _derive_polymarket_v2_creds(client):
+    for method_name in ("create_or_derive_api_key", "create_api_key", "create_or_derive_api_creds"):
+        method = getattr(client, method_name, None)
+        if not callable(method):
+            continue
+        creds = method()
+        if creds:
+            return creds
+    return None
+
+
+def _legacy_creds_to_v2_api_creds(private_key: str, proxy_wallet: str, api_creds_cls):
+    try:
+        legacy_client = _build_legacy_polymarket_client(private_key, proxy_wallet)
+        legacy_creds = legacy_client.create_or_derive_api_creds()
+        if not legacy_creds:
+            return None
+        api_key = getattr(legacy_creds, "api_key", None)
+        api_secret = getattr(legacy_creds, "api_secret", None)
+        api_passphrase = getattr(legacy_creds, "api_passphrase", None)
+        if not (api_key and api_secret and api_passphrase):
+            return None
+        return api_creds_cls(
+            api_key=api_key,
+            api_secret=api_secret,
+            api_passphrase=api_passphrase,
+        )
+    except Exception:
+        return None
+
+
+def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None):
+    import importlib
+
+    client_module = importlib.import_module("py_clob_client_v2")
+    ClobClient = client_module.ClobClient
+    signature_type = _get_polymarket_signature_type(proxy_wallet)
+    constructor_variants = [
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder_address": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder_address": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds},
+    ]
+
+    last_error = None
+    for kwargs in constructor_variants:
+        clean_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        try:
+            return ClobClient(**clean_kwargs)
+        except TypeError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unable to initialize py_clob_client_v2 ClobClient")
+
+
+def _build_v2_trade_client(private_key: str, proxy_wallet: str):
+    import importlib
+
+    client_module = importlib.import_module("py_clob_client_v2")
+    ApiCreds = getattr(client_module, "ApiCreds", None)
+    env_api_key = os.getenv("CLOB_API_KEY", "")
+    env_api_secret = os.getenv("CLOB_SECRET", "")
+    env_api_passphrase = os.getenv("CLOB_PASS_PHRASE", "")
+
+    creds = None
+    if ApiCreds and env_api_key and env_api_secret and env_api_passphrase:
+        creds = ApiCreds(
+            api_key=env_api_key,
+            api_secret=env_api_secret,
+            api_passphrase=env_api_passphrase,
+        )
+    elif ApiCreds:
+        creds = _legacy_creds_to_v2_api_creds(private_key, proxy_wallet, ApiCreds)
+
+    client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=creds)
+    if creds is None:
+        derived_creds = _derive_polymarket_v2_creds(client)
+        if derived_creds:
+            client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=derived_creds)
+    return client
+
+
+def _classify_polymarket_exception(exc: Exception) -> tuple[str, str]:
+    detail = str(exc)
+    lowered = detail.lower()
+    if "api key" in lowered or "passphrase" in lowered or "auth" in lowered or "unauthorized" in lowered:
+        return "auth_failed", detail
+    if "allowance" in lowered or "approval" in lowered or "approved" in lowered:
+        return "insufficient_allowance", detail
+    if "insufficient" in lowered and ("balance" in lowered or "collateral" in lowered or "fund" in lowered):
+        return "insufficient_collateral", detail
+    if "reverted" in lowered:
+        if "signature" in lowered:
+            return "signature_type_mismatch", detail
+        return "execution_reverted", detail
+    if "signature" in lowered:
+        return "signature_type_mismatch", detail
+    return "exception", detail
+
+
+def _extract_balance_allowance(raw: dict) -> tuple[float | None, float | None]:
+    def _to_float(value):
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    balance = _to_float(raw.get("balance"))
+    allowance = _to_float(raw.get("allowance"))
+    if allowance is None:
+        nested_allowances = raw.get("allowances") or raw.get("allowanceData") or {}
+        if isinstance(nested_allowances, dict):
+            values = [_to_float(v) for v in nested_allowances.values()]
+            values = [v for v in values if v is not None]
+            if values:
+                allowance = max(values)
+    return balance, allowance
+
+
+def _preflight_live_order(client, amount_usdc: float) -> tuple[bool, str, str]:
+    try:
+        raw = None
+        try:
+            import importlib
+
+            client_module = importlib.import_module("py_clob_client_v2")
+            BalanceAllowanceParams = client_module.BalanceAllowanceParams
+            AssetType = client_module.AssetType
+            raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        except Exception:
+            import importlib
+
+            clob_types_module = importlib.import_module("py_clob_client.clob_types")
+            BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
+            AssetType = clob_types_module.AssetType
+            raw = client.get_balance_allowance(params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+
+        if not isinstance(raw, dict):
+            return True, "", ""
+
+        balance, allowance = _extract_balance_allowance(raw)
+        if balance is not None and balance < amount_usdc:
+            return False, "insufficient_collateral", f"balance={balance} < amount={amount_usdc}"
+        if allowance is not None and allowance < amount_usdc:
+            return False, "insufficient_allowance", f"allowance={allowance} < amount={amount_usdc}"
+        return True, "", ""
+    except Exception as exc:
+        failure_type, detail = _classify_polymarket_exception(exc)
+        return False, failure_type, detail
+
 def execute_buy(token_id: str, amount_usdc: float, price: float,
                 private_key: str, proxy_wallet: str) -> dict:
     result = {
@@ -994,29 +1174,32 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
             log(f"   ❌ BUY failed [{result['failure_type']}]: {result['detail']}")
             return result
 
-        client_module = importlib.import_module("py_clob_client.client")
-        clob_types_module = importlib.import_module("py_clob_client.clob_types")
-        constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+        try:
+            client_module = importlib.import_module("py_clob_client_v2")
+            constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+            client = _build_v2_trade_client(private_key, proxy_wallet)
+            OrderArgs = getattr(client_module, "OrderArgs", None)
+            MarketOrderArgs = getattr(client_module, "MarketOrderArgs", None)
+            OrderType = getattr(client_module, "OrderType", None)
+            BUY = constants_module.BUY
+        except Exception as v2_exc:
+            log(f"   ⚠️ V2 trade client unavailable, falling back to legacy path: {v2_exc}")
+            client_module = importlib.import_module("py_clob_client.client")
+            clob_types_module = importlib.import_module("py_clob_client.clob_types")
+            constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+            client = _build_legacy_polymarket_client(private_key, proxy_wallet)
+            client.set_api_creds(client.create_or_derive_api_creds())
+            OrderArgs = clob_types_module.OrderArgs
+            MarketOrderArgs = getattr(clob_types_module, "MarketOrderArgs", None)
+            OrderType = getattr(clob_types_module, "OrderType", None)
+            BUY = constants_module.BUY
 
-        ClobClient = client_module.ClobClient
-        OrderArgs = clob_types_module.OrderArgs
-        MarketOrderArgs = getattr(clob_types_module, "MarketOrderArgs", None)
-        OrderType = getattr(clob_types_module, "OrderType", None)
-        BUY = constants_module.BUY
-        signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
-        if signature_type_raw is not None:
-            signature_type = int(signature_type_raw)
-        else:
-            signature_type = 2 if proxy_wallet else 0
-
-        client = ClobClient(
-            host=CLOB_API,
-            key=private_key,
-            chain_id=137,
-            signature_type=signature_type,
-            funder=proxy_wallet,
-        )
-        client.set_api_creds(client.create_or_derive_api_creds())
+        ok, failure_type, detail = _preflight_live_order(client, round(amount_usdc, 2))
+        if not ok:
+            result["failure_type"] = failure_type
+            result["detail"] = detail
+            log(f"   ❌ BUY preflight failed [{failure_type}]: {detail}")
+            return result
 
         resp = None
         if MarketOrderArgs is not None and OrderType is not None:
@@ -1064,9 +1247,10 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         )
         return result
     except Exception as e:
-        result["failure_type"] = "exception"
-        result["detail"] = str(e)
-        log(f"   ❌ BUY failed [{result['failure_type']}]: {e}")
+        failure_type, detail = _classify_polymarket_exception(e)
+        result["failure_type"] = failure_type
+        result["detail"] = detail
+        log(f"   ❌ BUY failed [{result['failure_type']}]: {detail}")
         return result
 
 
@@ -1075,26 +1259,27 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
     try:
         import importlib
 
+        client_module = importlib.import_module("py_clob_client_v2")
+        BalanceAllowanceParams = client_module.BalanceAllowanceParams
+        AssetType = client_module.AssetType
+        client = _build_v2_trade_client(private_key, proxy_wallet)
+        raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        if not isinstance(raw, dict):
+            return None, None
+        return _extract_balance_allowance(raw)
+    except Exception:
+        pass
+
+    try:
+        import importlib
+
         client_module = importlib.import_module("py_clob_client.client")
         clob_types_module = importlib.import_module("py_clob_client.clob_types")
 
-        ClobClient = client_module.ClobClient
         BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
         AssetType = clob_types_module.AssetType
 
-        signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
-        if signature_type_raw is not None:
-            signature_type = int(signature_type_raw)
-        else:
-            signature_type = 2 if proxy_wallet else 0
-
-        client = ClobClient(
-            host=CLOB_API,
-            key=private_key,
-            chain_id=137,
-            signature_type=signature_type,
-            funder=proxy_wallet,
-        )
+        client = _build_legacy_polymarket_client(private_key, proxy_wallet)
         client.set_api_creds(client.create_or_derive_api_creds())
 
         raw = client.get_balance_allowance(
@@ -1104,26 +1289,7 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
         if not isinstance(raw, dict):
             return None, None
 
-        def _to_float(value):
-            try:
-                if value is None:
-                    return None
-                return float(value)
-            except Exception:
-                return None
-
-        balance = _to_float(raw.get("balance"))
-        allowance = _to_float(raw.get("allowance"))
-
-        if allowance is None:
-            nested_allowances = raw.get("allowances") or raw.get("allowanceData") or {}
-            if isinstance(nested_allowances, dict):
-                values = [_to_float(v) for v in nested_allowances.values()]
-                values = [v for v in values if v is not None]
-                if values:
-                    allowance = max(values)
-
-        return balance, allowance
+        return _extract_balance_allowance(raw)
     except Exception:
         return None, None
 
