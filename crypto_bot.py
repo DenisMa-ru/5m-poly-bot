@@ -1097,6 +1097,85 @@ def _classify_polymarket_exception(exc: Exception) -> tuple[str, str]:
     return "exception", detail
 
 
+def _normalize_wallet_address(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if re.fullmatch(r"0x[a-fA-F0-9]{40}", text):
+        return text
+    return None
+
+
+def _rpc_hex_to_int(value):
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if not text.startswith("0x"):
+        return None
+    try:
+        return int(text, 16)
+    except Exception:
+        return None
+
+
+def _get_polygon_rpc_urls() -> list[str]:
+    raw_values = [
+        os.getenv("POLYGON_RPC_URL", ""),
+        os.getenv("POLYGON_RPC_URLS", ""),
+    ]
+    urls = []
+    for raw in raw_values:
+        if not raw:
+            continue
+        for part in re.split(r"[\s,;]+", raw.strip()):
+            url = part.strip()
+            if url and url not in urls:
+                urls.append(url)
+    return urls
+
+
+def _fetch_erc20_balance(wallet: str, token_address: str, rpc_url: str) -> float | None:
+    wallet_addr = _normalize_wallet_address(wallet)
+    token_addr = _normalize_wallet_address(token_address)
+    if not wallet_addr or not token_addr or not rpc_url:
+        return None
+
+    call_data = "0x70a08231" + wallet_addr[2:].lower().rjust(64, "0")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {
+                "to": token_addr,
+                "data": call_data,
+            },
+            "latest",
+        ],
+    }
+
+    try:
+        resp = requests.post(rpc_url, json=payload, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        raw = _rpc_hex_to_int(data.get("result"))
+        if raw is None:
+            return None
+        return raw / 1_000_000
+    except Exception:
+        return None
+
+
+def _fetch_polymarket_pusd_balance(wallet: str) -> float | None:
+    token = os.getenv("POLY_PUSD_TOKEN", "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
+    best_balance = None
+    for rpc_url in _get_polygon_rpc_urls():
+        balance = _fetch_erc20_balance(wallet, token, rpc_url)
+        if balance is not None and (best_balance is None or balance > best_balance):
+            best_balance = balance
+    return best_balance
+
+
 def _extract_balance_allowance(raw: dict) -> tuple[float | None, float | None]:
     def _to_float(value):
         try:
@@ -1140,6 +1219,10 @@ def _preflight_live_order(client, amount_usdc: float) -> tuple[bool, str, str]:
             return True, "", ""
 
         balance, allowance = _extract_balance_allowance(raw)
+        proxy_wallet = os.getenv("POLY_PROXY_WALLET", "") or os.getenv("POLY_WALLET", "")
+        onchain_balance = _fetch_polymarket_pusd_balance(proxy_wallet) if proxy_wallet else None
+        if onchain_balance is not None and (balance is None or onchain_balance > balance):
+            balance = onchain_balance
         if balance is not None and balance < amount_usdc:
             return False, "insufficient_collateral", f"balance={balance} < amount={amount_usdc}"
         if allowance is not None and allowance < amount_usdc:
@@ -1256,6 +1339,8 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
 
 def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
     """Return available collateral balance/allowance from Polymarket, if available."""
+    onchain_balance = _fetch_polymarket_pusd_balance(proxy_wallet)
+
     try:
         import importlib
 
@@ -1265,8 +1350,11 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
         client = _build_v2_trade_client(private_key, proxy_wallet)
         raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
         if not isinstance(raw, dict):
-            return None, None
-        return _extract_balance_allowance(raw)
+            return onchain_balance, None
+        balance, allowance = _extract_balance_allowance(raw)
+        if onchain_balance is not None and (balance is None or onchain_balance > balance):
+            balance = onchain_balance
+        return balance, allowance
     except Exception:
         pass
 
@@ -1287,11 +1375,14 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
         )
 
         if not isinstance(raw, dict):
-            return None, None
+            return onchain_balance, None
 
-        return _extract_balance_allowance(raw)
+        balance, allowance = _extract_balance_allowance(raw)
+        if onchain_balance is not None and (balance is None or onchain_balance > balance):
+            balance = onchain_balance
+        return balance, allowance
     except Exception:
-        return None, None
+        return onchain_balance, None
 
 # ─── BOT ───────────────────────────────────────────────────────────────────────
 class CryptoBot:
