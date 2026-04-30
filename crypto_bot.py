@@ -31,6 +31,7 @@ from pathlib import Path
 import os
 import signal
 import sys
+import uuid
 
 load_dotenv()
 
@@ -42,6 +43,8 @@ WINDOW_SAMPLES_FILE = BOT_DIR / "window_samples.json"
 SETTINGS_FILE = BOT_DIR / "settings.json"
 PID_FILE = BOT_DIR / "bot.pid"
 CORE_EV_RULES_FILE = BOT_DIR / "core_ev_rules.json"
+SESSION_STATE_FILE = BOT_DIR / "session_state.json"
+STATS_STATE_FILE = BOT_DIR / "stats_state.json"
 
 
 def atomic_write_text(path: Path, content: str):
@@ -49,6 +52,48 @@ def atomic_write_text(path: Path, content: str):
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp_path.write_text(content, encoding="utf-8")
     os.replace(tmp_path, path)
+
+
+class FileLock:
+    def __init__(self, path: Path, timeout: float = 5.0):
+        self.path = path.with_suffix(path.suffix + ".lock")
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        started = time.time()
+        while True:
+            try:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                return self
+            except FileExistsError:
+                if time.time() - started >= self.timeout:
+                    raise TimeoutError(f"Timed out acquiring lock for {self.path}")
+                time.sleep(0.05)
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        try:
+            self.path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _load_json_file(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data
+    except Exception:
+        return default
+
+
+def _save_json_file(path: Path, payload):
+    with FileLock(path):
+        atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=True))
 
 
 def load_signals_file() -> list:
@@ -64,7 +109,7 @@ def load_signals_file() -> list:
 
 def save_signals_file(signals: list):
     """Persist signals history atomically."""
-    atomic_write_text(SIGNALS_FILE, json.dumps(signals[-10000:], indent=2))
+    atomic_write_text(SIGNALS_FILE, json.dumps(signals[-10000:], indent=2, ensure_ascii=True))
 
 
 def load_window_samples_file() -> list:
@@ -80,7 +125,7 @@ def load_window_samples_file() -> list:
 
 def save_window_samples_file(samples: list):
     """Persist full-window observation history atomically."""
-    atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2))
+    atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2, ensure_ascii=True))
 
 
 def save_window_sample(sample_data: dict):
@@ -104,6 +149,35 @@ def load_core_ev_rules() -> dict:
     except Exception:
         pass
     return {"buckets": {}}
+
+
+def _new_session_id() -> str:
+    return f"session-{uuid.uuid4().hex[:12]}"
+
+
+def _default_session_state(mode: str = "dry-run", service_name: str = "Unknown", bank_start: float = 100.0) -> dict:
+    return {
+        "session_id": _new_session_id(),
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "session_bank_start": float(bank_start),
+        "mode_at_session_start": mode,
+        "service_name_at_session_start": service_name,
+        "roi_40_alert_sent": False,
+    }
+
+
+def load_session_state() -> dict:
+    data = _load_json_file(SESSION_STATE_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_session_state(state: dict):
+    _save_json_file(SESSION_STATE_FILE, state)
+
+
+def load_stats_state() -> dict:
+    data = _load_json_file(STATS_STATE_FILE, {"live_stats_reset_at": None})
+    return data if isinstance(data, dict) else {"live_stats_reset_at": None}
 
 
 def ensure_single_instance():
@@ -133,7 +207,8 @@ def ensure_single_instance():
 def load_settings():
     """Load settings from settings.json, fallback to defaults."""
     try:
-        return json.loads(SETTINGS_FILE.read_text())
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
@@ -146,6 +221,23 @@ def load_bot_settings():
         return {}
 
 _bot_settings = load_bot_settings()
+
+
+def current_runtime_mode(paper: bool, dry_run: bool) -> str:
+    if dry_run:
+        return "dry-run"
+    if paper:
+        return "paper"
+    return "live"
+
+
+def current_service_name(paper: bool, dry_run: bool) -> str:
+    mode = current_runtime_mode(paper, dry_run)
+    if mode == "live":
+        return "poly-bot-live.service"
+    if mode == "dry-run":
+        return "poly-bot-test.service"
+    return "poly-bot.service"
 
 
 def get_enabled_coins(settings: dict) -> list[str]:
@@ -165,9 +257,10 @@ def get_setting(key, default):
 def save_signal(signal_data):
     """Append a signal to signals.json for dashboard history."""
     try:
-        signals = load_signals_file()
-        signals.append(signal_data)
-        save_signals_file(signals)
+        with FileLock(SIGNALS_FILE):
+            signals = load_signals_file()
+            signals.append(signal_data)
+            save_signals_file(signals)
     except Exception as e:
         log(f"[SIGNAL SAVE ERROR] {e}")
 
@@ -284,8 +377,6 @@ MARKETS = {
     "btc-updown-5m": "BTC",
     "eth-updown-5m": "ETH",
 }
-ENABLED_COINS      = set(get_enabled_coins(_bot_settings))
-ACTIVE_MARKETS     = {prefix: coin for prefix, coin in MARKETS.items() if coin in ENABLED_COINS}
 
 # ─── UTILS ─────────────────────────────────────────────────────────────────────
 def ts_str():
@@ -1392,6 +1483,8 @@ class CryptoBot:
         self.paper        = paper
         self.dry_run      = dry_run  # real data, no execution
         self.amount       = amount
+        self.mode         = current_runtime_mode(paper, dry_run)
+        self.service_name = current_service_name(paper, dry_run)
         self.traded_slugs = set()
         self.trades       = []
         self.private_key  = os.getenv("POLY_PRIVATE_KEY", "")
@@ -1401,10 +1494,23 @@ class CryptoBot:
         self.shadow_window_state: dict[str, dict] = {}
         self.closed_window_summaries: deque = deque(maxlen=12)
         self.core_ev_rules = load_core_ev_rules()
+        self.last_settings_reload_at = 0.0
+        self.roi_alert_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        self.roi_alert_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
         # Банк (начальный капитал) и текущий баланс
         settings = load_settings()
-        self.bank_start = float(settings.get("bank", 100.0))
+        self.settings = settings
+        self.session_state = load_session_state()
+        if not self.session_state.get("session_id"):
+            self.session_state = _default_session_state(
+                mode=self.mode,
+                service_name=self.service_name,
+                bank_start=float(settings.get("sim_bank", settings.get("bank", 100.0)) or 100.0),
+            )
+            save_session_state(self.session_state)
+        self.session_id = str(self.session_state.get("session_id") or _new_session_id())
+        self.bank_start = float(self.session_state.get("session_bank_start", settings.get("sim_bank", settings.get("bank", 100.0))) or 100.0)
         self.bank_balance = self.bank_start
         self.daily_loss_limit = float(settings.get("daily_loss_limit", 15.0))
         self.daily_loss_limit_pct = float(settings.get("daily_loss_limit_pct", 0.0) or 0.0)
@@ -1415,6 +1521,8 @@ class CryptoBot:
         self.dynamic_step_bank_gain_pct = float(settings.get("dynamic_step_bank_gain_pct", 0.70))
         self.dynamic_step_risk_pct = float(settings.get("dynamic_step_risk_pct", 0.01))
         self.dynamic_max_risk_pct = float(settings.get("dynamic_max_risk_pct", 0.08))
+        self.enabled_coins = set(get_enabled_coins(settings))
+        self.active_markets = {prefix: coin for prefix, coin in MARKETS.items() if coin in self.enabled_coins}
 
         # Prevent duplicate bot processes before continuing.
         try:
@@ -1435,7 +1543,7 @@ class CryptoBot:
             )
         else:
             log(f"Crypto Up/Down Bot | {mode} | ${current_trade_amount:.2f}/trade")
-        log(f"Bank: ${self.bank_start:.2f} | Markets: {', '.join(ACTIVE_MARKETS.values())}")
+        log(f"Bank: ${self.bank_start:.2f} | Markets: {', '.join(self.active_markets.values())}")
         log(f"Entry window: {ENTRY_SECONDS_MIN}-{ENTRY_SECONDS_MAX}s | "
             f"Price: BTC>={PRICE_MIN['BTC']} ETH>={PRICE_MIN['ETH']} max={PRICE_MAX}")
         log(
@@ -1459,6 +1567,7 @@ class CryptoBot:
                 f"max {self.dynamic_max_risk_pct*100:.0f}% | cap ${self.dynamic_max_amount:.2f}"
             )
         log(f"Shadow live mode: {normalize_shadow_live_mode(SHADOW_LIVE_MODE)}")
+        log(f"Session: {self.session_id} | Service: {self.service_name}")
         if CORE_EV_ENABLED:
             log(
                 f"Core EV mode: ON | pm={CORE_EV_PM_MIN:.2f}-{CORE_EV_PM_MAX:.2f} | "
@@ -1488,6 +1597,69 @@ class CryptoBot:
             log("Core EV mode: OFF")
         log(f"Settings from: {'settings.json' if _bot_settings else 'defaults'}")
         log("=" * 60)
+
+    def _reload_runtime_state(self):
+        now = time.time()
+        if now - self.last_settings_reload_at < 5:
+            return
+        self.last_settings_reload_at = now
+        try:
+            fresh_settings = load_settings()
+            self.settings = fresh_settings
+            self.amount = float(fresh_settings.get("amount", self.amount) or self.amount)
+            self.daily_loss_limit = float(fresh_settings.get("daily_loss_limit", self.daily_loss_limit) or self.daily_loss_limit)
+            self.daily_loss_limit_pct = float(fresh_settings.get("daily_loss_limit_pct", self.daily_loss_limit_pct) or self.daily_loss_limit_pct)
+            self.dynamic_sizing = bool(fresh_settings.get("dynamic_sizing", self.dynamic_sizing))
+            self.dynamic_min_amount = float(fresh_settings.get("dynamic_min_amount", self.dynamic_min_amount) or self.dynamic_min_amount)
+            self.dynamic_max_amount = float(fresh_settings.get("dynamic_max_amount", self.dynamic_max_amount) or self.dynamic_max_amount)
+            self.dynamic_base_risk_pct = float(fresh_settings.get("dynamic_base_risk_pct", self.dynamic_base_risk_pct) or self.dynamic_base_risk_pct)
+            self.dynamic_step_bank_gain_pct = float(fresh_settings.get("dynamic_step_bank_gain_pct", self.dynamic_step_bank_gain_pct) or self.dynamic_step_bank_gain_pct)
+            self.dynamic_step_risk_pct = float(fresh_settings.get("dynamic_step_risk_pct", self.dynamic_step_risk_pct) or self.dynamic_step_risk_pct)
+            self.dynamic_max_risk_pct = float(fresh_settings.get("dynamic_max_risk_pct", self.dynamic_max_risk_pct) or self.dynamic_max_risk_pct)
+            self.enabled_coins = set(get_enabled_coins(fresh_settings))
+            self.active_markets = {prefix: coin for prefix, coin in MARKETS.items() if coin in self.enabled_coins}
+        except Exception as e:
+            log(f"[SETTINGS RELOAD ERROR] {e}")
+
+        try:
+            fresh_session = load_session_state()
+            if fresh_session.get("session_id") and fresh_session.get("session_id") != self.session_id:
+                self.session_state = fresh_session
+                self.session_id = str(fresh_session.get("session_id"))
+                self.bank_start = float(fresh_session.get("session_bank_start", self.bank_balance) or self.bank_balance)
+                self.bank_balance = self.bank_start
+                log(f"[SESSION] Switched to {self.session_id} | start=${self.bank_start:.2f}")
+            elif fresh_session.get("session_id"):
+                self.session_state = fresh_session
+        except Exception as e:
+            log(f"[SESSION RELOAD ERROR] {e}")
+
+    def _maybe_send_roi_alert(self):
+        if self.mode != "live":
+            return
+        if not self.roi_alert_token or not self.roi_alert_chat_id:
+            return
+        if not self.session_state or self.session_state.get("roi_40_alert_sent"):
+            return
+        if self.bank_start <= 0:
+            return
+        roi_pct = ((self.bank_balance - self.bank_start) / self.bank_start) * 100
+        if roi_pct < 40:
+            return
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{self.roi_alert_token}/sendMessage",
+                json={
+                    "chat_id": self.roi_alert_chat_id,
+                    "text": f"ROI alert: session {self.session_id} reached {roi_pct:.2f}% | bank ${self.bank_balance:.2f}",
+                },
+                timeout=10,
+            )
+            self.session_state["roi_40_alert_sent"] = True
+            save_session_state(self.session_state)
+            log(f"[TELEGRAM] ROI>=40% alert sent for {self.session_id}")
+        except Exception as e:
+            log(f"[TELEGRAM ERROR] {e}")
 
     def _daily_loss_limit_hit(self) -> bool:
         """Stop new entries once the configured daily loss limit is reached."""
@@ -1556,6 +1728,9 @@ class CryptoBot:
 
         signal_data = {
             "timestamp": ts_str(),
+            "mode": self.mode,
+            "session_id": self.session_id,
+            "service_name": self.service_name,
             "market_slug": slug,
             "market_close_ts": market.get("close_ts"),
             "market_start_ts": market.get("close_ts", 0) - 300 if market.get("close_ts") else None,
@@ -1657,6 +1832,9 @@ class CryptoBot:
 
     def _save_window_sample(self, snapshot: dict):
         sample = dict(snapshot.get("signal_data", {}))
+        sample["mode"] = self.mode
+        sample["session_id"] = self.session_id
+        sample["service_name"] = self.service_name
         sample["record_type"] = "window_sample"
         sample["sample_source"] = "full_window_observe"
         save_window_sample(sample)
@@ -2110,6 +2288,7 @@ class CryptoBot:
     def run(self):
         while self.running:
             try:
+                self._reload_runtime_state()
                 # Check for control commands
                 cmd = check_control()
                 if cmd == "stop":
@@ -2122,6 +2301,7 @@ class CryptoBot:
                     log("Restarting...")
 
                 self._cycle()
+                self._maybe_send_roi_alert()
             except KeyboardInterrupt:
                 log("Stopped.")
                 self._print_summary()
@@ -2140,7 +2320,7 @@ class CryptoBot:
         self._print_summary()
 
     def _cycle(self):
-        if not ACTIVE_MARKETS:
+        if not self.active_markets:
             log("No active markets configured. Sleeping.")
             time.sleep(POLL_INTERVAL)
             return
@@ -2156,7 +2336,7 @@ class CryptoBot:
         if now_unix() >= close_ts + 5:
             log(f"⚠️  Arrived too late, skipping close "
                 f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%S')} UTC")
-            for prefix in ACTIVE_MARKETS:
+            for prefix in self.active_markets:
                 self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
             return
 
@@ -2170,7 +2350,7 @@ class CryptoBot:
 
             if seconds_left <= 0:
                 log("⏰ Market closed.")
-                for prefix in ACTIVE_MARKETS:
+                for prefix in self.active_markets:
                     self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
                 # Проверяем результаты только что закрывшегося раунда.
                 # Раньше здесь использовался предыдущий close_ts, из-за чего
@@ -2181,7 +2361,7 @@ class CryptoBot:
 
             pending = [
                 prefix for prefix in MARKETS
-                if prefix in ACTIVE_MARKETS
+                if prefix in self.active_markets
                 if f"{prefix}-{close_ts - 300}" not in self.traded_slugs
                 and f"{prefix}-{close_ts - 300}" not in entered_slugs
             ]

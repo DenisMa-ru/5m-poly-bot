@@ -7,9 +7,11 @@ import streamlit as st
 import re, os, json
 import subprocess
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
+import uuid
+import time
 
 # ===== CONFIG =====
 BOT_DIR = Path("/root/5m-poly-bot")
@@ -22,6 +24,9 @@ CONTROL_FILE = Path("/root/5m-poly-bot/control.json")
 SIGNALS_FILE = Path("/root/5m-poly-bot/signals.json")
 WINDOW_SAMPLES_FILE = Path("/root/5m-poly-bot/window_samples.json")
 CORE_EV_RULES_FILE = Path("/root/5m-poly-bot/core_ev_rules.json")
+SETTINGS_FILE = Path("/root/5m-poly-bot/settings.json")
+SESSION_STATE_FILE = Path("/root/5m-poly-bot/session_state.json")
+STATS_STATE_FILE = Path("/root/5m-poly-bot/stats_state.json")
 BOT_SCRIPT = "crypto_bot.py"
 PID_FILE = Path("/root/5m-poly-bot/bot.pid")
 CLOB_API = "https://clob.polymarket.com"
@@ -94,6 +99,48 @@ def atomic_write_text(path: Path, content: str):
     os.replace(tmp_path, path)
 
 
+class FileLock:
+    def __init__(self, path: Path, timeout: float = 5.0):
+        self.path = path.with_suffix(path.suffix + ".lock")
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        started = time.time()
+        while True:
+            try:
+                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                return self
+            except FileExistsError:
+                if time.time() - started >= self.timeout:
+                    raise TimeoutError(f"Timed out acquiring lock for {self.path}")
+                time.sleep(0.05)
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        try:
+            self.path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _load_json_file(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data
+    except Exception:
+        return default
+
+
+def _save_json_file(path: Path, payload):
+    with FileLock(path):
+        atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=True))
+
+
 def write_control(cmd, mode=None, amount=None, settings=None):
     """Write command to control file for the bot to read."""
     data = {"cmd": cmd, "timestamp": datetime.now().isoformat()}
@@ -120,6 +167,97 @@ def is_bot_running():
         return True
     except:
         return False
+
+
+def _new_session_id() -> str:
+    return f"session-{uuid.uuid4().hex[:12]}"
+
+
+def _default_stats_state() -> dict:
+    return {
+        "live_stats_reset_at": None,
+    }
+
+
+def _default_session_state(mode: str = "dry-run", service_name: str = "Unknown", bank_start: float = 100.0) -> dict:
+    return {
+        "session_id": _new_session_id(),
+        "started_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "session_bank_start": float(bank_start),
+        "mode_at_session_start": mode,
+        "service_name_at_session_start": service_name,
+        "roi_40_alert_sent": False,
+    }
+
+
+def _resolve_session_bank_start(mode: str, desired_mode: str, settings: dict, account: dict | None = None) -> float:
+    account = account or {}
+    if mode == "live" or (mode == "Unknown" and desired_mode == "live"):
+        portfolio = _safe_float(account.get("portfolio"))
+        cash = _safe_float(account.get("cash"))
+        if portfolio is not None:
+            return float(portfolio)
+        if cash is not None:
+            return float(cash)
+    return float(settings.get("sim_bank", settings.get("bank", 100.0)) or 100.0)
+
+
+def load_stats_state() -> dict:
+    data = _load_json_file(STATS_STATE_FILE, _default_stats_state())
+    if not isinstance(data, dict):
+        return _default_stats_state()
+    payload = _default_stats_state()
+    payload.update(data)
+    return payload
+
+
+def save_stats_state(state: dict):
+    payload = _default_stats_state()
+    payload.update(state or {})
+    _save_json_file(STATS_STATE_FILE, payload)
+
+
+def load_session_state() -> dict:
+    data = _load_json_file(SESSION_STATE_FILE, None)
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def save_session_state(state: dict):
+    _save_json_file(SESSION_STATE_FILE, state)
+
+
+def ensure_session_state(settings: dict, runtime_state: dict | None = None, account: dict | None = None) -> dict:
+    runtime_state = runtime_state or {}
+    session = load_session_state()
+    if session.get("session_id"):
+        return session
+    actual_mode = str(runtime_state.get("mode") or "Unknown")
+    desired_mode = str(settings.get("desired_mode", "dry-run") or "dry-run")
+    service_name = str(runtime_state.get("service_name") or "Unknown")
+    bank_start = _resolve_session_bank_start(actual_mode, desired_mode, settings, account)
+    session = _default_session_state(
+        mode=actual_mode if actual_mode != "Unknown" else desired_mode,
+        service_name=service_name,
+        bank_start=bank_start,
+    )
+    save_session_state(session)
+    return session
+
+
+def create_new_session(settings: dict, runtime_state: dict, account: dict | None = None) -> dict:
+    actual_mode = str(runtime_state.get("mode") or "Unknown")
+    desired_mode = str(settings.get("desired_mode", "dry-run") or "dry-run")
+    service_name = str(runtime_state.get("service_name") or "Unknown")
+    bank_start = _resolve_session_bank_start(actual_mode, desired_mode, settings, account)
+    session = _default_session_state(
+        mode=actual_mode if actual_mode != "Unknown" else desired_mode,
+        service_name=service_name,
+        bank_start=bank_start,
+    )
+    save_session_state(session)
+    return session
 
 # ===== DATA HELPERS — runtime data =====
 @st.cache_data(ttl=10, show_spinner=False)
@@ -240,6 +378,13 @@ def _extract_log_path_from_systemd(value: str | None) -> Path | None:
     return None
 
 
+def _active_bot_services(services: list[dict]) -> list[dict]:
+    return [
+        row for row in services
+        if row.get("load_state") != "not-found" and row.get("active_state") == "active"
+    ]
+
+
 @st.cache_data(ttl=5, show_spinner=False)
 def get_runtime_service_state():
     """Resolve the currently running bot service via systemd, not via a single log file."""
@@ -301,10 +446,7 @@ def get_runtime_service_state():
             pass
         service_rows.append(row)
 
-    active_services = [
-        row for row in service_rows
-        if row.get("load_state") != "not-found" and row.get("active_state") == "active"
-    ]
+    active_services = _active_bot_services(service_rows)
     selected = None
     if active_services:
         selected = max(active_services, key=lambda row: (int(row.get("active_enter_mono") or 0), row.get("service_name") or ""))
@@ -337,6 +479,8 @@ def get_runtime_service_state():
     parsed["active_state"] = selected.get("active_state") or "Unknown"
     parsed["sub_state"] = selected.get("sub_state") or "Unknown"
     parsed["services"] = service_rows
+    parsed["active_service_count"] = len(active_services)
+    parsed["has_service_conflict"] = len(active_services) > 1
     return parsed
 
 
@@ -913,7 +1057,13 @@ def fetch_polymarket_account_state() -> dict:
     return result
 
 @st.cache_data(ttl=10, show_spinner=False)
-def build_dashboard_state(session_start_ts: str | None = None, session_bank_start: float | None = None):
+def build_dashboard_state(
+    session_start_ts: str | None = None,
+    session_bank_start: float | None = None,
+    session_id: str | None = None,
+    actual_mode: str | None = None,
+    stats_reset_at: str | None = None,
+):
     """
     Строим состояние Dashboard из signals.json + window_samples.json.
     Возвращает dict с метриками, последними сигналами, full-window наблюдениями и rulebook state.
@@ -922,10 +1072,21 @@ def build_dashboard_state(session_start_ts: str | None = None, session_bank_star
     window_samples = load_window_samples()
     core_ev_rules = load_core_ev_rules()
     session_start_dt = parse_ts(session_start_ts) if session_start_ts else None
+    stats_reset_dt = parse_ts(stats_reset_at) if stats_reset_at else None
+    all_signals = list(signals)
 
-    if session_start_dt is not None:
-        signals = [s for s in signals if (parse_ts(str(s.get("timestamp", "") or "")) or datetime.min) >= session_start_dt]
-        window_samples = [s for s in window_samples if (parse_ts(str(s.get("timestamp", "") or "")) or datetime.min) >= session_start_dt]
+    if session_id:
+        session_signals = [s for s in signals if str(s.get("session_id", "") or "") == session_id]
+        session_window_samples = [s for s in window_samples if str(s.get("session_id", "") or "") == session_id]
+    else:
+        session_signals = list(signals)
+        session_window_samples = list(window_samples)
+        if session_start_dt is not None:
+            session_signals = [s for s in session_signals if (parse_ts(str(s.get("timestamp", "") or "")) or datetime.min) >= session_start_dt]
+            session_window_samples = [s for s in session_window_samples if (parse_ts(str(s.get("timestamp", "") or "")) or datetime.min) >= session_start_dt]
+
+    signals = session_signals
+    window_samples = session_window_samples
 
     # Разделяем на вошедшие и пропущенные
     entered = [s for s in signals if s.get("entered")]
@@ -1027,7 +1188,7 @@ def build_dashboard_state(session_start_ts: str | None = None, session_bank_star
     # Считаем invested и pnl из вошедших сигналов
     settings = load_settings()
     amount = settings.get("amount", 10)
-    bank_start = float(session_bank_start if session_bank_start is not None else settings.get("bank", 100))
+    bank_start = float(session_bank_start if session_bank_start is not None else settings.get("sim_bank", settings.get("bank", 100)))
     total_invested = sum(s.get("amount", amount) for s in entered)
 
     # PnL: берём из signal data, или рассчитываем из pm цены для старых сигналов
@@ -1171,6 +1332,26 @@ def build_dashboard_state(session_start_ts: str | None = None, session_bank_star
             eth_pm = s
 
     account_state = fetch_polymarket_account_state()
+    active_mode = str(actual_mode or "Unknown")
+    if active_mode != "live":
+        account_state = {
+            **account_state,
+            "cash": bank_current,
+            "portfolio": bank_current,
+            "spendable": bank_current,
+            "source_error": "Simulated dry-run balance" if active_mode == "dry-run" else account_state.get("source_error"),
+        }
+
+    live_all_time_signals = [s for s in all_signals if str(s.get("mode", "") or "") == "live" and s.get("entered")]
+    if stats_reset_dt is not None:
+        live_all_time_signals = [
+            s for s in live_all_time_signals
+            if (parse_ts(str(s.get("timestamp", "") or "")) or datetime.min) >= stats_reset_dt
+        ]
+    live_all_time_resolved = [s for s in live_all_time_signals if s.get("realized_pnl") is not None]
+    live_all_time_wins = len([s for s in live_all_time_resolved if s.get("won") == True])
+    live_all_time_losses = len([s for s in live_all_time_resolved if s.get("won") == False])
+    live_all_time_pnl = sum(float(s.get("realized_pnl", 0) or 0) for s in live_all_time_resolved)
 
     return {
         "total_signals": len(signals),
@@ -1232,6 +1413,11 @@ def build_dashboard_state(session_start_ts: str | None = None, session_bank_star
         "eth_entered": [s for s in entered if s.get("coin") == "ETH"],
         "account": account_state,
         "session_start_ts": session_start_ts,
+        "session_id": session_id,
+        "live_all_time_trades": len(live_all_time_signals),
+        "live_all_time_wins": live_all_time_wins,
+        "live_all_time_losses": live_all_time_losses,
+        "live_all_time_pnl": live_all_time_pnl,
         "time": datetime.now().strftime('%H:%M:%S'),
     }
 
@@ -1303,31 +1489,71 @@ def parse_log_state(path):
 def load_settings():
     """Load bot settings."""
     try:
-        return json.loads((BOT_DIR / "settings.json").read_text())
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            merged = get_default_settings()
+            merged.update(data)
+            return merged
+        return get_default_settings()
     except:
         return get_default_settings()
 
 
-def restart_bot_service(service_name: str = "poly-bot-live.service") -> tuple[bool, str]:
+def _run_systemctl(*args: str, timeout: int = 20) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
-            ["systemctl", "restart", service_name],
+            ["systemctl", *args],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=timeout,
             check=False,
         )
         if proc.returncode == 0:
-            return True, f"{service_name} restarted"
-        detail = (proc.stderr or proc.stdout or "systemctl restart failed").strip()
+            return True, f"systemctl {' '.join(args)} ok"
+        detail = (proc.stderr or proc.stdout or f"systemctl {' '.join(args)} failed").strip()
         return False, detail
     except Exception as e:
         return False, str(e)
 
+
+def restart_bot_service(service_name: str = "poly-bot-live.service") -> tuple[bool, str]:
+    return _run_systemctl("restart", service_name)
+
+
+def stop_all_bot_services() -> tuple[bool, str]:
+    details = []
+    ok = True
+    for service_name in ["poly-bot-live.service", "poly-bot-test.service", "poly-bot.service"]:
+        result_ok, detail = _run_systemctl("stop", service_name)
+        details.append(f"{service_name}: {detail}")
+        if not result_ok and "not loaded" not in detail.lower() and "not-found" not in detail.lower():
+            ok = False
+    return ok, " | ".join(details)
+
+
+def start_bot_for_mode(desired_mode: str) -> tuple[bool, str]:
+    mode = str(desired_mode or "dry-run").strip().lower()
+    target_service = "poly-bot-live.service" if mode == "live" else "poly-bot-test.service"
+    other_service = "poly-bot-test.service" if target_service == "poly-bot-live.service" else "poly-bot-live.service"
+    other_legacy = "poly-bot.service" if target_service != "poly-bot.service" else None
+    stop_targets = [other_service]
+    if other_legacy:
+        stop_targets.append(other_legacy)
+    details = []
+    for service_name in stop_targets:
+        _, detail = _run_systemctl("stop", service_name)
+        details.append(f"stop {service_name}: {detail}")
+    start_ok, start_detail = _run_systemctl("start", target_service)
+    details.append(f"start {target_service}: {start_detail}")
+    return start_ok, " | ".join(details)
+
 def get_default_settings():
     """Возвращает дефолтные настройки бота."""
     return {
+        "first_setup_done": False,
+        "desired_mode": "dry-run",
         "bank": 100,
+        "sim_bank": 100,
         "amount": 5,
         "enabled_coins": ["BTC"],
         "observe_window_seconds": 305,
@@ -1373,7 +1599,9 @@ def get_default_settings():
 
 def save_settings(settings):
     try:
-        atomic_write_text(BOT_DIR / "settings.json", json.dumps(settings, indent=2))
+        merged = get_default_settings()
+        merged.update(settings or {})
+        _save_json_file(SETTINGS_FILE, merged)
     except: pass
 
 # ===== LABELS для skip reasons =====
@@ -1384,7 +1612,17 @@ RL = {'btc_low': 'BTC below min', 'eth_low': 'ETH below min', 'high': 'Above max
 settings = load_settings()
 L = get_runtime_service_state()
 bot_running = L.get("active_state") == "active" or is_bot_running()
-D = build_dashboard_state(L.get("session_start_ts"), L.get("session_bank_start"))  # Dashboard state из текущей сессии
+account_state_seed = fetch_polymarket_account_state() if str(L.get("mode") or "Unknown") == "live" else {}
+stats_state = load_stats_state()
+session_state = ensure_session_state(settings, L, account_state_seed)
+D = build_dashboard_state(
+    session_state.get("started_at"),
+    session_state.get("session_bank_start"),
+    session_state.get("session_id"),
+    L.get("mode"),
+    stats_state.get("live_stats_reset_at"),
+)
+first_setup_needed = not bool(settings.get("first_setup_done"))
 
 # ===== TABS =====
 tab_dashboard, tab_stats, tab_settings = st.tabs([
@@ -1397,6 +1635,47 @@ tab_dashboard, tab_stats, tab_settings = st.tabs([
 # TAB 1: DASHBOARD
 # ==========================================
 with tab_dashboard:
+    if first_setup_needed:
+        st.markdown("### 🚀 Первый запуск")
+        st.info("Заполните базовые параметры. После сохранения откроется обычный dashboard.")
+        wizard_settings = settings.copy()
+        w1, w2 = st.columns(2)
+        with w1:
+            wizard_settings["desired_mode"] = st.selectbox(
+                "Режим для запуска бота",
+                ["dry-run", "live"],
+                index=["dry-run", "live"].index(str(settings.get("desired_mode", "dry-run") or "dry-run")),
+            )
+            wizard_settings["amount"] = st.number_input(
+                "Размер ставки (USDC)",
+                min_value=1.0,
+                max_value=1000.0,
+                value=float(settings.get("amount", 5.0)),
+                step=1.0,
+            )
+        with w2:
+            wizard_settings["enabled_coins"] = st.multiselect(
+                "Активные монеты",
+                ["BTC", "ETH"],
+                default=settings.get("enabled_coins", ["BTC"]),
+            )
+            wizard_settings["sim_bank"] = st.number_input(
+                "Симулированный банк dry-run (USDC)",
+                min_value=10.0,
+                max_value=100000.0,
+                value=float(settings.get("sim_bank", settings.get("bank", 100.0))),
+                step=10.0,
+            )
+        if st.button("✅ Завершить первичную настройку", type="primary", use_container_width=True):
+            wizard_settings["first_setup_done"] = True
+            wizard_settings["bank"] = float(wizard_settings.get("sim_bank", 100.0))
+            save_settings(wizard_settings)
+            fresh_session = create_new_session(wizard_settings, L, account_state_seed)
+            save_session_state(fresh_session)
+            st.success("Первичная настройка сохранена.")
+            st.rerun()
+        st.stop()
+
     st.markdown("### 📊 Обзор")
     ctrl_cols = st.columns([1, 3, 1])
 
@@ -1410,6 +1689,8 @@ with tab_dashboard:
             "Ключевые метрики, последние сделки и быстрый refresh без перегруженной аналитики.</div>",
             unsafe_allow_html=True,
         )
+        if L.get("has_service_conflict"):
+            st.error("Обнаружено несколько активных bot-service одновременно. Dashboard выбрал последний стартовавший сервис, но состояние ненормальное.")
 
     with ctrl_cols[2]:
         if st.button("🔄 Refresh", use_container_width=True):
@@ -1418,7 +1699,7 @@ with tab_dashboard:
 
     account = D['account']
     mode = str(L.get('mode') or 'Unknown')
-    is_live_mode = mode == 'live'
+    desired_mode = str(settings.get('desired_mode', 'dry-run') or 'dry-run')
     cash = account.get('cash')
     portfolio = account.get('portfolio')
     spendable = account.get('spendable')
@@ -1429,6 +1710,7 @@ with tab_dashboard:
     roi_pct = (net_result / D['bank_start'] * 100) if net_result is not None and D['bank_start'] else None
     summary_items = [
         ("Mode", mode),
+        ("Desired", desired_mode),
         ("Service", str(L.get('service_name') or 'Unknown')),
         ("Trade", f"${settings.get('amount', 10):.0f}"),
         ("Coins", ', '.join(settings.get('enabled_coins', ['BTC', 'ETH']))),
@@ -1443,10 +1725,16 @@ with tab_dashboard:
     st.markdown("---")
     st.markdown("#### Polymarket")
     pm1, pm2, pm3, pm4 = st.columns(4)
-    pm1.metric("💵 Cash", _fmt_money_or_unknown(cash))
-    pm2.metric("🧾 Portfolio", _fmt_money_or_unknown(portfolio))
-    pm3.metric("💸 Spendable", _fmt_money_or_unknown(spendable))
-    pm4.metric("🎁 Redeemable", _fmt_money_or_unknown(redeemable))
+    if mode == "live":
+        pm1.metric("💵 Cash", _fmt_money_or_unknown(cash))
+        pm2.metric("🧾 Portfolio", _fmt_money_or_unknown(portfolio))
+        pm3.metric("💸 Spendable", _fmt_money_or_unknown(spendable))
+        pm4.metric("🎁 Redeemable", _fmt_money_or_unknown(redeemable))
+    else:
+        pm1.metric("💵 Simulated bank", _fmt_money_or_unknown(D['bank_current']))
+        pm2.metric("🧾 Session start", _fmt_money_or_unknown(D['bank_start']))
+        pm3.metric("💸 Spendable", _fmt_money_or_unknown(D['bank_current']))
+        pm4.metric("🎁 Redeemable", "—")
     if account.get('source_error'):
         st.caption(f"Polymarket sync note: {account['source_error']}")
 
@@ -1477,6 +1765,16 @@ with tab_dashboard:
     g2.metric("Losses", D['losses'])
     g3.metric("Pending", D['pending'])
     g4.metric("Mode", mode)
+
+    st.markdown("---")
+    st.markdown("#### Live all-time")
+    lt1, lt2, lt3, lt4 = st.columns(4)
+    live_total_resolved = D['live_all_time_wins'] + D['live_all_time_losses']
+    live_all_time_wr = (D['live_all_time_wins'] / live_total_resolved * 100) if live_total_resolved else None
+    lt1.metric("Live trades", D['live_all_time_trades'])
+    lt2.metric("Live PnL", f"${D['live_all_time_pnl']:+.2f}")
+    lt3.metric("Live wins", D['live_all_time_wins'])
+    lt4.metric("Live WR", f"{live_all_time_wr:.0f}%" if live_all_time_wr is not None else "—")
 
     st.markdown("---")
     st.markdown("#### Последние 5 сделок")
@@ -1623,17 +1921,27 @@ with tab_settings:
     st.markdown("<div class='safe-box'><strong>Основные настройки сверху.</strong> Тонкая калибровка спрятана в расширенный блок.</div>", unsafe_allow_html=True)
     st.warning("Сохранение и перезапуск доступны только после ввода пароля, если он включён.")
 
-    settings_password = os.getenv("DASHBOARD_SETTINGS_PASSWORD", "")
-    settings_unlocked = not settings_password
+    settings_password = os.getenv("DASHBOARD_PASSWORD", os.getenv("DASHBOARD_SETTINGS_PASSWORD", ""))
+    unlock_until = float(st.session_state.get("settings_unlock_until", 0.0) or 0.0)
+    settings_unlocked = (not settings_password) or unlock_until > time.time()
 
     # ===== MANUAL SETTINGS =====
     new_settings = settings.copy()
 
+    status1, status2, status3 = st.columns(3)
+    status1.metric("Runtime mode", str(L.get("mode") or "Unknown"))
+    status2.metric("Desired mode", str(settings.get("desired_mode") or "dry-run"))
+    status3.metric("Bot status", "active" if bot_running else "inactive")
+
+    st.markdown("---")
+
     basic1, basic2 = st.columns(2)
     with basic1:
+        new_settings["desired_mode"] = st.selectbox("Режим для запуска", ["dry-run", "live"], index=["dry-run", "live"].index(str(settings.get("desired_mode", "dry-run") or "dry-run")))
         new_settings["amount"] = st.number_input("Размер ставки (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("amount", 10)), step=1.0)
     with basic2:
-        new_settings["bank"] = st.number_input("Начальный банк (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("bank", 100)), step=10.0)
+        new_settings["sim_bank"] = st.number_input("Симулированный банк dry-run (USDC)", min_value=10.0, max_value=100000.0, value=float(settings.get("sim_bank", settings.get("bank", 100))), step=10.0)
+        new_settings["bank"] = float(new_settings["sim_bank"])
         new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
 
     with st.expander("Расширенные настройки: Core EV / full-window / L1 fallback / risk", expanded=False):
@@ -1690,17 +1998,66 @@ with tab_settings:
     if settings_password:
         st.markdown("**Защита настроек**")
         entered_password = st.text_input(
-            "Пароль для сохранения или сброса настроек",
+            "Пароль для управления настройками и сервисами",
             type="password",
             key="settings_password_input",
         )
-        settings_unlocked = entered_password == settings_password
-        if entered_password and not settings_unlocked:
-            st.error("Неверный пароль")
+        if st.button("🔓 Разблокировать", use_container_width=True):
+            if entered_password == settings_password:
+                st.session_state["settings_unlock_until"] = time.time() + 600
+                settings_unlocked = True
+                st.success("Доступ открыт на 10 минут")
+            else:
+                st.error("Неверный пароль")
         elif settings_unlocked:
-            st.success("Доступ к настройкам открыт")
+            unlock_left = max(0, int(unlock_until - time.time()))
+            st.success(f"Доступ открыт, осталось {unlock_left}s")
         else:
-            st.info("Введите пароль и затем нажмите нужную кнопку ниже")
+            st.info("Введите пароль и нажмите Разблокировать")
+
+    action_cols = st.columns([1, 1, 1])
+
+    with action_cols[0]:
+        if st.button("▶️ Запустить бота", use_container_width=True):
+            if not settings_unlocked:
+                st.error("Сначала разблокируйте управление")
+            else:
+                ok, detail = start_bot_for_mode(new_settings.get("desired_mode", "dry-run"))
+                if ok:
+                    create_new_session(new_settings, get_runtime_service_state(), fetch_polymarket_account_state() if new_settings.get("desired_mode") == "live" else {})
+                    st.success("Бот запущен")
+                else:
+                    st.error(detail)
+
+    with action_cols[1]:
+        if st.button("⏹️ Остановить бота", use_container_width=True):
+            if not settings_unlocked:
+                st.error("Сначала разблокируйте управление")
+            else:
+                ok, detail = stop_all_bot_services()
+                if ok:
+                    st.success("Бот остановлен")
+                else:
+                    st.error(detail)
+
+    with action_cols[2]:
+        if st.button("🧹 Сбросить live статистику", use_container_width=True):
+            if not settings_unlocked:
+                st.error("Сначала разблокируйте управление")
+            else:
+                stats = load_stats_state()
+                stats["live_stats_reset_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                save_stats_state(stats)
+                st.success("Live статистика сброшена через reset marker")
+
+    session_cols = st.columns([1, 1])
+    with session_cols[0]:
+        if st.button("🆕 Новая сессия", use_container_width=True):
+            create_new_session(new_settings, L, fetch_polymarket_account_state() if str(L.get("mode") or "Unknown") == "live" else {})
+            st.success("Создана новая сессия")
+            st.rerun()
+    with session_cols[1]:
+        st.caption(f"Session ID: {session_state.get('session_id') or 'Unknown'}")
 
     btn_cols = st.columns([1, 1, 1])
 
@@ -1709,8 +2066,9 @@ with tab_settings:
             if not settings_unlocked:
                 st.error("Введите правильный пароль для сохранения настроек")
             else:
+                new_settings["first_setup_done"] = True
                 save_settings(new_settings)
-                st.success("✅ Настройки сохранены. Применение новых значений выполняйте через systemd restart.")
+                st.success("✅ Настройки сохранены. Hot-reloadable параметры бот подхватит без рестарта, режим меняется только через systemd actions.")
                 st.rerun()
 
     with btn_cols[1]:
@@ -1719,16 +2077,18 @@ with tab_settings:
                 st.error("Введите правильный пароль для сброса настроек")
             else:
                 defaults = get_default_settings()
+                defaults["first_setup_done"] = True
                 save_settings(defaults)
                 st.success("✅ Восстановлены безопасные дефолтные настройки текущей стратегии.")
                 st.rerun()
 
     with btn_cols[2]:
-        if st.button("🔁 Restart bot", use_container_width=True):
+        if st.button("🔁 Restart active service", use_container_width=True):
             if not settings_unlocked:
                 st.error("Введите правильный пароль для перезапуска бота")
             else:
-                ok, detail = restart_bot_service("poly-bot-live.service")
+                active_service = str(L.get("service_name") or "poly-bot-live.service")
+                ok, detail = restart_bot_service(active_service)
                 if ok:
                     st.success(f"✅ {detail}")
                 else:
@@ -1736,4 +2096,4 @@ with tab_settings:
 
     st.caption("Настройки сохраняются в `settings.json` атомарно. Для применения нужен перезапуск systemd service.")
     if not settings_password:
-        st.caption("Защита настроек не включена. Чтобы включить пароль, задайте переменную `DASHBOARD_SETTINGS_PASSWORD` в systemd service.")
+        st.caption("Защита настроек не включена. Чтобы включить пароль, задайте переменную `DASHBOARD_PASSWORD` в systemd service.")

@@ -1,6 +1,6 @@
 [Unit]
 Description=5m Poly Bot — Dashboard
-After=network.target poly-bot.service
+After=network.target poly-bot-test.service poly-bot-live.service
 
 [Service]
 Type=simple

@@ -1,5 +1,5 @@
 [Unit]
-Description=5m Poly Bot — Crypto Trading Bot (LEGACY DRY RUN)
+Description=5m Poly Bot - Crypto Trading Bot (DRY RUN)
 After=network.target
 
 [Service]
