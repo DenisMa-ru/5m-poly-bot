@@ -1759,7 +1759,7 @@ with tab_dashboard:
                 value=float(settings.get("sim_bank", settings.get("bank", 100.0))),
                 step=10.0,
             )
-        if st.button("✅ Завершить первичную настройку", type="primary", use_container_width=True):
+        if st.button("✅ Завершить первичную настройку", type="primary", width="stretch"):
             wizard_settings["first_setup_done"] = True
             wizard_settings["bank"] = float(wizard_settings.get("sim_bank", 100.0))
             save_settings(wizard_settings)
@@ -1773,7 +1773,7 @@ with tab_dashboard:
 
     with ctrl_cols[0]:
         status_label = "🟢 Running" if bot_running else "🔴 Stopped"
-        st.button(status_label, use_container_width=True, disabled=True)
+        st.button(status_label, width="stretch", disabled=True)
 
     with ctrl_cols[1]:
         st.markdown(
@@ -1785,7 +1785,7 @@ with tab_dashboard:
             st.error("Обнаружено несколько активных bot-service одновременно. Dashboard выбрал последний стартовавший сервис, но состояние ненормальное.")
 
     with ctrl_cols[2]:
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", width="stretch"):
             st.rerun()
         st.caption(f"Updated: {D['time']}")
 
@@ -1882,7 +1882,7 @@ with tab_dashboard:
             "Status": status,
         })
     if recent_trade_rows:
-        st.dataframe(recent_trade_rows, use_container_width=True, hide_index=True, height=220)
+        st.dataframe(recent_trade_rows, width="stretch", hide_index=True, height=220)
     else:
         st.caption("Сделок пока нет.")
 
@@ -1911,7 +1911,7 @@ with tab_dashboard:
                     "Reason": str(x.get('full_window_entry_reason', x.get('reason', '')) or '')[:56],
                 })
             st.markdown("**Последние ожидания full-window**")
-            st.dataframe(wait_rows, use_container_width=True, hide_index=True, height=180)
+            st.dataframe(wait_rows, width="stretch", hide_index=True, height=180)
 
 # ==========================================
 # TAB 4: STATISTICS
@@ -1940,7 +1940,7 @@ with tab_stats:
         rt4.metric("DENY", runtime_counts.get('deny', 0))
 
         if runtime_rows:
-            st.dataframe(runtime_rows, use_container_width=True, hide_index=True, height=240)
+            st.dataframe(runtime_rows, width="stretch", hide_index=True, height=240)
 
         st.markdown("---")
 
@@ -1957,7 +1957,7 @@ with tab_stats:
                     "Losses": losses,
                     "Win Rate": f"{(wins / total * 100):.0f}%" if total else "—",
                 })
-            st.dataframe(wr_rows, use_container_width=True, hide_index=True, height=220)
+            st.dataframe(wr_rows, width="stretch", hide_index=True, height=220)
 
         st.markdown("---")
         st.markdown("**Core EV Denial Reasons Breakdown**")
@@ -1982,7 +1982,7 @@ with tab_stats:
                         "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
                         "Bucket": str(row.get("key", ""))[:80],
                     })
-                st.dataframe(allow_rows, use_container_width=True, hide_index=True, height=260)
+                st.dataframe(allow_rows, width="stretch", hide_index=True, height=260)
             else:
                 st.caption("No allow buckets yet.")
 
@@ -1997,7 +1997,7 @@ with tab_stats:
                         "ROI": f"{float(row.get('roi', 0) or 0):+.1f}%",
                         "Bucket": str(row.get("key", ""))[:80],
                     })
-                st.dataframe(deny_rows, use_container_width=True, hide_index=True, height=260)
+                st.dataframe(deny_rows, width="stretch", hide_index=True, height=260)
             else:
                 st.caption("No deny buckets yet.")
 
@@ -2010,7 +2010,7 @@ with tab_stats:
     with log_header_cols[0]:
         st.markdown("### Последние события (лог)")
     with log_header_cols[1]:
-        if st.button("🔄 Refresh log", use_container_width=True):
+        if st.button("🔄 Refresh log", width="stretch"):
             load_log_tail.clear()
             st.rerun()
 
@@ -2128,7 +2128,7 @@ with tab_settings:
             type="password",
             key="settings_password_input",
         )
-        if st.button("🔓 Разблокировать", use_container_width=True):
+        if st.button("🔓 Разблокировать", width="stretch"):
             if entered_password == settings_password:
                 st.session_state["settings_unlock_until"] = time.time() + 600
                 settings_unlocked = True
@@ -2144,7 +2144,7 @@ with tab_settings:
     action_cols = st.columns([1, 1, 1])
 
     with action_cols[0]:
-        if st.button("▶️ Запустить бота", use_container_width=True):
+        if st.button("▶️ Запустить бота", width="stretch"):
             if not settings_unlocked:
                 st.error("Сначала разблокируйте управление")
             else:
@@ -2160,7 +2160,7 @@ with tab_settings:
                     st.error(detail)
 
     with action_cols[1]:
-        if st.button("⏹️ Остановить бота", use_container_width=True):
+        if st.button("⏹️ Остановить бота", width="stretch"):
             if not settings_unlocked:
                 st.error("Сначала разблокируйте управление")
             else:
@@ -2171,7 +2171,7 @@ with tab_settings:
                     st.error(detail)
 
     with action_cols[2]:
-        if st.button("🧹 Сбросить live статистику", use_container_width=True):
+        if st.button("🧹 Сбросить live статистику", width="stretch"):
             if not settings_unlocked:
                 st.error("Сначала разблокируйте управление")
             else:
@@ -2182,7 +2182,7 @@ with tab_settings:
 
     session_cols = st.columns([1, 1])
     with session_cols[0]:
-        if st.button("🆕 Новая сессия", use_container_width=True):
+        if st.button("🆕 Новая сессия", width="stretch"):
             create_new_session(new_settings, L, fetch_polymarket_account_state() if str(L.get("mode") or "Unknown") == "live" else {})
             st.success("Создана новая сессия")
             st.rerun()
@@ -2192,7 +2192,7 @@ with tab_settings:
     btn_cols = st.columns([1, 1, 1])
 
     with btn_cols[0]:
-        if st.button("💾 Сохранить", type="primary", use_container_width=True):
+        if st.button("💾 Сохранить", type="primary", width="stretch"):
             if not settings_unlocked:
                 st.error("Введите правильный пароль для сохранения настроек")
             else:
@@ -2202,7 +2202,7 @@ with tab_settings:
                 st.rerun()
 
     with btn_cols[1]:
-        if st.button("🔄 Сбросить к дефолтным", use_container_width=True):
+        if st.button("🔄 Сбросить к дефолтным", width="stretch"):
             if not settings_unlocked:
                 st.error("Введите правильный пароль для сброса настроек")
             else:
@@ -2213,7 +2213,7 @@ with tab_settings:
                 st.rerun()
 
     with btn_cols[2]:
-        if st.button("🔁 Restart active service", use_container_width=True):
+        if st.button("🔁 Restart active service", width="stretch"):
             if not settings_unlocked:
                 st.error("Введите правильный пароль для перезапуска бота")
             else:

@@ -1426,7 +1426,10 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         failure_type, detail = _classify_polymarket_exception(e)
         result["failure_type"] = failure_type
         result["detail"] = detail
-        log(f"   ❌ BUY failed [{result['failure_type']}]: {detail}")
+        log(
+            f"   ❌ BUY failed [{result['failure_type']}]: {detail} "
+            f"| exc_type={type(e).__name__}"
+        )
         return result
 
 
