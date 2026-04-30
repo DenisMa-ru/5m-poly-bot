@@ -1547,6 +1547,22 @@ def start_bot_for_mode(desired_mode: str) -> tuple[bool, str]:
     details.append(f"start {target_service}: {start_detail}")
     return start_ok, " | ".join(details)
 
+
+def wait_for_service_active(service_name: str, timeout: float = 15.0) -> dict:
+    started = time.time()
+    last_state = get_runtime_service_state()
+    while time.time() - started < timeout:
+        runtime = get_runtime_service_state()
+        last_state = runtime
+        if str(runtime.get("service_name") or "") == service_name and runtime.get("active_state") == "active":
+            return runtime
+        time.sleep(0.5)
+        try:
+            get_runtime_service_state.clear()
+        except Exception:
+            pass
+    return last_state
+
 def get_default_settings():
     """Возвращает дефолтные настройки бота."""
     return {
@@ -2022,9 +2038,13 @@ with tab_settings:
             if not settings_unlocked:
                 st.error("Сначала разблокируйте управление")
             else:
-                ok, detail = start_bot_for_mode(new_settings.get("desired_mode", "dry-run"))
+                desired_mode = str(new_settings.get("desired_mode", "dry-run") or "dry-run")
+                target_service = "poly-bot-live.service" if desired_mode == "live" else "poly-bot-test.service"
+                ok, detail = start_bot_for_mode(desired_mode)
                 if ok:
-                    create_new_session(new_settings, get_runtime_service_state(), fetch_polymarket_account_state() if new_settings.get("desired_mode") == "live" else {})
+                    runtime_after_start = wait_for_service_active(target_service)
+                    account_seed = fetch_polymarket_account_state() if desired_mode == "live" else {}
+                    create_new_session(new_settings, runtime_after_start, account_seed)
                     st.success("Бот запущен")
                 else:
                     st.error(detail)

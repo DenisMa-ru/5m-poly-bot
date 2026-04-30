@@ -180,6 +180,17 @@ def load_stats_state() -> dict:
     return data if isinstance(data, dict) else {"live_stats_reset_at": None}
 
 
+def _resolve_live_session_bank_start(private_key: str, proxy_wallet: str) -> float | None:
+    balance, _ = get_collateral_balance_allowance(private_key, proxy_wallet)
+    if balance is not None:
+        return float(balance)
+    if proxy_wallet:
+        onchain_balance = _fetch_polymarket_pusd_balance(proxy_wallet)
+        if onchain_balance is not None:
+            return float(onchain_balance)
+    return None
+
+
 def ensure_single_instance():
     """Prevent multiple bot processes from running at the same time."""
     if not PID_FILE.exists():
@@ -1503,10 +1514,15 @@ class CryptoBot:
         self.settings = settings
         self.session_state = load_session_state()
         if not self.session_state.get("session_id"):
+            initial_bank_start = float(settings.get("sim_bank", settings.get("bank", 100.0)) or 100.0)
+            if self.mode == "live":
+                live_bank_start = _resolve_live_session_bank_start(self.private_key, self.proxy_wallet)
+                if live_bank_start is not None:
+                    initial_bank_start = live_bank_start
             self.session_state = _default_session_state(
                 mode=self.mode,
                 service_name=self.service_name,
-                bank_start=float(settings.get("sim_bank", settings.get("bank", 100.0)) or 100.0),
+                bank_start=initial_bank_start,
             )
             save_session_state(self.session_state)
         self.session_id = str(self.session_state.get("session_id") or _new_session_id())
