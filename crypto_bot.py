@@ -1357,7 +1357,9 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
             OrderArgs = getattr(client_module, "OrderArgs", None)
             MarketOrderArgs = getattr(client_module, "MarketOrderArgs", None)
             OrderType = getattr(client_module, "OrderType", None)
+            PartialCreateOrderOptions = getattr(client_module, "PartialCreateOrderOptions", None)
             BUY = constants_module.BUY
+            using_v2 = True
         except Exception as v2_exc:
             log(f"   ⚠️ V2 trade client unavailable, falling back to legacy path: {v2_exc}")
             client_module = importlib.import_module("py_clob_client.client")
@@ -1368,7 +1370,9 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
             OrderArgs = clob_types_module.OrderArgs
             MarketOrderArgs = getattr(clob_types_module, "MarketOrderArgs", None)
             OrderType = getattr(clob_types_module, "OrderType", None)
+            PartialCreateOrderOptions = None
             BUY = constants_module.BUY
+            using_v2 = False
 
         ok, failure_type, detail = _preflight_live_order(client, round(amount_usdc, 2))
         if not ok:
@@ -1379,13 +1383,24 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
 
         resp = None
         if MarketOrderArgs is not None and OrderType is not None:
-            market_order = client.create_market_order(MarketOrderArgs(
+            market_order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=round(amount_usdc, 2),
                 side=BUY,
                 order_type=OrderType.FOK,
-            ))
-            resp = client.post_order(market_order, orderType=OrderType.FOK)
+            )
+            if using_v2 and hasattr(client, "create_and_post_market_order"):
+                options = PartialCreateOrderOptions(tick_size="0.01") if PartialCreateOrderOptions is not None else None
+                kwargs = {
+                    "order_args": market_order_args,
+                    "order_type": OrderType.FOK,
+                }
+                if options is not None:
+                    kwargs["options"] = options
+                resp = client.create_and_post_market_order(**kwargs)
+            else:
+                market_order = client.create_market_order(market_order_args)
+                resp = client.post_order(market_order, orderType=OrderType.FOK)
         else:
             taker_price = min(round(price + 0.01, 2), 0.99)  # multiple of 0.01, max 0.99
             size = round(amount_usdc / price, 2)
