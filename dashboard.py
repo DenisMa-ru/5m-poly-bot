@@ -220,12 +220,12 @@ def _fmt_money_or_unknown(value):
 
 def _infer_mode_from_execstart(exec_start: str | None, fallback: str = "Unknown") -> str:
     text = str(exec_start or "").lower()
-    if "--live" in text:
-        return "live"
     if "--dry-run" in text or "test" in text:
         return "dry-run"
     if "--paper" in text:
         return "paper"
+    if "--live" in text:
+        return "live"
     return fallback or "Unknown"
 
 
