@@ -867,11 +867,11 @@ def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None)
     signature_type = _get_polymarket_signature_type(proxy_wallet)
 
     constructor_variants = [
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder": proxy_wallet or None},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder_address": proxy_wallet or None},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder": proxy_wallet or None},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder_address": proxy_wallet or None},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds},
     ]
 

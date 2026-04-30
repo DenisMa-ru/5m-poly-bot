@@ -1136,11 +1136,11 @@ def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None,
     ClobClient = client_module.ClobClient
     signature_type = signature_type if signature_type is not None else _get_polymarket_signature_type(proxy_wallet)
     constructor_variants = [
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "use_server_time": True},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder": proxy_wallet or None, "use_server_time": True},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder_address": proxy_wallet or None, "use_server_time": True},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder": proxy_wallet or None, "use_server_time": True},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder_address": proxy_wallet or None, "use_server_time": True},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "use_server_time": True},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "use_server_time": True},
     ]
 
