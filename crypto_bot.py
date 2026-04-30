@@ -1336,12 +1336,15 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         "size": None,
         "taker_price": None,
     }
+    using_v2 = False
+    signature_type_candidates = _get_polymarket_signature_type_candidates(proxy_wallet)
+    active_signature_type = signature_type_candidates[0]
+    market_order_args = None
+    PartialCreateOrderOptions = None
+    OrderType = None
 
     try:
         import importlib
-        signature_type_candidates = _get_polymarket_signature_type_candidates(proxy_wallet)
-        active_signature_type = signature_type_candidates[0]
-        market_order_args = None
 
         if amount_usdc <= 0:
             result["failure_type"] = "invalid_amount"
