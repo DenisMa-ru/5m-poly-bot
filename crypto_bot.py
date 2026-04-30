@@ -1359,14 +1359,6 @@ def _preflight_live_order(client, amount_usdc: float) -> tuple[bool, str, str]:
         balance, allowance = _extract_balance_allowance(raw)
         proxy_wallet = os.getenv("POLY_PROXY_WALLET", "") or os.getenv("POLY_WALLET", "")
         onchain_balance = _fetch_polymarket_pusd_balance(proxy_wallet) if proxy_wallet else None
-        log(
-            "   PRECHECK balance/allowance"
-            f" raw={raw}"
-            f" parsed_balance={balance}"
-            f" parsed_allowance={allowance}"
-            f" onchain_balance={onchain_balance}"
-            f" amount={amount_usdc}"
-        )
         if onchain_balance is not None and (balance is None or onchain_balance > balance):
             balance = onchain_balance
         if balance is not None and balance < amount_usdc:
@@ -2914,10 +2906,6 @@ class CryptoBot:
                 self.proxy_wallet,
             )
             spendable_limits = [v for v in (collateral_balance, collateral_allowance) if v is not None]
-            log(
-                f"   [{crypto}] COLLATERAL CHECK — balance={collateral_balance} "
-                f"allowance={collateral_allowance} amount={trade_amount:.2f} limits={spendable_limits}"
-            )
             if spendable_limits and min(spendable_limits) + 1e-9 < trade_amount:
                 spendable = min(spendable_limits)
                 log(

@@ -154,7 +154,9 @@ Create a `.env` file based on `.env.example` if you are not using `install.sh`:
 - If `CLOB_API_KEY`, `CLOB_SECRET`, and `CLOB_PASS_PHRASE` are absent, the bot may try to derive fresh CLOB credentials from Polymarket at runtime.
 - On some servers this request can be blocked by Cloudflare on `/auth/api-key`, which breaks live execution even when wallet keys are correct.
 - In that case, derive the CLOB credentials once from a non-blocked machine and save them into the server `.env`.
-- For proxy-wallet setups, `POLY_SIGNATURE_TYPE=1` is often the correct choice. `2` is for Gnosis Safe-style signing.
+- For proxy-wallet setups, the correct `POLY_SIGNATURE_TYPE` depends on how Polymarket indexed the account. Do not assume `1` or `2` blindly.
+- In one verified live case, `POLY_SIGNATURE_TYPE=1` allowed API auth but returned `balance=0` and `allowance=0`, while `POLY_SIGNATURE_TYPE=2` returned the real collateral balance and working allowance and allowed matched live buys.
+- If live auth works but the bot logs `SKIP — insufficient collateral/allowance $0.00 < $1.00`, test `get_balance_allowance(...)` under both `POLY_SIGNATURE_TYPE=1` and `2` before changing strategy logic.
 
 One-shot export command:
 
