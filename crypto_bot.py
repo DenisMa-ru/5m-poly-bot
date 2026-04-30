@@ -1079,12 +1079,12 @@ def _get_polymarket_signature_type_candidates(proxy_wallet: str) -> list[int]:
     return [0]
 
 
-def _build_legacy_polymarket_client(private_key: str, proxy_wallet: str):
+def _build_legacy_polymarket_client(private_key: str, proxy_wallet: str, signature_type: int | None = None):
     import importlib
 
     client_module = importlib.import_module("py_clob_client.client")
     ClobClient = client_module.ClobClient
-    signature_type = _get_polymarket_signature_type(proxy_wallet)
+    signature_type = signature_type if signature_type is not None else _get_polymarket_signature_type(proxy_wallet)
     return ClobClient(
         host=CLOB_API,
         key=private_key,
@@ -1183,6 +1183,38 @@ def _build_v2_trade_client(private_key: str, proxy_wallet: str, signature_type: 
         if derived_creds:
             client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=derived_creds, signature_type=signature_type)
     return client
+
+
+def export_clob_credentials() -> int:
+    private_key = os.getenv("POLY_PRIVATE_KEY", "").strip()
+    proxy_wallet = os.getenv("POLY_PROXY_WALLET", "").strip()
+    signature_type = _get_polymarket_signature_type(proxy_wallet)
+
+    if not private_key:
+        print("ERROR: POLY_PRIVATE_KEY is missing in environment/.env")
+        return 1
+
+    try:
+        client = _build_v2_trade_client(private_key, proxy_wallet, signature_type=signature_type)
+    except Exception as exc:
+        print(f"ERROR: unable to initialize Polymarket client: {exc}")
+        return 1
+
+    creds = getattr(client, "creds", None)
+    api_key = getattr(creds, "api_key", None) if creds else None
+    api_secret = getattr(creds, "api_secret", None) if creds else None
+    api_passphrase = getattr(creds, "api_passphrase", None) if creds else None
+
+    if not (api_key and api_secret and api_passphrase):
+        print("ERROR: unable to derive CLOB credentials; endpoint access may be blocked or wallet auth is incompatible")
+        return 1
+
+    print("# Paste these lines into server .env to avoid runtime auth/api-key calls")
+    print(f"POLY_SIGNATURE_TYPE={signature_type}")
+    print(f"CLOB_API_KEY={api_key}")
+    print(f"CLOB_SECRET={api_secret}")
+    print(f"CLOB_PASS_PHRASE={api_passphrase}")
+    return 0
 
 
 def _classify_polymarket_exception(exc: Exception) -> tuple[str, str]:
@@ -1327,6 +1359,14 @@ def _preflight_live_order(client, amount_usdc: float) -> tuple[bool, str, str]:
         balance, allowance = _extract_balance_allowance(raw)
         proxy_wallet = os.getenv("POLY_PROXY_WALLET", "") or os.getenv("POLY_WALLET", "")
         onchain_balance = _fetch_polymarket_pusd_balance(proxy_wallet) if proxy_wallet else None
+        log(
+            "   PRECHECK balance/allowance"
+            f" raw={raw}"
+            f" parsed_balance={balance}"
+            f" parsed_allowance={allowance}"
+            f" onchain_balance={onchain_balance}"
+            f" amount={amount_usdc}"
+        )
         if onchain_balance is not None and (balance is None or onchain_balance > balance):
             balance = onchain_balance
         if balance is not None and balance < amount_usdc:
@@ -2874,6 +2914,10 @@ class CryptoBot:
                 self.proxy_wallet,
             )
             spendable_limits = [v for v in (collateral_balance, collateral_allowance) if v is not None]
+            log(
+                f"   [{crypto}] COLLATERAL CHECK — balance={collateral_balance} "
+                f"allowance={collateral_allowance} amount={trade_amount:.2f} limits={spendable_limits}"
+            )
             if spendable_limits and min(spendable_limits) + 1e-9 < trade_amount:
                 spendable = min(spendable_limits)
                 log(
@@ -3512,7 +3556,11 @@ if __name__ == "__main__":
     parser.add_argument("--live",     action="store_true", help="Live trading mode (real funds)")
     parser.add_argument("--dry-run",  action="store_true", help="Dry run — real data, no trades executed")
     parser.add_argument("--amount",   type=float, default=10.0, help="USDC per trade")
+    parser.add_argument("--export-clob-creds", action="store_true", help="One-shot: derive and print CLOB_* credentials from current wallet env")
     args = parser.parse_args()
+
+    if args.export_clob_creds:
+        raise SystemExit(export_clob_credentials())
 
     dry_run = args.dry_run
     paper   = args.paper or (not args.live and not dry_run)

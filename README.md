@@ -139,10 +139,38 @@ Create a `.env` file based on `.env.example` if you are not using `install.sh`:
 | `POLY_PRIVATE_KEY` | Your Polymarket wallet private key (Polygon) |
 | `POLY_PROXY_WALLET` | Your Polymarket proxy/funder wallet address |
 | `POLY_SIGNATURE_TYPE` | Optional signature mode override: `0` = EOA, `1` = Magic/Polymarket proxy wallet, `2` = Gnosis Safe-style proxy wallet |
+| `CLOB_API_KEY` | Optional pre-derived Polymarket CLOB API key for server/runtime use |
+| `CLOB_SECRET` | Optional pre-derived Polymarket CLOB API secret for server/runtime use |
+| `CLOB_PASS_PHRASE` | Optional pre-derived Polymarket CLOB API passphrase for server/runtime use |
 | `POLYGON_RPC_URL` | Primary Polygon RPC URL |
 | `DASHBOARD_PASSWORD` | Password for protected dashboard actions |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for session ROI alerts |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID for alerts |
+
+---
+
+## Polymarket live auth notes
+
+- If `CLOB_API_KEY`, `CLOB_SECRET`, and `CLOB_PASS_PHRASE` are absent, the bot may try to derive fresh CLOB credentials from Polymarket at runtime.
+- On some servers this request can be blocked by Cloudflare on `/auth/api-key`, which breaks live execution even when wallet keys are correct.
+- In that case, derive the CLOB credentials once from a non-blocked machine and save them into the server `.env`.
+- For proxy-wallet setups, `POLY_SIGNATURE_TYPE=1` is often the correct choice. `2` is for Gnosis Safe-style signing.
+
+One-shot export command:
+
+```bash
+python crypto_bot.py --export-clob-creds
+```
+
+The command prints ready-to-paste `CLOB_API_KEY=...`, `CLOB_SECRET=...`, and `CLOB_PASS_PHRASE=...` lines for your `.env`.
+
+Server note:
+
+```bash
+.venv/bin/python crypto_bot.py --export-clob-creds
+```
+
+Use `python3` instead of `python` on hosts where `python` is unavailable.
 
 ---
 
