@@ -1123,12 +1123,12 @@ def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None)
     ClobClient = client_module.ClobClient
     signature_type = _get_polymarket_signature_type(proxy_wallet)
     constructor_variants = [
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type},
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder": proxy_wallet or None},
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder_address": proxy_wallet or None},
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder": proxy_wallet or None},
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder_address": proxy_wallet or None},
-        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "use_server_time": True},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder": proxy_wallet or None, "use_server_time": True},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder_address": proxy_wallet or None, "use_server_time": True},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder": proxy_wallet or None, "use_server_time": True},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "funder_address": proxy_wallet or None, "use_server_time": True},
+        {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "use_server_time": True},
     ]
 
     last_error = None
@@ -1336,6 +1336,22 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         "size": None,
         "taker_price": None,
     }
+
+    def _submit_legacy_market_order(importlib_module):
+        legacy_client_module = importlib_module.import_module("py_clob_client.client")
+        legacy_types_module = importlib_module.import_module("py_clob_client.clob_types")
+        legacy_constants_module = importlib_module.import_module("py_clob_client.order_builder.constants")
+        legacy_client = _build_legacy_polymarket_client(private_key, proxy_wallet)
+        legacy_client.set_api_creds(legacy_client.create_or_derive_api_creds())
+        legacy_market_order_args = legacy_types_module.MarketOrderArgs(
+            token_id=token_id,
+            amount=round(amount_usdc, 2),
+            side=legacy_constants_module.BUY,
+            order_type=legacy_types_module.OrderType.FOK,
+        )
+        legacy_market_order = legacy_client.create_market_order(legacy_market_order_args)
+        return legacy_client.post_order(legacy_market_order, legacy_types_module.OrderType.FOK)
+
     try:
         import importlib
 
@@ -1439,6 +1455,36 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         return result
     except Exception as e:
         failure_type, detail = _classify_polymarket_exception(e)
+        if using_v2 and failure_type == "signature_type_mismatch":
+            try:
+                log("   ⚠️ V2 signature rejected by CLOB, retrying market order via legacy client")
+                resp = _submit_legacy_market_order(importlib)
+                status = resp.get("status") if isinstance(resp, dict) else "ok"
+                order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+                result["order_status"] = str(status or "")
+                result["order_id"] = str(order_id or "")
+                if status == "matched":
+                    result["ok"] = True
+                    result["failure_type"] = ""
+                    result["detail"] = ""
+                    log(f"   ✅ BUY OK via legacy fallback: {status} | order {str(order_id)[:20]}...")
+                    return result
+                result["failure_type"] = "not_filled_immediately"
+                result["detail"] = f"legacy_fallback_status={status}"
+                log(
+                    f"   ❌ BUY not filled via legacy fallback [{result['failure_type']}]: "
+                    f"{status} | order {str(order_id)[:20]}..."
+                )
+                return result
+            except Exception as legacy_exc:
+                legacy_failure_type, legacy_detail = _classify_polymarket_exception(legacy_exc)
+                result["failure_type"] = legacy_failure_type
+                result["detail"] = f"v2={detail} | legacy={legacy_detail}"
+                log(
+                    f"   ❌ BUY failed after legacy fallback [{result['failure_type']}]: {result['detail']} "
+                    f"| exc_type={type(legacy_exc).__name__}"
+                )
+                return result
         result["failure_type"] = failure_type
         result["detail"] = detail
         log(
