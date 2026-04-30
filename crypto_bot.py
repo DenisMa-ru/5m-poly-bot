@@ -1105,9 +1105,13 @@ def _derive_polymarket_v2_creds(client):
     return None
 
 
-def _legacy_creds_to_v2_api_creds(private_key: str, proxy_wallet: str, api_creds_cls):
+def _legacy_creds_to_v2_api_creds(private_key: str, proxy_wallet: str, api_creds_cls, signature_type: int | None = None):
     try:
-        legacy_client = _build_legacy_polymarket_client(private_key, proxy_wallet)
+        legacy_client = _build_legacy_polymarket_client(
+            private_key,
+            proxy_wallet,
+            signature_type=signature_type,
+        )
         legacy_creds = legacy_client.create_or_derive_api_creds()
         if not legacy_creds:
             return None
@@ -1125,12 +1129,12 @@ def _legacy_creds_to_v2_api_creds(private_key: str, proxy_wallet: str, api_creds
         return None
 
 
-def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None):
+def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None, signature_type: int | None = None):
     import importlib
 
     client_module = importlib.import_module("py_clob_client_v2")
     ClobClient = client_module.ClobClient
-    signature_type = _get_polymarket_signature_type(proxy_wallet)
+    signature_type = signature_type if signature_type is not None else _get_polymarket_signature_type(proxy_wallet)
     constructor_variants = [
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "use_server_time": True},
         {"host": CLOB_API, "chain_id": 137, "key": private_key, "creds": creds, "signature_type": signature_type, "funder": proxy_wallet or None, "use_server_time": True},
@@ -1154,7 +1158,7 @@ def _build_polymarket_v2_client(private_key: str, proxy_wallet: str, creds=None)
     raise RuntimeError("Unable to initialize py_clob_client_v2 ClobClient")
 
 
-def _build_v2_trade_client(private_key: str, proxy_wallet: str):
+def _build_v2_trade_client(private_key: str, proxy_wallet: str, signature_type: int | None = None):
     import importlib
 
     client_module = importlib.import_module("py_clob_client_v2")
@@ -1171,13 +1175,13 @@ def _build_v2_trade_client(private_key: str, proxy_wallet: str):
             api_passphrase=env_api_passphrase,
         )
     elif ApiCreds:
-        creds = _legacy_creds_to_v2_api_creds(private_key, proxy_wallet, ApiCreds)
+        creds = _legacy_creds_to_v2_api_creds(private_key, proxy_wallet, ApiCreds, signature_type=signature_type)
 
-    client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=creds)
+    client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=creds, signature_type=signature_type)
     if creds is None:
         derived_creds = _derive_polymarket_v2_creds(client)
         if derived_creds:
-            client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=derived_creds)
+            client = _build_polymarket_v2_client(private_key, proxy_wallet, creds=derived_creds, signature_type=signature_type)
     return client
 
 
