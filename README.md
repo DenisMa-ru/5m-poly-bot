@@ -138,6 +138,7 @@ Create a `.env` file based on `.env.example` if you are not using `install.sh`:
 |---|---|
 | `POLY_PRIVATE_KEY` | Your Polymarket wallet private key (Polygon) |
 | `POLY_PROXY_WALLET` | Your Polymarket proxy/funder wallet address |
+| `POLY_SIGNATURE_TYPE` | Optional signature mode override: `0` = EOA, `1` = Magic/Polymarket proxy wallet, `2` = Gnosis Safe-style proxy wallet |
 | `POLYGON_RPC_URL` | Primary Polygon RPC URL |
 | `DASHBOARD_PASSWORD` | Password for protected dashboard actions |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for session ROI alerts |
@@ -191,4 +192,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 If this project was useful to you, contributions are welcome via USDC on Polygon:
 
-**`0xbc48eAebC98463c7c9521e1310C13FC1A080B419`**
+**`0x6c0A4390033d15d2c15F1E6E03D59035A00188C1`**

@@ -1337,23 +1337,11 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         "taker_price": None,
     }
 
-    def _submit_legacy_market_order(importlib_module):
-        legacy_client_module = importlib_module.import_module("py_clob_client.client")
-        legacy_types_module = importlib_module.import_module("py_clob_client.clob_types")
-        legacy_constants_module = importlib_module.import_module("py_clob_client.order_builder.constants")
-        legacy_client = _build_legacy_polymarket_client(private_key, proxy_wallet)
-        legacy_client.set_api_creds(legacy_client.create_or_derive_api_creds())
-        legacy_market_order_args = legacy_types_module.MarketOrderArgs(
-            token_id=token_id,
-            amount=round(amount_usdc, 2),
-            side=legacy_constants_module.BUY,
-            order_type=legacy_types_module.OrderType.FOK,
-        )
-        legacy_market_order = legacy_client.create_market_order(legacy_market_order_args)
-        return legacy_client.post_order(legacy_market_order, legacy_types_module.OrderType.FOK)
-
     try:
         import importlib
+        signature_type_candidates = _get_polymarket_signature_type_candidates(proxy_wallet)
+        active_signature_type = signature_type_candidates[0]
+        market_order_args = None
 
         if amount_usdc <= 0:
             result["failure_type"] = "invalid_amount"
@@ -1369,7 +1357,7 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         try:
             client_module = importlib.import_module("py_clob_client_v2")
             constants_module = importlib.import_module("py_clob_client.order_builder.constants")
-            client = _build_v2_trade_client(private_key, proxy_wallet)
+            client = _build_v2_trade_client(private_key, proxy_wallet, signature_type=active_signature_type)
             OrderArgs = getattr(client_module, "OrderArgs", None)
             MarketOrderArgs = getattr(client_module, "MarketOrderArgs", None)
             OrderType = getattr(client_module, "OrderType", None)
@@ -1455,36 +1443,61 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         return result
     except Exception as e:
         failure_type, detail = _classify_polymarket_exception(e)
-        if using_v2 and failure_type == "signature_type_mismatch":
-            try:
-                log("   ⚠️ V2 signature rejected by CLOB, retrying market order via legacy client")
-                resp = _submit_legacy_market_order(importlib)
-                status = resp.get("status") if isinstance(resp, dict) else "ok"
-                order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
-                result["order_status"] = str(status or "")
-                result["order_id"] = str(order_id or "")
-                if status == "matched":
-                    result["ok"] = True
-                    result["failure_type"] = ""
-                    result["detail"] = ""
-                    log(f"   ✅ BUY OK via legacy fallback: {status} | order {str(order_id)[:20]}...")
+        if using_v2 and failure_type == "signature_type_mismatch" and market_order_args is not None and len(signature_type_candidates) > 1:
+            retry_errors = [f"sig_type={active_signature_type}:{detail}"]
+            for retry_signature_type in signature_type_candidates[1:]:
+                try:
+                    log(f"   ⚠️ V2 signature rejected by CLOB, retrying with signature_type={retry_signature_type}")
+                    retry_client = _build_v2_trade_client(private_key, proxy_wallet, signature_type=retry_signature_type)
+                    ok, retry_failure_type, retry_detail = _preflight_live_order(retry_client, round(amount_usdc, 2))
+                    if not ok:
+                        result["failure_type"] = retry_failure_type
+                        result["detail"] = f"sig_type={retry_signature_type}:{retry_detail}"
+                        log(f"   ❌ BUY preflight failed on retry [{retry_failure_type}]: {retry_detail}")
+                        return result
+                    options = PartialCreateOrderOptions(tick_size="0.01") if PartialCreateOrderOptions is not None else None
+                    kwargs = {
+                        "order_args": market_order_args,
+                        "order_type": OrderType.FOK,
+                    }
+                    if options is not None:
+                        kwargs["options"] = options
+                    resp = retry_client.create_and_post_market_order(**kwargs)
+                    status = resp.get("status") if isinstance(resp, dict) else "ok"
+                    order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+                    result["order_status"] = str(status or "")
+                    result["order_id"] = str(order_id or "")
+                    if status == "matched":
+                        result["ok"] = True
+                        result["failure_type"] = ""
+                        result["detail"] = ""
+                        log(f"   ✅ BUY OK after signature_type retry: {status} | order {str(order_id)[:20]}...")
+                        return result
+                    result["failure_type"] = "not_filled_immediately"
+                    result["detail"] = f"sig_type={retry_signature_type}:status={status}"
+                    log(
+                        f"   ❌ BUY not filled after signature_type retry [{result['failure_type']}]: "
+                        f"{status} | order {str(order_id)[:20]}..."
+                    )
                     return result
-                result["failure_type"] = "not_filled_immediately"
-                result["detail"] = f"legacy_fallback_status={status}"
-                log(
-                    f"   ❌ BUY not filled via legacy fallback [{result['failure_type']}]: "
-                    f"{status} | order {str(order_id)[:20]}..."
-                )
-                return result
-            except Exception as legacy_exc:
-                legacy_failure_type, legacy_detail = _classify_polymarket_exception(legacy_exc)
-                result["failure_type"] = legacy_failure_type
-                result["detail"] = f"v2={detail} | legacy={legacy_detail}"
-                log(
-                    f"   ❌ BUY failed after legacy fallback [{result['failure_type']}]: {result['detail']} "
-                    f"| exc_type={type(legacy_exc).__name__}"
-                )
-                return result
+                except Exception as retry_exc:
+                    retry_failure_type, retry_detail = _classify_polymarket_exception(retry_exc)
+                    retry_errors.append(f"sig_type={retry_signature_type}:{retry_detail}")
+                    if retry_failure_type != "signature_type_mismatch":
+                        result["failure_type"] = retry_failure_type
+                        result["detail"] = " | ".join(retry_errors)
+                        log(
+                            f"   ❌ BUY failed after signature_type retry [{result['failure_type']}]: {result['detail']} "
+                            f"| exc_type={type(retry_exc).__name__}"
+                        )
+                        return result
+            result["failure_type"] = failure_type
+            result["detail"] = " | ".join(retry_errors)
+            log(
+                f"   ❌ BUY failed after signature_type retries [{result['failure_type']}]: {result['detail']} "
+                f"| exc_type={type(e).__name__}"
+            )
+            return result
         result["failure_type"] = failure_type
         result["detail"] = detail
         log(
