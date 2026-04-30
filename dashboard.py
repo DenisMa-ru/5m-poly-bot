@@ -4,7 +4,7 @@
 Запуск: streamlit run dashboard.py --server.port 3001 --server.address 0.0.0.0 --server.headless true
 """
 import streamlit as st
-import re, os, json
+import re, os, json, html
 import subprocess
 import requests
 from datetime import datetime, timedelta
@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 import uuid
 import time
+from collections import deque
 
 # ===== CONFIG =====
 BOT_DIR = Path("/root/5m-poly-bot")
@@ -87,6 +88,31 @@ st.markdown("""
         white-space: nowrap;
     }
     .summary-chip strong { color: #f0f6fc; }
+    .log-viewer {
+        max-height: 420px;
+        overflow-y: auto;
+        border: 1px solid #30363d;
+        border-radius: 10px;
+        background: #0b0f14;
+        padding: 8px 0;
+    }
+    .log-line {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 0.84rem;
+        line-height: 1.45;
+        color: #c9d1d9;
+        padding: 4px 10px 4px 12px;
+        border-left: 3px solid transparent;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+    .log-line + .log-line { border-top: 1px solid rgba(48, 54, 61, 0.28); }
+    .log-line.log-entering { border-left-color: #58a6ff; background: rgba(56, 139, 253, 0.08); }
+    .log-line.log-core-allow { border-left-color: #3fb950; background: rgba(63, 185, 80, 0.08); }
+    .log-line.log-core-deny { border-left-color: #f85149; background: rgba(248, 81, 73, 0.08); }
+    .log-line.log-win { border-left-color: #2ea043; background: rgba(46, 160, 67, 0.10); }
+    .log-line.log-loss { border-left-color: #ff7b72; background: rgba(255, 123, 114, 0.10); }
+    .log-line.log-error { border-left-color: #db6d28; background: rgba(219, 109, 40, 0.10); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1414,6 +1440,58 @@ _P_STATE = {
     "bank": re.compile(r'^\[(.*?)\]\s+Bank:\s+\$([\-\d.]+)'),
 }
 
+_LOG_EVENT_PATTERNS = [
+    ("core-allow", re.compile(r'CORE[- ]EV.*\b(STRONG_ALLOW|MICRO_ALLOW|ALLOW)\b', re.IGNORECASE), True),
+    ("core-deny", re.compile(r'CORE[- ]EV.*\bDENY\b', re.IGNORECASE), True),
+    ("entering", re.compile(r'\bENTERING\b', re.IGNORECASE), True),
+    ("win", re.compile(r'\bWIN\b', re.IGNORECASE), True),
+    ("loss", re.compile(r'\bLOSS\b', re.IGNORECASE), True),
+    ("error", re.compile(r'\b(ERROR|FAILED|EXCEPTION)\b', re.IGNORECASE), True),
+]
+
+
+def _classify_log_line(line: str) -> tuple[str, bool]:
+    text = str(line or "")
+    for event_type, pattern, is_important in _LOG_EVENT_PATTERNS:
+        if pattern.search(text):
+            return event_type, is_important
+    return "info", False
+
+
+def _resolve_stats_log_path(runtime_state: dict, settings: dict) -> Path:
+    log_path = runtime_state.get("log_path")
+    if log_path:
+        return Path(log_path)
+    desired_mode = str(settings.get("desired_mode") or "dry-run")
+    return LIVE_LOG if desired_mode == "live" else DEFAULT_LOG
+
+
+@st.cache_data(ttl=3, show_spinner=False)
+def load_log_tail(path_str: str, limit: int = 150) -> list[str]:
+    path = Path(path_str)
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        tail = deque(maxlen=max(int(limit or 150), 1))
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                tail.append(line.rstrip("\r\n"))
+        return list(tail)
+    except Exception:
+        return []
+
+
+def render_log_lines(lines: list[str], highlight: bool = True):
+    if not lines:
+        st.caption("Лог пока пуст или ещё не создан.")
+        return
+    html_lines = []
+    for line in lines:
+        event_type, _ = _classify_log_line(line)
+        css_class = f" log-{event_type}" if highlight and event_type != "info" else ""
+        html_lines.append(f"<div class='log-line{css_class}'>{html.escape(line)}</div>")
+    st.markdown(f"<div class='log-viewer'>{''.join(html_lines)}</div>", unsafe_allow_html=True)
+
 @st.cache_data(ttl=5, show_spinner=False)
 def parse_log_state(path):
     """Парсим логи только для определения текущего состояния бота."""
@@ -1839,6 +1917,19 @@ with tab_stats:
     st.markdown("### 📈 Statistics")
     st.caption("Глубокая аналитика по Core EV, отказам и времени входа.")
 
+    log_rows = st.selectbox("Строк лога", [100, 150, 200], index=1)
+    log_controls = st.columns(2)
+    with log_controls[0]:
+        log_only_important = st.checkbox("Только важные события", value=False)
+    with log_controls[1]:
+        log_highlight = st.checkbox("Подсвечивать ключевые события", value=True)
+
+    log_path = _resolve_stats_log_path(L, settings)
+    raw_log_lines = load_log_tail(str(log_path), log_rows)
+    visible_log_lines = raw_log_lines
+    if log_only_important:
+        visible_log_lines = [line for line in raw_log_lines if _classify_log_line(line)[1]]
+
     if D['total_signals'] > 0:
         stat_n = st.selectbox("Период Core EV runtime", [50, 100, 200], index=2)
         runtime_counts = D['core_ev_runtime_decisions_by_n'].get(stat_n, D['core_ev_runtime_decisions'])
@@ -1923,6 +2014,19 @@ with tab_stats:
         st.caption("Statistics reset is disabled in the dashboard to protect live runtime data.")
     else:
         st.info("No statistics yet. Statistics are built from saved signals.")
+
+    st.markdown("---")
+    st.markdown("### Последние события (лог)")
+    st.caption(
+        f"Источник: {L.get('service_name') or 'Unknown'} | Файл: {log_path} | Показано строк: {len(visible_log_lines)}/{len(raw_log_lines)}"
+    )
+    render_log_lines(visible_log_lines, highlight=log_highlight)
+
+    with st.expander("Показать raw log", expanded=False):
+        if raw_log_lines:
+            st.code("\n".join(raw_log_lines), language=None)
+        else:
+            st.caption("Лог пока пуст или ещё не создан.")
 
 # ==========================================
 # TAB 4: SETTINGS
