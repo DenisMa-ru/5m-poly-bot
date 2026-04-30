@@ -1443,10 +1443,13 @@ _P_STATE = {
 _LOG_EVENT_PATTERNS = [
     ("core-allow", re.compile(r'CORE[- ]EV.*\b(STRONG_ALLOW|MICRO_ALLOW|ALLOW)\b', re.IGNORECASE), True),
     ("core-deny", re.compile(r'CORE[- ]EV.*\bDENY\b', re.IGNORECASE), True),
+    ("core-allow", re.compile(r'\bALLOW\b', re.IGNORECASE), True),
+    ("core-deny", re.compile(r'\bDENY\b', re.IGNORECASE), True),
     ("entering", re.compile(r'\bENTERING\b', re.IGNORECASE), True),
     ("win", re.compile(r'\bWIN\b', re.IGNORECASE), True),
     ("loss", re.compile(r'\bLOSS\b', re.IGNORECASE), True),
     ("error", re.compile(r'\b(ERROR|FAILED|EXCEPTION)\b', re.IGNORECASE), True),
+    ("entering", re.compile(r'\bNOTE\b|SHADOW-OBSERVE', re.IGNORECASE), False),
 ]
 
 
@@ -1917,19 +1920,6 @@ with tab_stats:
     st.markdown("### 📈 Statistics")
     st.caption("Глубокая аналитика по Core EV, отказам и времени входа.")
 
-    log_rows = st.selectbox("Строк лога", [100, 150, 200], index=1)
-    log_controls = st.columns(2)
-    with log_controls[0]:
-        log_only_important = st.checkbox("Только важные события", value=False)
-    with log_controls[1]:
-        log_highlight = st.checkbox("Подсвечивать ключевые события", value=True)
-
-    log_path = _resolve_stats_log_path(L, settings)
-    raw_log_lines = load_log_tail(str(log_path), log_rows)
-    visible_log_lines = raw_log_lines
-    if log_only_important:
-        visible_log_lines = [line for line in raw_log_lines if _classify_log_line(line)[1]]
-
     if D['total_signals'] > 0:
         stat_n = st.selectbox("Период Core EV runtime", [50, 100, 200], index=2)
         runtime_counts = D['core_ev_runtime_decisions_by_n'].get(stat_n, D['core_ev_runtime_decisions'])
@@ -2016,7 +2006,28 @@ with tab_stats:
         st.info("No statistics yet. Statistics are built from saved signals.")
 
     st.markdown("---")
-    st.markdown("### Последние события (лог)")
+    log_header_cols = st.columns([3, 1])
+    with log_header_cols[0]:
+        st.markdown("### Последние события (лог)")
+    with log_header_cols[1]:
+        if st.button("🔄 Refresh log", use_container_width=True):
+            load_log_tail.clear()
+            st.rerun()
+
+    log_controls = st.columns([1.2, 1.2, 1.6])
+    with log_controls[0]:
+        log_rows = st.selectbox("Строк лога", [100, 150, 200], index=1, key="stats_log_rows")
+    with log_controls[1]:
+        log_only_important = st.checkbox("Только важные", value=False, key="stats_log_only_important")
+    with log_controls[2]:
+        log_highlight = st.checkbox("Подсвечивать ключевые события", value=True, key="stats_log_highlight")
+
+    log_path = _resolve_stats_log_path(L, settings)
+    raw_log_lines = load_log_tail(str(log_path), log_rows)
+    visible_log_lines = raw_log_lines
+    if log_only_important:
+        visible_log_lines = [line for line in raw_log_lines if _classify_log_line(line)[1]]
+
     st.caption(
         f"Источник: {L.get('service_name') or 'Unknown'} | Файл: {log_path} | Показано строк: {len(visible_log_lines)}/{len(raw_log_lines)}"
     )
