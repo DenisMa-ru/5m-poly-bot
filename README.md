@@ -61,22 +61,30 @@ Confidence = `abs(score) / 12.0`, capped at 100%.
 
 ## 🚀 Installation
 
+Recommended server install flow:
+
 ```bash
-# 1. Clone the repo
-git clone https://github.com/your-username/copy-trader.git
-cd copy-trader
-
-# 2. Create a virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Set up your environment variables
-cp .env.example .env
-# Edit .env and fill in your keys (only required for --live mode)
+git clone https://github.com/DenisMa-ru/5m-poly-bot.git /root/5m-poly-bot
+cd /root/5m-poly-bot
+chmod +x install.sh
+sudo ./install.sh
 ```
+
+What `install.sh` does:
+
+- asks only for secrets and infrastructure values
+- creates `.venv`
+- installs dependencies from `requirements.txt`
+- writes `.env`
+- installs `systemd` units for dashboard, live bot, and dry-run bot
+- starts only the dashboard
+- leaves bot services stopped until you start them from the web UI
+
+After installation:
+
+- open the printed dashboard URL
+- complete the first-run setup wizard
+- start `dry-run` or `live` from the `Settings` tab
 
 ---
 
@@ -124,12 +132,16 @@ Press **Ctrl+C** at any time to stop the bot and print the session summary.
 
 ## 🔑 Environment Variables
 
-Only required for `--live` mode. Create a `.env` file based on `.env.example`:
+Create a `.env` file based on `.env.example` if you are not using `install.sh`:
 
 | Variable | Description |
 |---|---|
 | `POLY_PRIVATE_KEY` | Your Polymarket wallet private key (Polygon) |
 | `POLY_PROXY_WALLET` | Your Polymarket proxy/funder wallet address |
+| `POLYGON_RPC_URL` | Primary Polygon RPC URL |
+| `DASHBOARD_PASSWORD` | Password for protected dashboard actions |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for session ROI alerts |
+| `TELEGRAM_CHAT_ID` | Telegram chat ID for alerts |
 
 ---
 
@@ -137,12 +149,24 @@ Only required for `--live` mode. Create a `.env` file based on `.env.example`:
 
 ```
 copy-trader/
-├── crypto_bot.py       # Main bot
-├── requirements.txt    # Python dependencies
-├── .env.example        # Environment variable template
-├── .gitignore          # Git ignore rules
-└── README.md           # This file
+├── crypto_bot.py             # Main bot
+├── dashboard.py              # Streamlit dashboard
+├── install.sh                # Server installation helper
+├── poly-bot-live.service     # Live bot systemd unit
+├── poly-bot-test.service     # Dry-run bot systemd unit
+├── poly-bot-dashboard.service # Dashboard systemd unit
+├── requirements.txt          # Python dependencies
+├── .env.example              # Environment variable template
+├── .gitignore                # Git ignore rules
+└── README.md                 # This file
 ```
+
+## Runtime model
+
+- Actual runtime mode is detected from the active `systemd` bot service.
+- Desired mode is configured in the dashboard and used by the `Start bot` action.
+- Current session state is stored in `session_state.json`.
+- Live all-time reset marker is stored in `stats_state.json`.
 
 ---
 
