@@ -20,7 +20,6 @@ load_dotenv()
 
 DEFAULT_LOG = Path("/root/5m-poly-bot/bot.log")
 LIVE_LOG = Path("/root/5m-poly-bot/bot-live.log")
-CONTROL_FILE = Path("/root/5m-poly-bot/control.json")
 SIGNALS_FILE = Path("/root/5m-poly-bot/signals.json")
 WINDOW_SAMPLES_FILE = Path("/root/5m-poly-bot/window_samples.json")
 CORE_EV_RULES_FILE = Path("/root/5m-poly-bot/core_ev_rules.json")
@@ -140,22 +139,6 @@ def _save_json_file(path: Path, payload):
     with FileLock(path):
         atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=True))
 
-
-def write_control(cmd, mode=None, amount=None, settings=None):
-    """Write command to control file for the bot to read."""
-    data = {"cmd": cmd, "timestamp": datetime.now().isoformat()}
-    if mode: data["mode"] = mode
-    if amount: data["amount"] = amount
-    if settings: data["settings"] = settings
-    try:
-        atomic_write_text(CONTROL_FILE, json.dumps(data))
-    except: pass
-
-def get_control():
-    try:
-        return json.loads(CONTROL_FILE.read_text())
-    except:
-        return {}
 
 def is_bot_running():
     """Check if bot process is running via PID file."""
@@ -1630,7 +1613,21 @@ L = get_runtime_service_state()
 bot_running = L.get("active_state") == "active" or is_bot_running()
 account_state_seed = fetch_polymarket_account_state() if str(L.get("mode") or "Unknown") == "live" else {}
 stats_state = load_stats_state()
-session_state = ensure_session_state(settings, L, account_state_seed)
+first_setup_needed = not bool(settings.get("first_setup_done"))
+session_state = (
+    ensure_session_state(settings, L, account_state_seed)
+    if not first_setup_needed
+    else _default_session_state(
+        mode=str(settings.get("desired_mode", "dry-run") or "dry-run"),
+        service_name=str(L.get("service_name") or "Unknown"),
+        bank_start=_resolve_session_bank_start(
+            str(L.get("mode") or "Unknown"),
+            str(settings.get("desired_mode", "dry-run") or "dry-run"),
+            settings,
+            account_state_seed,
+        ),
+    )
+)
 D = build_dashboard_state(
     session_state.get("started_at"),
     session_state.get("session_bank_start"),
@@ -1638,7 +1635,6 @@ D = build_dashboard_state(
     L.get("mode"),
     stats_state.get("live_stats_reset_at"),
 )
-first_setup_needed = not bool(settings.get("first_setup_done"))
 
 # ===== TABS =====
 tab_dashboard, tab_stats, tab_settings = st.tabs([
@@ -1686,8 +1682,7 @@ with tab_dashboard:
             wizard_settings["first_setup_done"] = True
             wizard_settings["bank"] = float(wizard_settings.get("sim_bank", 100.0))
             save_settings(wizard_settings)
-            fresh_session = create_new_session(wizard_settings, L, account_state_seed)
-            save_session_state(fresh_session)
+            create_new_session(wizard_settings, L, account_state_seed)
             st.success("Первичная настройка сохранена.")
             st.rerun()
         st.stop()

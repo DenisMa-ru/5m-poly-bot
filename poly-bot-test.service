@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/5m-poly-bot
+EnvironmentFile=/root/5m-poly-bot/.env
 Environment="PATH=/root/5m-poly-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONUNBUFFERED=1"
 ExecStart=/root/5m-poly-bot/.venv/bin/python -u /root/5m-poly-bot/crypto_bot.py --dry-run

@@ -6,6 +6,7 @@ After=network.target poly-bot-test.service poly-bot-live.service
 Type=simple
 User=root
 WorkingDirectory=/root/5m-poly-bot
+EnvironmentFile=/root/5m-poly-bot/.env
 Environment="PATH=/root/5m-poly-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/root/5m-poly-bot/.venv/bin/streamlit run /root/5m-poly-bot/dashboard.py --server.port 3001 --server.address 0.0.0.0 --server.headless true
 Restart=always

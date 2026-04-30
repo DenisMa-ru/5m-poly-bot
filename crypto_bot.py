@@ -37,7 +37,6 @@ load_dotenv()
 
 # ─── FILE PATHS ────────────────────────────────────────────────────────────────
 BOT_DIR = Path(__file__).parent
-CONTROL_FILE = BOT_DIR / "control.json"
 SIGNALS_FILE = BOT_DIR / "signals.json"
 WINDOW_SAMPLES_FILE = BOT_DIR / "window_samples.json"
 SETTINGS_FILE = BOT_DIR / "settings.json"
@@ -125,15 +124,17 @@ def load_window_samples_file() -> list:
 
 def save_window_samples_file(samples: list):
     """Persist full-window observation history atomically."""
-    atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2, ensure_ascii=True))
+    with FileLock(WINDOW_SAMPLES_FILE):
+        atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2, ensure_ascii=True))
 
 
 def save_window_sample(sample_data: dict):
     """Append a full-window observation sample for offline EV analysis."""
     try:
-        samples = load_window_samples_file()
-        samples.append(sample_data)
-        save_window_samples_file(samples)
+        with FileLock(WINDOW_SAMPLES_FILE):
+            samples = load_window_samples_file()
+            samples.append(sample_data)
+            atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2, ensure_ascii=True))
     except Exception as e:
         log(f"[WINDOW SAMPLE SAVE ERROR] {e}")
 
@@ -274,17 +275,6 @@ def save_signal(signal_data):
             save_signals_file(signals)
     except Exception as e:
         log(f"[SIGNAL SAVE ERROR] {e}")
-
-# ─── CONTROL FILE CHECK ────────────────────────────────────────────────────────
-def check_control():
-    """Check control.json for stop/restart commands. Returns command or None."""
-    try:
-        if CONTROL_FILE.exists():
-            data = json.loads(CONTROL_FILE.read_text())
-            return data.get("cmd")
-    except Exception:
-        pass
-    return None
 
 # ─── CONFIG (defaults, can be overridden by settings.json) ────────────────────
 GAMMA_API         = "https://gamma-api.polymarket.com"
@@ -2305,17 +2295,6 @@ class CryptoBot:
         while self.running:
             try:
                 self._reload_runtime_state()
-                # Check for control commands
-                cmd = check_control()
-                if cmd == "stop":
-                    log("⏹️ Stop command received from dashboard")
-                    CONTROL_FILE.unlink(missing_ok=True)
-                    break
-                elif cmd == "restart":
-                    log("🔄 Restart command received from dashboard")
-                    CONTROL_FILE.unlink(missing_ok=True)
-                    log("Restarting...")
-
                 self._cycle()
                 self._maybe_send_roi_alert()
             except KeyboardInterrupt:

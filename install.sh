@@ -17,16 +17,39 @@ prompt_value() {
   local var_name="$1"
   local prompt_text="$2"
   local secret="${3:-0}"
+  local default_value="${4:-}"
   local value=""
   while [ -z "$value" ]; do
     if [ "$secret" = "1" ]; then
-      read -r -s -p "$prompt_text: " value
+      if [ -n "$default_value" ]; then
+        read -r -s -p "$prompt_text [hidden, press Enter to keep current]: " value
+        if [ -z "$value" ]; then
+          value="$default_value"
+        fi
+      else
+        read -r -s -p "$prompt_text: " value
+      fi
       echo
     else
-      read -r -p "$prompt_text: " value
+      if [ -n "$default_value" ]; then
+        read -r -p "$prompt_text [$default_value]: " value
+        if [ -z "$value" ]; then
+          value="$default_value"
+        fi
+      else
+        read -r -p "$prompt_text: " value
+      fi
     fi
   done
   printf -v "$var_name" '%s' "$value"
+}
+
+read_env_value() {
+  local key="$1"
+  if [ ! -f "$ENV_FILE" ]; then
+    return 0
+  fi
+  awk -F= -v search_key="$key" '$1 == search_key { sub(/^[^=]*=/, "", $0); print $0; exit }' "$ENV_FILE"
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -47,12 +70,21 @@ if [ ! -d .git ]; then
   exit 1
 fi
 
-prompt_value POLY_PRIVATE_KEY "POLY_PRIVATE_KEY" 1
-prompt_value POLY_PROXY_WALLET "POLY_PROXY_WALLET"
-prompt_value POLYGON_RPC_URL "POLYGON_RPC_URL"
-prompt_value TELEGRAM_BOT_TOKEN "TELEGRAM_BOT_TOKEN" 1
-prompt_value TELEGRAM_CHAT_ID "TELEGRAM_CHAT_ID"
-prompt_value DASHBOARD_PASSWORD "DASHBOARD_PASSWORD" 1
+CURRENT_POLY_PRIVATE_KEY="$(read_env_value POLY_PRIVATE_KEY)"
+CURRENT_POLY_PROXY_WALLET="$(read_env_value POLY_PROXY_WALLET)"
+CURRENT_POLYGON_RPC_URL="$(read_env_value POLYGON_RPC_URL)"
+CURRENT_POLYGON_RPC_URLS="$(read_env_value POLYGON_RPC_URLS)"
+CURRENT_TELEGRAM_BOT_TOKEN="$(read_env_value TELEGRAM_BOT_TOKEN)"
+CURRENT_TELEGRAM_CHAT_ID="$(read_env_value TELEGRAM_CHAT_ID)"
+CURRENT_DASHBOARD_PASSWORD="$(read_env_value DASHBOARD_PASSWORD)"
+
+prompt_value POLY_PRIVATE_KEY "POLY_PRIVATE_KEY" 1 "$CURRENT_POLY_PRIVATE_KEY"
+prompt_value POLY_PROXY_WALLET "POLY_PROXY_WALLET" 0 "$CURRENT_POLY_PROXY_WALLET"
+prompt_value POLYGON_RPC_URL "POLYGON_RPC_URL" 0 "$CURRENT_POLYGON_RPC_URL"
+prompt_value POLYGON_RPC_URLS "POLYGON_RPC_URLS (comma-separated)" 0 "${CURRENT_POLYGON_RPC_URLS:-$CURRENT_POLYGON_RPC_URL}"
+prompt_value TELEGRAM_BOT_TOKEN "TELEGRAM_BOT_TOKEN" 1 "$CURRENT_TELEGRAM_BOT_TOKEN"
+prompt_value TELEGRAM_CHAT_ID "TELEGRAM_CHAT_ID" 0 "$CURRENT_TELEGRAM_CHAT_ID"
+prompt_value DASHBOARD_PASSWORD "DASHBOARD_PASSWORD" 1 "$CURRENT_DASHBOARD_PASSWORD"
 
 python3 -m venv .venv
 "$PIP_BIN" install --upgrade pip
@@ -62,7 +94,7 @@ cat > "$ENV_FILE" <<EOF
 POLY_PRIVATE_KEY=$POLY_PRIVATE_KEY
 POLY_PROXY_WALLET=$POLY_PROXY_WALLET
 POLYGON_RPC_URL=$POLYGON_RPC_URL
-POLYGON_RPC_URLS=$POLYGON_RPC_URL
+POLYGON_RPC_URLS=$POLYGON_RPC_URLS
 TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
 DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD
