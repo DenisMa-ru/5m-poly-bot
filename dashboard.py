@@ -331,8 +331,7 @@ def get_runtime_service_state():
         }
 
     parsed = parse_log_state(Path(selected["log_path"]) if selected.get("log_path") else None)
-    if parsed.get("mode") in (None, "", "Unknown"):
-        parsed["mode"] = selected.get("mode") or "Unknown"
+    parsed["mode"] = selected.get("mode") or "Unknown"
     parsed["service_name"] = selected.get("service_name") or "Unknown"
     parsed["log_path"] = selected.get("log_path")
     parsed["active_state"] = selected.get("active_state") or "Unknown"
