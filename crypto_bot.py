@@ -1070,6 +1070,15 @@ def _get_polymarket_signature_type(proxy_wallet: str) -> int:
     return 2 if proxy_wallet else 0
 
 
+def _get_polymarket_signature_type_candidates(proxy_wallet: str) -> list[int]:
+    signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE")
+    if signature_type_raw is not None:
+        return [int(signature_type_raw)]
+    if proxy_wallet:
+        return [2, 1]
+    return [0]
+
+
 def _build_legacy_polymarket_client(private_key: str, proxy_wallet: str):
     import importlib
 
