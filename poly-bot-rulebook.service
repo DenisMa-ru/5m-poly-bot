@@ -1,0 +1,14 @@
+[Unit]
+Description=5m Poly Bot - Core EV Rulebook Rebuild
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/5m-poly-bot
+Environment="PATH=/root/5m-poly-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/root/5m-poly-bot/.venv/bin/python /root/5m-poly-bot/rebuild_core_ev_rulebook.py --source window
+StandardOutput=append:/root/5m-poly-bot/rulebook-rebuild.log
+StandardError=append:/root/5m-poly-bot/rulebook-rebuild.log
+

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run 5m Poly Bot Core EV rulebook rebuild every 12 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=12h
+AccuracySec=5min
+Persistent=true
+Unit=poly-bot-rulebook.service
+
+[Install]
+WantedBy=timers.target

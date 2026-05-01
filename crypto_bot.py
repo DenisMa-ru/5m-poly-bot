@@ -1680,6 +1680,7 @@ class CryptoBot:
         self.shadow_window_state: dict[str, dict] = {}
         self.closed_window_summaries: deque = deque(maxlen=12)
         self.core_ev_rules = load_core_ev_rules()
+        self.core_ev_rules_mtime = CORE_EV_RULES_FILE.stat().st_mtime if CORE_EV_RULES_FILE.exists() else None
         self.last_settings_reload_at = 0.0
         self.roi_alert_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         self.roi_alert_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -1811,6 +1812,26 @@ class CryptoBot:
             self.active_markets = {prefix: coin for prefix, coin in MARKETS.items() if coin in self.enabled_coins}
         except Exception as e:
             log(f"[SETTINGS RELOAD ERROR] {e}")
+
+        try:
+            fresh_rules_mtime = CORE_EV_RULES_FILE.stat().st_mtime if CORE_EV_RULES_FILE.exists() else None
+            if fresh_rules_mtime != self.core_ev_rules_mtime:
+                fresh_rules = load_core_ev_rules()
+                self.core_ev_rules = fresh_rules
+                self.core_ev_rules_mtime = fresh_rules_mtime
+                generated_at = str(fresh_rules.get("generated_at", "unknown") or "unknown")
+                source_type = str(fresh_rules.get("source_type", "unknown") or "unknown")
+                resolved = int(fresh_rules.get("resolved_eligible_signals", 0) or 0)
+                bucket_count = len(fresh_rules.get("buckets", {}) or {})
+                log(
+                    "[CORE EV RULEBOOK] Reloaded "
+                    f"generated_at={generated_at} source={source_type} "
+                    f"resolved={resolved} buckets={bucket_count}"
+                )
+                if not fresh_rules.get("buckets"):
+                    log("[CORE EV RULEBOOK] WARNING: reloaded rulebook is empty")
+        except Exception as e:
+            log(f"[CORE EV RULEBOOK RELOAD ERROR] {e}")
 
         try:
             fresh_session = load_session_state()
