@@ -8,7 +8,7 @@ Type=oneshot
 User=root
 WorkingDirectory=/root/5m-poly-bot
 Environment="PATH=/root/5m-poly-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+SuccessExitStatus=2
 ExecStart=/root/5m-poly-bot/.venv/bin/python /root/5m-poly-bot/rebuild_core_ev_rulebook.py --source window
 StandardOutput=append:/root/5m-poly-bot/rulebook-rebuild.log
 StandardError=append:/root/5m-poly-bot/rulebook-rebuild.log
-

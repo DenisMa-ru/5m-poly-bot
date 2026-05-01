@@ -78,15 +78,16 @@ def rulebook_allow_count(rulebook: dict) -> int:
 
 
 def summarize_rulebook(rulebook: dict) -> dict:
+    summary = rulebook.get("summary", {}) if isinstance(rulebook.get("summary"), dict) else {}
     return {
         "generated_at": str(rulebook.get("generated_at", "unknown") or "unknown"),
         "source_type": str(rulebook.get("source_type", "unknown") or "unknown"),
         "source_signals": int(rulebook.get("source_signals", 0) or 0),
         "resolved_eligible_signals": int(rulebook.get("resolved_eligible_signals", 0) or 0),
-        "allow_bucket_count": int(rulebook.get("allow_bucket_count", 0) or 0),
-        "deny_bucket_count": int(rulebook.get("deny_bucket_count", 0) or 0),
-        "watch_bucket_count": int(rulebook.get("watch_bucket_count", 0) or 0),
-        "bucket_count": int(rulebook.get("bucket_count", 0) or 0),
+        "allow_bucket_count": int(rulebook.get("allow_bucket_count", summary.get("allow_bucket_count", 0)) or 0),
+        "deny_bucket_count": int(rulebook.get("deny_bucket_count", summary.get("deny_bucket_count", 0)) or 0),
+        "watch_bucket_count": int(rulebook.get("watch_bucket_count", summary.get("watch_bucket_count", 0)) or 0),
+        "bucket_count": int(rulebook.get("bucket_count", summary.get("bucket_count", 0)) or 0),
     }
 
 
