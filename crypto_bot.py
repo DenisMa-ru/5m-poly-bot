@@ -1220,6 +1220,8 @@ def export_clob_credentials() -> int:
 def _classify_polymarket_exception(exc: Exception) -> tuple[str, str]:
     detail = str(exc)
     lowered = detail.lower()
+    if "no match" in lowered or "no liquidity" in lowered or "not enough liquidity" in lowered:
+        return "no_match", detail
     if "api key" in lowered or "passphrase" in lowered or "auth" in lowered or "unauthorized" in lowered:
         return "auth_failed", detail
     if "allowance" in lowered or "approval" in lowered or "approved" in lowered:
@@ -1593,6 +1595,51 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
         return result
     except Exception as e:
         failure_type, detail = _classify_polymarket_exception(e)
+        if using_v2 and failure_type == "no_match" and market_order_args is not None:
+            try:
+                time.sleep(0.25)
+                log("   ⚠️ BUY got no match from CLOB, retrying market order once")
+                retry_client = _build_v2_trade_client(private_key, proxy_wallet, signature_type=active_signature_type)
+                ok, retry_failure_type, retry_detail = _preflight_live_order(retry_client, round(amount_usdc, 2))
+                if not ok:
+                    result["failure_type"] = retry_failure_type
+                    result["detail"] = f"no_match_retry_preflight:{retry_detail}"
+                    log(f"   ❌ BUY preflight failed after no-match retry [{retry_failure_type}]: {retry_detail}")
+                    return result
+                options = PartialCreateOrderOptions(tick_size="0.01") if PartialCreateOrderOptions is not None else None
+                kwargs = {
+                    "order_args": market_order_args,
+                    "order_type": OrderType.FOK,
+                }
+                if options is not None:
+                    kwargs["options"] = options
+                resp = retry_client.create_and_post_market_order(**kwargs)
+                status = resp.get("status") if isinstance(resp, dict) else "ok"
+                order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+                result["order_status"] = str(status or "")
+                result["order_id"] = str(order_id or "")
+                if status == "matched":
+                    result["ok"] = True
+                    result["failure_type"] = ""
+                    result["detail"] = ""
+                    log(f"   ✅ BUY OK after no-match retry: {status} | order {str(order_id)[:20]}...")
+                    return result
+                result["failure_type"] = "not_filled_immediately"
+                result["detail"] = f"no_match_retry_status={status}"
+                log(
+                    f"   ❌ BUY not filled after no-match retry [{result['failure_type']}]: "
+                    f"{status} | order {str(order_id)[:20]}..."
+                )
+                return result
+            except Exception as retry_exc:
+                retry_failure_type, retry_detail = _classify_polymarket_exception(retry_exc)
+                result["failure_type"] = retry_failure_type
+                result["detail"] = f"initial={detail} | retry={retry_detail}"
+                log(
+                    f"   ❌ BUY failed after no-match retry [{result['failure_type']}]: {result['detail']} "
+                    f"| exc_type={type(retry_exc).__name__}"
+                )
+                return result
         if using_v2 and failure_type == "signature_type_mismatch" and market_order_args is not None and len(signature_type_candidates) > 1:
             retry_errors = [f"sig_type={active_signature_type}:{detail}"]
             for retry_signature_type in signature_type_candidates[1:]:
