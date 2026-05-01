@@ -1,10 +1,10 @@
 [Unit]
-Description=Run 5m Poly Bot auto redeem every 15 minutes
+Description=Run 5m Poly Bot auto redeem every minute
 
 [Timer]
-OnBootSec=3min
-OnUnitActiveSec=15min
-RandomizedDelaySec=2min
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
 Persistent=true
 Unit=poly-bot-redeem.service
 

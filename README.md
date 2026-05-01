@@ -184,6 +184,7 @@ Use `python3` instead of `python` on hosts where `python` is unavailable.
   - `redeem_worker.mjs`
   - `poly-bot-redeem.service`
   - `poly-bot-redeem.timer`
+- The systemd timer is configured for frequent polling so new winning positions are usually redeemed within about one minute instead of waiting for a long periodic sweep.
 - The worker currently supports standard non-NegRisk CTF redemption. NegRisk live redemption support is Unknown / not implemented in this first version.
 
 Recommended rollout:
