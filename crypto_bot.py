@@ -1335,6 +1335,93 @@ def _extract_balance_allowance(raw: dict) -> tuple[float | None, float | None]:
     return balance, allowance
 
 
+def get_collateral_state(private_key: str, proxy_wallet: str) -> dict:
+    """Return the best-known collateral state for live trading diagnostics."""
+    state = {
+        "balance": None,
+        "allowance": None,
+        "spendable": None,
+        "onchain_balance": None,
+        "source": "unknown",
+    }
+    onchain_balance = _fetch_polymarket_pusd_balance(proxy_wallet)
+    state["onchain_balance"] = onchain_balance
+
+    try:
+        import importlib
+
+        client_module = importlib.import_module("py_clob_client_v2")
+        BalanceAllowanceParams = client_module.BalanceAllowanceParams
+        AssetType = client_module.AssetType
+        client = _build_v2_trade_client(private_key, proxy_wallet)
+        raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        if isinstance(raw, dict):
+            balance, allowance = _extract_balance_allowance(raw)
+            if onchain_balance is not None and (balance is None or onchain_balance > balance):
+                balance = onchain_balance
+            spendable_limits = [v for v in (balance, allowance) if v is not None]
+            state.update({
+                "balance": balance,
+                "allowance": allowance,
+                "spendable": min(spendable_limits) if spendable_limits else balance,
+                "source": "v2",
+            })
+            return state
+    except Exception:
+        pass
+
+    try:
+        import importlib
+
+        client_module = importlib.import_module("py_clob_client.client")
+        clob_types_module = importlib.import_module("py_clob_client.clob_types")
+
+        BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
+        AssetType = clob_types_module.AssetType
+
+        client = _build_legacy_polymarket_client(private_key, proxy_wallet)
+        client.set_api_creds(client.create_or_derive_api_creds())
+        raw = client.get_balance_allowance(
+            params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+        if isinstance(raw, dict):
+            balance, allowance = _extract_balance_allowance(raw)
+            if onchain_balance is not None and (balance is None or onchain_balance > balance):
+                balance = onchain_balance
+            spendable_limits = [v for v in (balance, allowance) if v is not None]
+            state.update({
+                "balance": balance,
+                "allowance": allowance,
+                "spendable": min(spendable_limits) if spendable_limits else balance,
+                "source": "legacy",
+            })
+            return state
+    except Exception:
+        pass
+
+    state["balance"] = onchain_balance
+    state["spendable"] = onchain_balance
+    state["source"] = "onchain"
+    return state
+
+
+def refresh_collateral_state(private_key: str, proxy_wallet: str) -> dict:
+    """Best-effort collateral sync to avoid manual UI activation before trading."""
+    try:
+        import importlib
+
+        client_module = importlib.import_module("py_clob_client_v2")
+        BalanceAllowanceParams = client_module.BalanceAllowanceParams
+        AssetType = client_module.AssetType
+        client = _build_v2_trade_client(private_key, proxy_wallet)
+        client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        time.sleep(1.0)
+    except Exception:
+        pass
+
+    return get_collateral_state(private_key, proxy_wallet)
+
+
 def _preflight_live_order(client, amount_usdc: float) -> tuple[bool, str, str]:
     try:
         raw = None
@@ -1364,6 +1451,21 @@ def _preflight_live_order(client, amount_usdc: float) -> tuple[bool, str, str]:
         if balance is not None and balance < amount_usdc:
             return False, "insufficient_collateral", f"balance={balance} < amount={amount_usdc}"
         if allowance is not None and allowance < amount_usdc:
+            try:
+                import importlib
+
+                client_module = importlib.import_module("py_clob_client_v2")
+                BalanceAllowanceParams = client_module.BalanceAllowanceParams
+                AssetType = client_module.AssetType
+                client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+                time.sleep(1.0)
+                raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+                if isinstance(raw, dict):
+                    _, allowance = _extract_balance_allowance(raw)
+            except Exception:
+                pass
+            if allowance is not None and allowance >= amount_usdc:
+                return True, "", ""
             return False, "insufficient_allowance", f"allowance={allowance} < amount={amount_usdc}"
         return True, "", ""
     except Exception as exc:
@@ -1557,50 +1659,8 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
 
 def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tuple[float | None, float | None]:
     """Return available collateral balance/allowance from Polymarket, if available."""
-    onchain_balance = _fetch_polymarket_pusd_balance(proxy_wallet)
-
-    try:
-        import importlib
-
-        client_module = importlib.import_module("py_clob_client_v2")
-        BalanceAllowanceParams = client_module.BalanceAllowanceParams
-        AssetType = client_module.AssetType
-        client = _build_v2_trade_client(private_key, proxy_wallet)
-        raw = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-        if not isinstance(raw, dict):
-            return onchain_balance, None
-        balance, allowance = _extract_balance_allowance(raw)
-        if onchain_balance is not None and (balance is None or onchain_balance > balance):
-            balance = onchain_balance
-        return balance, allowance
-    except Exception:
-        pass
-
-    try:
-        import importlib
-
-        client_module = importlib.import_module("py_clob_client.client")
-        clob_types_module = importlib.import_module("py_clob_client.clob_types")
-
-        BalanceAllowanceParams = clob_types_module.BalanceAllowanceParams
-        AssetType = clob_types_module.AssetType
-
-        client = _build_legacy_polymarket_client(private_key, proxy_wallet)
-        client.set_api_creds(client.create_or_derive_api_creds())
-
-        raw = client.get_balance_allowance(
-            params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-        )
-
-        if not isinstance(raw, dict):
-            return onchain_balance, None
-
-        balance, allowance = _extract_balance_allowance(raw)
-        if onchain_balance is not None and (balance is None or onchain_balance > balance):
-            balance = onchain_balance
-        return balance, allowance
-    except Exception:
-        return onchain_balance, None
+    state = get_collateral_state(private_key, proxy_wallet)
+    return state.get("balance"), state.get("allowance")
 
 # ─── BOT ───────────────────────────────────────────────────────────────────────
 class CryptoBot:
@@ -2901,19 +2961,46 @@ class CryptoBot:
             )
 
         if not self.paper and not self.dry_run:
-            collateral_balance, collateral_allowance = get_collateral_balance_allowance(
+            collateral_state = get_collateral_state(
                 self.private_key,
                 self.proxy_wallet,
             )
+            collateral_balance = collateral_state.get("balance")
+            collateral_allowance = collateral_state.get("allowance")
             spendable_limits = [v for v in (collateral_balance, collateral_allowance) if v is not None]
             if spendable_limits and min(spendable_limits) + 1e-9 < trade_amount:
-                spendable = min(spendable_limits)
-                log(
-                    f"   [{crypto}] SKIP — insufficient collateral/allowance ${spendable:.2f} < ${trade_amount:.2f}"
+                refreshed_state = refresh_collateral_state(
+                    self.private_key,
+                    self.proxy_wallet,
                 )
-                signal_data["reason"] = f"insufficient collateral/allowance ({spendable:.2f} < {trade_amount:.2f})"
-                persist_record(force=True)
-                return
+                refreshed_balance = refreshed_state.get("balance")
+                refreshed_allowance = refreshed_state.get("allowance")
+                refreshed_limits = [v for v in (refreshed_balance, refreshed_allowance) if v is not None]
+                if refreshed_limits and min(refreshed_limits) + 1e-9 >= trade_amount:
+                    collateral_state = refreshed_state
+                    collateral_balance = refreshed_balance
+                    collateral_allowance = refreshed_allowance
+                else:
+                    collateral_state = refreshed_state
+                    collateral_balance = refreshed_balance
+                    collateral_allowance = refreshed_allowance
+
+                spendable_limits = [v for v in (collateral_balance, collateral_allowance) if v is not None]
+                spendable = min(spendable_limits) if spendable_limits else 0.0
+                balance_txt = "Unknown" if collateral_balance is None else f"${collateral_balance:.2f}"
+                allowance_txt = "Unknown" if collateral_allowance is None else f"${collateral_allowance:.2f}"
+                onchain_txt = "Unknown" if collateral_state.get("onchain_balance") is None else f"${float(collateral_state['onchain_balance']):.2f}"
+                if spendable_limits and spendable + 1e-9 < trade_amount:
+                    log(
+                        f"   [{crypto}] SKIP — insufficient spendable ${spendable:.2f} < ${trade_amount:.2f} "
+                        f"(balance={balance_txt} allowance={allowance_txt} onchain={onchain_txt} source={collateral_state.get('source', 'unknown')})"
+                    )
+                    signal_data["reason"] = (
+                        f"insufficient spendable ({spendable:.2f} < {trade_amount:.2f}) | "
+                        f"balance={balance_txt} allowance={allowance_txt} onchain={onchain_txt}"
+                    )
+                    persist_record(force=True)
+                    return
 
         # Entry approved. Mark it as entered only after a successful execution.
         expected_pnl = (trade_amount / market["winner_price"]) - trade_amount

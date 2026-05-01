@@ -176,6 +176,45 @@ Use `python3` instead of `python` on hosts where `python` is unavailable.
 
 ---
 
+## Auto-redeem for winning positions
+
+- Resolved winning positions do not automatically become spendable collateral for new buys until they are redeemed.
+- If live logs show `SKIP - insufficient spendable ...` while Polymarket still shows redeemable winnings, the usual root cause is funds being parked in redeemable positions rather than a broken strategy loop.
+- This repository includes a separate redeem worker so redeem stays outside the main trading loop:
+  - `redeem_worker.mjs`
+  - `poly-bot-redeem.service`
+  - `poly-bot-redeem.timer`
+- The worker currently supports standard non-NegRisk CTF redemption. NegRisk live redemption support is Unknown / not implemented in this first version.
+
+Recommended rollout:
+
+```bash
+npm run redeem:dry-run
+npm run redeem:one
+sudo systemctl enable --now poly-bot-redeem.timer
+```
+
+Useful server checks:
+
+```bash
+sudo systemctl status poly-bot-redeem.timer
+sudo systemctl status poly-bot-redeem.service
+tail -n 100 /root/5m-poly-bot/redeem-worker.log
+```
+
+Required env for live redeem:
+
+- `POLY_PRIVATE_KEY`
+- `POLY_PROXY_WALLET`
+- `POLY_SIGNATURE_TYPE`
+- `RELAYER_API_KEY`
+- `RELAYER_API_KEY_ADDRESS`
+- `POLYGON_RPC_URL` is recommended
+
+The live bot now logs spendable diagnostics more explicitly when funds are blocked, including `balance`, `allowance`, `onchain`, and the source used for the check. This helps distinguish true allowance issues from cash that is still locked in positions waiting for redeem.
+
+---
+
 ## 📁 Project Structure
 
 ```
