@@ -2291,6 +2291,30 @@ class CryptoBot:
                     "size_fraction": CORE_EV_MICRO_RISK_PCT,
                 }
             if not pm_in_core_zone:
+                unknown_flex_micro_late = time_left < 20
+                unknown_flex_micro_expensive = pm >= 0.90
+                if unknown_flex_micro_late or unknown_flex_micro_expensive:
+                    deny_reasons = []
+                    if unknown_flex_micro_late:
+                        deny_reasons.append(f"late={time_left:.1f}s")
+                    if unknown_flex_micro_expensive:
+                        deny_reasons.append(f"pm={pm:.3f}")
+                    deny_detail = ", ".join(deny_reasons)
+                    return {
+                        "decision": "deny",
+                        "reason": (
+                            "flex pm outside base zone with unknown core ev bucket denied by runtime envelope "
+                            f"({deny_detail}) | {level_summary}"
+                        ),
+                        "bucket_key": keys["L3"],
+                        "bucket_level": "L3",
+                        "sample_size": 0,
+                        "historical_roi": 0.0,
+                        "historical_win_rate": 0.0,
+                        "recent_roi": 0.0,
+                        "recent_trades": 0,
+                        "size_fraction": 0.0,
+                    }
                 return {
                     "decision": "micro_allow",
                     "reason": f"flex pm outside base zone with unknown core ev bucket ({pm:.3f}) | {level_summary}",
