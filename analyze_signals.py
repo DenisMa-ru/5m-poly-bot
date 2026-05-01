@@ -285,6 +285,66 @@ def reason_label(signal: dict) -> str:
     return str(signal.get("reason", "other") or "other")
 
 
+def core_ev_decision_label(signal: dict) -> str:
+    return str(signal.get("core_ev_decision", "unknown") or "unknown")
+
+
+def core_ev_reason_label(signal: dict) -> str:
+    reason = str(signal.get("core_ev_reason", "") or "")
+    return reason if reason else "none"
+
+
+def core_ev_branch_label(signal: dict) -> str:
+    reason = core_ev_reason_label(signal).lower()
+    if reason == "none":
+        return "none"
+    if "high-pm micro entry outside flex zone" in reason:
+        return "high_pm_outside_flex_micro"
+    if "trend conflict haircut to micro-size entry" in reason:
+        return "trend_conflict_micro"
+    if "shadow live deny" in reason:
+        return "shadow_live_deny"
+    if "reversal risk not recovered" in reason:
+        return "reversal_not_recovered"
+    if "undersampled but positive core ev bucket" in reason:
+        return "undersampled_positive_micro"
+    if "flex pm outside base zone but undersampled-positive bucket" in reason:
+        return "flex_undersampled_positive_micro"
+    if "flex pm outside base zone with unknown core ev bucket" in reason:
+        return "flex_unknown_bucket_micro"
+    if "undersampled or unknown core ev bucket" in reason:
+        return "undersampled_or_unknown_deny"
+    if "flex pm bucket remains historically negative" in reason:
+        return "flex_historical_negative_deny"
+    if "flex pm outside base zone" in reason and "downgraded to micro-size" in reason:
+        return "flex_outside_base_micro"
+    if "l3 unknown, using positive l2 fallback" in reason:
+        return "l2_fallback_from_unknown_l3"
+    if "full-window l1 fallback" in reason:
+        return "full_window_l1_fallback"
+    if "reduced-size core ev fallback below" in reason:
+        return "reduced_specificity_micro"
+    if "full-window requires" in reason and "bucket specificity" in reason:
+        return "full_window_specificity_deny"
+    if "core ev watch downgraded to micro-size entry" in reason:
+        return "watch_to_micro"
+    if reason == "core ev allow":
+        return "base_allow"
+    if reason == "core ev strong_allow":
+        return "base_strong_allow"
+    if reason == "core ev watch":
+        return "base_watch"
+    if "core ev requires aligned non-conflicting trend" in reason:
+        return "trend_alignment_deny"
+    if "pm outside flexible core ev zone" in reason:
+        return "pm_outside_flex_deny"
+    if reason == "core ev disabled":
+        return "core_ev_disabled"
+    if reason.startswith("core ev deny"):
+        return "base_deny"
+    return "other"
+
+
 def combo_bucket(signal: dict, *parts) -> str:
     return " | ".join(part(signal) for part in parts)
 
@@ -1256,6 +1316,78 @@ def print_execution_failed_report(signals: list[dict], min_trades: int, top: int
     for title, key_fn in reports:
         rows = filter_rows(summarize_trades(normalized, key_fn), min_trades)
         print_table(title, rows, top)
+
+
+def print_core_ev_causal_report(signals: list[dict], min_trades: int, top: int) -> None:
+    print("\n=== CORE EV CAUSAL REPORT ===")
+    core_ev_signals = [signal for signal in signals if signal.get("core_ev_decision") is not None]
+    if not core_ev_signals:
+        print("No signals with core_ev_decision fields yet.")
+        return
+
+    entered = [signal for signal in core_ev_signals if signal.get("entered")]
+    settled = [signal for signal in entered if signal.get("realized_pnl") is not None]
+    failed = [signal for signal in core_ev_signals if str(signal.get("reason", "") or "") == "execution failed"]
+    failed_resolved = [signal for signal in failed if signal.get("pnl_if_entered") is not None]
+
+    print(
+        f"core_ev_signals={len(core_ev_signals)} | entered={len(entered)} | "
+        f"settled={len(settled)} | execution_failed={len(failed)} | resolved_failed={len(failed_resolved)}"
+    )
+
+    decision_counts: dict[str, int] = defaultdict(int)
+    branch_counts: dict[str, int] = defaultdict(int)
+    for signal in core_ev_signals:
+        decision_counts[core_ev_decision_label(signal)] += 1
+        branch_counts[core_ev_branch_label(signal)] += 1
+
+    print("Runtime decision mix:")
+    for key, count in sorted(decision_counts.items(), key=lambda item: (-item[1], item[0])):
+        share = count / len(core_ev_signals) * 100 if core_ev_signals else 0.0
+        print(f"  {key:<20} count={count:<4} share={fmt_pct(share)}")
+
+    print("Runtime branch mix:")
+    for key, count in sorted(branch_counts.items(), key=lambda item: (-item[1], item[0]))[:12]:
+        share = count / len(core_ev_signals) * 100 if core_ev_signals else 0.0
+        print(f"  {key:<32} count={count:<4} share={fmt_pct(share)}")
+
+    if settled:
+        reports = [
+            ("Settled by core_ev_decision", core_ev_decision_label),
+            ("Settled by core_ev_branch", core_ev_branch_label),
+            ("Settled by core_ev_reason", core_ev_reason_label),
+            ("Settled by PM x core_ev_decision", lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), core_ev_decision_label)),
+            ("Settled by PM x core_ev_branch", lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), core_ev_branch_label)),
+            ("Settled by time x core_ev_decision", lambda signal: combo_bucket(signal, lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)), core_ev_decision_label)),
+            ("Settled by time x core_ev_branch", lambda signal: combo_bucket(signal, lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)), core_ev_branch_label)),
+            ("Settled by PM x time x branch", lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)), core_ev_branch_label)),
+        ]
+        for title, key_fn in reports:
+            rows = filter_rows(summarize_trades(settled, key_fn), min_trades)
+            print_table(title, rows, top)
+    else:
+        print("No settled entered core EV trades yet.")
+
+    if failed_resolved:
+        normalized = [
+            {
+                **signal,
+                "realized_pnl": float(signal.get("pnl_if_entered", 0) or 0),
+                "won": float(signal.get("pnl_if_entered", 0) or 0) > 0,
+            }
+            for signal in failed_resolved
+        ]
+        reports = [
+            ("Execution-failed by core_ev_decision", core_ev_decision_label),
+            ("Execution-failed by core_ev_branch", core_ev_branch_label),
+            ("Execution-failed by PM x branch", lambda signal: combo_bucket(signal, lambda s: bucket_pm(float(s.get("pm", 0) or 0)), core_ev_branch_label)),
+            ("Execution-failed by time x branch", lambda signal: combo_bucket(signal, lambda s: bucket_time_left(float(s.get("time_left", 0) or 0)), core_ev_branch_label)),
+        ]
+        for title, key_fn in reports:
+            rows = filter_rows(summarize_trades(normalized, key_fn), min_trades)
+            print_table(title, rows, top)
+    else:
+        print("No resolved execution-failed core EV signals yet.")
 
 
 def print_shadow_entry_report(signals: list[dict], min_trades: int, top: int, shadow_pm_floor: float) -> None:
@@ -2241,6 +2373,7 @@ def main() -> int:
     print_normal_pm_zone_report(signals, args.min_trades, args.top)
     print_core_ev_pm_expansion_report(signals, args.min_trades, args.top)
     print_core_ev_timing_report(signals, args.min_trades, args.top)
+    print_core_ev_causal_report(signals, args.min_trades, args.top)
     print_execution_failed_report(signals, args.min_trades, args.top)
     print_shadow_entry_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
     print_shadow_similarity_report(signals, args.min_trades, args.top, args.shadow_pm_floor)
