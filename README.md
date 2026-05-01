@@ -216,6 +216,45 @@ The live bot now logs spendable diagnostics more explicitly when funds are block
 
 ---
 
+## Auto-wrap for pending funds activation
+
+- After the April 2026 Polymarket exchange migration, portfolio cash may sit as `USDC.e` until it is wrapped into `pUSD`.
+- In the UI this appears as `Confirm pending deposit` / `Activate Funds`, where portfolio value is larger than `Available for trading`.
+- This repository includes a separate worker for that activation flow:
+  - `wrap_worker.mjs`
+  - `poly-bot-wrap.service`
+  - `poly-bot-wrap.timer`
+- The worker checks the proxy wallet for `USDC.e`, approves the pUSD onramp if needed, and wraps `USDC.e -> pUSD` through the Polymarket relayer.
+- Default timer cadence is one minute so pending funds are activated quickly without embedding migration logic into the main bot loop.
+
+Recommended rollout:
+
+```bash
+npm run wrap:dry-run
+npm run wrap
+sudo systemctl enable --now poly-bot-wrap.timer
+```
+
+Useful server checks:
+
+```bash
+sudo systemctl status poly-bot-wrap.timer
+sudo systemctl status poly-bot-wrap.service
+tail -n 100 /root/5m-poly-bot/wrap-worker.log
+```
+
+Required env for live auto-wrap:
+
+- `POLY_PRIVATE_KEY`
+- `POLY_PROXY_WALLET`
+- `POLY_SIGNATURE_TYPE`
+- `RELAYER_API_KEY`
+- `RELAYER_API_KEY_ADDRESS`
+- `POLYGON_RPC_URL`
+- Optional: `POLY_WRAP_MIN_USDC` to skip tiny balances (default `0.01`)
+
+---
+
 ## 📁 Project Structure
 
 ```

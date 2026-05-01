@@ -126,16 +126,21 @@ install -m 644 poly-bot-live.service "$SYSTEMD_DIR/poly-bot-live.service"
 install -m 644 poly-bot-test.service "$SYSTEMD_DIR/poly-bot-test.service"
 install -m 644 poly-bot-redeem.service "$SYSTEMD_DIR/poly-bot-redeem.service"
 install -m 644 poly-bot-redeem.timer "$SYSTEMD_DIR/poly-bot-redeem.timer"
+install -m 644 poly-bot-wrap.service "$SYSTEMD_DIR/poly-bot-wrap.service"
+install -m 644 poly-bot-wrap.timer "$SYSTEMD_DIR/poly-bot-wrap.timer"
 
 systemctl daemon-reload
 systemctl enable poly-bot-dashboard.service
 systemctl disable poly-bot-live.service >/dev/null 2>&1 || true
 systemctl disable poly-bot-test.service >/dev/null 2>&1 || true
 systemctl disable poly-bot-redeem.timer >/dev/null 2>&1 || true
+systemctl disable poly-bot-wrap.timer >/dev/null 2>&1 || true
 systemctl stop poly-bot-live.service >/dev/null 2>&1 || true
 systemctl stop poly-bot-test.service >/dev/null 2>&1 || true
 systemctl stop poly-bot-redeem.service >/dev/null 2>&1 || true
 systemctl stop poly-bot-redeem.timer >/dev/null 2>&1 || true
+systemctl stop poly-bot-wrap.service >/dev/null 2>&1 || true
+systemctl stop poly-bot-wrap.timer >/dev/null 2>&1 || true
 systemctl restart poly-bot-dashboard.service
 
 IP_ADDR="$(hostname -I | awk '{print $1}')"
@@ -145,3 +150,4 @@ echo "Dashboard URL: http://$IP_ADDR:3001"
 echo "First open will show the setup wizard."
 echo "Bot services are installed but not started. Use the dashboard to start live or dry-run."
 echo "Auto-redeem service/timer are installed but disabled by default. Enable only after a successful dry-run test."
+echo "Auto-wrap service/timer are installed but disabled by default. Enable only after a successful dry-run test."

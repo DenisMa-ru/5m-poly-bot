@@ -5,7 +5,9 @@
   "scripts": {
     "redeem:dry-run": "node redeem_worker.mjs --dry-run",
     "redeem": "node redeem_worker.mjs",
-    "redeem:one": "node redeem_worker.mjs --max-items=1"
+    "redeem:one": "node redeem_worker.mjs --max-items=1",
+    "wrap:dry-run": "node wrap_worker.mjs --dry-run",
+    "wrap": "node wrap_worker.mjs"
   },
   "dependencies": {
     "@polymarket/builder-relayer-client": "^0.0.8",
