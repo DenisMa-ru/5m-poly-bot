@@ -1101,6 +1101,7 @@ def build_dashboard_state(
     entered = [s for s in signals if s.get("entered")]
     skipped = [s for s in signals if not s.get("entered")]
     resolved_window_samples = [s for s in window_samples if s.get("pnl_if_entered") is not None]
+    settled_trade_rows = []
     last_window_samples = window_samples[-20:]
     full_window_waits = [s for s in signals if str(s.get("reason", "")).startswith("full window wait |")]
     last_full_window_waits = full_window_waits[-12:]
@@ -1218,6 +1219,50 @@ def build_dashboard_state(
     wins = [s for s in entered if s.get("won") == True]
     losses = [s for s in entered if s.get("won") == False]
     pending = [s for s in entered if "realized_pnl" not in s or s.get("realized_pnl") is None]
+
+    for s in reversed(entered):
+        realized_pnl_value = s.get("realized_pnl")
+        if realized_pnl_value is None:
+            continue
+        entry_time = str(s.get("entry_time", s.get("timestamp", "")) or "")
+        close_time = str(s.get("close_time", "") or "")
+        if not close_time:
+            close_ts = s.get("market_close_ts")
+            if close_ts is not None:
+                try:
+                    close_time = datetime.fromtimestamp(int(close_ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    close_time = ""
+        decision = str(s.get("core_ev_decision", "") or "")
+        level = str(s.get("core_ev_bucket_level", "") or "")
+        if not level and decision:
+            level = "runtime"
+        outcome = str(s.get("outcome", s.get("result", "PENDING")) or "PENDING")
+        exec_status = str(s.get("exec_status", "") or "")
+        if not exec_status:
+            if s.get("entered"):
+                exec_status = "success"
+            elif s.get("execution_failure_type"):
+                exec_status = str(s.get("execution_failure_type", "") or "")
+            elif s.get("execution_order_status"):
+                exec_status = str(s.get("execution_order_status", "") or "")
+            else:
+                exec_status = "unknown"
+        settled_trade_rows.append({
+            "Entry Time": entry_time,
+            "Close Time": close_time or "—",
+            "Decision": decision or "—",
+            "Level": level or "—",
+            "PM": f"{float(s.get('pm', 0) or 0):.3f}",
+            "Delta": f"{float(s.get('delta', 0) or 0):.4f}%",
+            "Time Left": f"{float(s.get('time_left', 0) or 0):.1f}s",
+            "Side": str(s.get("side", "") or "—"),
+            "Amount": f"{float(s.get('amount', 0) or 0):.2f}",
+            "PnL": f"{float(realized_pnl_value or 0):+.2f}",
+            "Outcome": outcome,
+            "Reason": str(s.get("core_ev_reason", s.get("reason", "")) or ""),
+            "Exec Status": exec_status,
+        })
 
     l1_fallback_signals = [
         s for s in signals
@@ -1386,6 +1431,7 @@ def build_dashboard_state(
         "last_entered": last_entered,
         "last_skipped": last_skipped,
         "last_full_window_waits": last_full_window_waits,
+        "settled_trade_rows": settled_trade_rows[:150],
         "core_ev_recent_rows": core_ev_recent_rows,
         "last_shadow_live": last_shadow_live,
         "shadow_live_mode": shadow_live_mode,
@@ -1941,6 +1987,15 @@ with tab_stats:
 
         if runtime_rows:
             st.dataframe(runtime_rows, width="stretch", hide_index=True, height=240)
+
+        st.markdown("---")
+
+        st.markdown("**Completed Trades for Manual Review**")
+        st.caption("Минимальный набор по завершённым сделкам: время входа/закрытия, решение, уровень, PM, delta, time left, size, PnL, outcome и exec status.")
+        if D['settled_trade_rows']:
+            st.dataframe(D['settled_trade_rows'], width="stretch", hide_index=True, height=320)
+        else:
+            st.caption("Пока нет завершённых сделок для таблицы разбора.")
 
         st.markdown("---")
 

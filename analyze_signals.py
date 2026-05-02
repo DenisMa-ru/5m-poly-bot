@@ -302,6 +302,8 @@ def core_ev_branch_label(signal: dict) -> str:
         return "high_pm_outside_flex_micro"
     if "trend conflict haircut to micro-size entry" in reason:
         return "trend_conflict_micro"
+    if "late trend conflict micro denied by runtime envelope" in reason:
+        return "trend_conflict_late_deny"
     if "shadow live deny" in reason:
         return "shadow_live_deny"
     if "reversal risk not recovered" in reason:
@@ -316,6 +318,8 @@ def core_ev_branch_label(signal: dict) -> str:
         return "undersampled_or_unknown_deny"
     if "flex pm bucket remains historically negative" in reason:
         return "flex_historical_negative_deny"
+    if "expensive or late flex pm outside base zone denied by runtime envelope" in reason:
+        return "flex_expensive_runtime_deny"
     if "flex pm outside base zone" in reason and "downgraded to micro-size" in reason:
         return "flex_outside_base_micro"
     if "l3 unknown, using positive l2 fallback" in reason:
@@ -332,6 +336,8 @@ def core_ev_branch_label(signal: dict) -> str:
         return "base_allow"
     if reason == "core ev strong_allow":
         return "base_strong_allow"
+    if "strong_allow early mid-pm slice denied by runtime envelope" in reason:
+        return "strong_allow_early_mid_pm_deny"
     if reason == "core ev watch":
         return "base_watch"
     if "core ev requires aligned non-conflicting trend" in reason:

@@ -1987,11 +1987,13 @@ class CryptoBot:
 
         signal_data = {
             "timestamp": ts_str(),
+            "entry_time": ts_str(),
             "mode": self.mode,
             "session_id": self.session_id,
             "service_name": self.service_name,
             "market_slug": slug,
             "market_close_ts": market.get("close_ts"),
+            "close_time": "",
             "market_start_ts": market.get("close_ts", 0) - 300 if market.get("close_ts") else None,
             "coin": crypto,
             "side": market["winner_side"],
@@ -2016,8 +2018,10 @@ class CryptoBot:
             "price": ta.get("current_price", 0),
             "time_left": seconds_left,
             "entered": False,
+            "outcome": "PENDING",
             "reason": "",
             "amount": trade_amount,
+            "exec_status": "pending",
             "execution_failure_type": "",
             "execution_failure_detail": "",
             "execution_order_status": "",
@@ -2261,6 +2265,15 @@ class CryptoBot:
                 "size_fraction": 0.0,
             }
         if not bool(signal_data.get("trend_aligned")) or bool(signal_data.get("trend_conflict")):
+            if time_left < 20:
+                return {
+                    "decision": "deny",
+                    "reason": (
+                        "late trend conflict micro denied by runtime envelope "
+                        f"(t={time_left:.1f}s delta={delta_pct:.4f}% 1m={indicator_confirm:+.2f})"
+                    ),
+                    "size_fraction": 0.0,
+                }
             trend_micro_ok = (
                 FULL_WINDOW_CORE_EV_ENABLED
                 and CORE_EV_ENTRY_TIME_MIN <= time_left <= min(CORE_EV_ENTRY_TIME_MAX, FULL_WINDOW_CORE_EV_TIME_LEFT_MAX)
@@ -2431,6 +2444,33 @@ class CryptoBot:
                     "size_fraction": 0.0,
                 }
             if decision in {"allow", "strong_allow", "watch"}:
+                expensive_flex_pm = pm >= 0.95
+                late_expensive_flex_pm = pm >= 0.90 and time_left < 30
+                mid_high_flex_pm = pm >= 0.80 and time_left < 30
+                if expensive_flex_pm or late_expensive_flex_pm or mid_high_flex_pm:
+                    deny_reasons = []
+                    if expensive_flex_pm:
+                        deny_reasons.append(f"pm={pm:.3f}")
+                    if late_expensive_flex_pm:
+                        deny_reasons.append(f"late={time_left:.1f}s")
+                    if mid_high_flex_pm and not late_expensive_flex_pm:
+                        deny_reasons.append(f"midhigh={pm:.3f}@{time_left:.1f}s")
+                    deny_detail = ", ".join(deny_reasons)
+                    return {
+                        "decision": "deny",
+                        "reason": (
+                            "expensive or late flex pm outside base zone denied by runtime envelope "
+                            f"({deny_detail}) | core ev {decision}"
+                        ),
+                        "bucket_key": selected_key,
+                        "bucket_level": bucket_level,
+                        "sample_size": sample_size,
+                        "historical_roi": historical_roi,
+                        "historical_win_rate": historical_win_rate,
+                        "recent_roi": recent_roi,
+                        "recent_trades": recent_trades,
+                        "size_fraction": 0.0,
+                    }
                 return {
                     "decision": "micro_allow",
                     "reason": (
@@ -2548,6 +2588,23 @@ class CryptoBot:
                 "recent_roi": recent_roi,
                 "recent_trades": recent_trades,
                 "size_fraction": CORE_EV_MICRO_RISK_PCT,
+            }
+
+        if decision == "strong_allow" and time_left >= 40 and 0.64 <= pm <= 0.67:
+            return {
+                "decision": "deny",
+                "reason": (
+                    "strong_allow early mid-pm slice denied by runtime envelope "
+                    f"(pm={pm:.3f} t={time_left:.1f}s roi={historical_roi:+.1f}% n={sample_size})"
+                ),
+                "bucket_key": selected_key,
+                "bucket_level": bucket_level,
+                "sample_size": sample_size,
+                "historical_roi": historical_roi,
+                "historical_win_rate": historical_win_rate,
+                "recent_roi": recent_roi,
+                "recent_trades": recent_trades,
+                "size_fraction": 0.0,
             }
 
         size_fraction = 0.0
@@ -3114,6 +3171,9 @@ class CryptoBot:
         if execution.get("ok"):
             signal_data["entered"] = True
             signal_data["reason"] = "all filters passed"
+            signal_data["exec_status"] = "success"
+            signal_data["execution_order_status"] = str(execution.get("order_status", "") or "success")
+            signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
             entered_slugs.add(slug)
             self.traded_slugs.add(slug)
             state = self.shadow_window_state.get(slug)
@@ -3126,6 +3186,7 @@ class CryptoBot:
             signal_data["execution_failure_detail"] = str(execution.get("detail", "") or "")
             signal_data["execution_order_status"] = str(execution.get("order_status", "") or "")
             signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
+            signal_data["exec_status"] = signal_data["execution_failure_type"] or signal_data["execution_order_status"] or "exception"
             if execution.get("size") is not None:
                 signal_data["execution_size"] = execution.get("size")
             if execution.get("taker_price") is not None:
@@ -3658,6 +3719,8 @@ class CryptoBot:
                     records[i]["winner"] = winner
                     records[i]["loser"] = loser
                     records[i]["resolved_at"] = ts_str()
+                    if sig_close_ts is not None:
+                        records[i]["close_time"] = datetime.fromtimestamp(int(sig_close_ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
                     if won:
                         payout = trade_amount / entry_price if entry_price > 0 else trade_amount
@@ -3672,6 +3735,7 @@ class CryptoBot:
 
                     if entered:
                         records[i]["result"] = result
+                        records[i]["outcome"] = result
                         records[i]["realized_pnl"] = round(pnl_if_entered, 2)
                         records[i]["payout"] = round(payout, 2)
                         if apply_bank_updates:
