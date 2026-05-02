@@ -2245,6 +2245,33 @@ class CryptoBot:
                 ),
                 "size_fraction": 0.0,
             }
+        if time_left < 20:
+            return {
+                "decision": "deny",
+                "reason": (
+                    "global late entry denied by runtime envelope "
+                    f"(t={time_left:.1f}s pm={pm:.3f} delta={delta_pct:.4f}% conf={confidence:.0%})"
+                ),
+                "size_fraction": 0.0,
+            }
+        if (0.10 <= confidence < 0.20) or (0.40 <= confidence < 0.50):
+            return {
+                "decision": "deny",
+                "reason": (
+                    "weak confidence bucket denied by runtime envelope "
+                    f"(conf={confidence:.0%} pm={pm:.3f} t={time_left:.1f}s)"
+                ),
+                "size_fraction": 0.0,
+            }
+        if 0.03 <= delta_pct < 0.05:
+            return {
+                "decision": "deny",
+                "reason": (
+                    "toxic delta bucket denied by runtime envelope "
+                    f"(delta={delta_pct:.4f}% pm={pm:.3f} t={time_left:.1f}s conf={confidence:.0%})"
+                ),
+                "size_fraction": 0.0,
+            }
         pm_in_core_zone = CORE_EV_PM_MIN <= pm <= CORE_EV_PM_MAX
         pm_in_flex_zone = CORE_EV_FLEX_PM_MIN <= pm <= CORE_EV_FLEX_PM_MAX
         if not pm_in_flex_zone:

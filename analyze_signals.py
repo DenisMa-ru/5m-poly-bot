@@ -302,6 +302,12 @@ def core_ev_branch_label(signal: dict) -> str:
         return "high_pm_outside_flex_micro"
     if "global expensive pm denied by runtime envelope" in reason:
         return "global_expensive_pm_deny"
+    if "global late entry denied by runtime envelope" in reason:
+        return "global_late_entry_deny"
+    if "weak confidence bucket denied by runtime envelope" in reason:
+        return "weak_confidence_runtime_deny"
+    if "toxic delta bucket denied by runtime envelope" in reason:
+        return "toxic_delta_runtime_deny"
     if "trend conflict haircut to micro-size entry" in reason:
         return "trend_conflict_micro"
     if "late trend conflict micro denied by runtime envelope" in reason:
