@@ -2236,6 +2236,15 @@ class CryptoBot:
         delta_pct = float(signal_data.get("delta", 0) or 0)
         confidence = float(signal_data.get("confidence", 0) or 0)
         indicator_confirm = float(signal_data.get("indicator_confirm", 0) or 0)
+        if pm >= 0.80:
+            return {
+                "decision": "deny",
+                "reason": (
+                    "global expensive pm denied by runtime envelope "
+                    f"(pm={pm:.3f} t={time_left:.1f}s delta={delta_pct:.4f}% conf={confidence:.0%} 1m={indicator_confirm:+.2f})"
+                ),
+                "size_fraction": 0.0,
+            }
         pm_in_core_zone = CORE_EV_PM_MIN <= pm <= CORE_EV_PM_MAX
         pm_in_flex_zone = CORE_EV_FLEX_PM_MIN <= pm <= CORE_EV_FLEX_PM_MAX
         if not pm_in_flex_zone:

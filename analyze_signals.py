@@ -300,6 +300,8 @@ def core_ev_branch_label(signal: dict) -> str:
         return "none"
     if "high-pm micro entry outside flex zone" in reason:
         return "high_pm_outside_flex_micro"
+    if "global expensive pm denied by runtime envelope" in reason:
+        return "global_expensive_pm_deny"
     if "trend conflict haircut to micro-size entry" in reason:
         return "trend_conflict_micro"
     if "late trend conflict micro denied by runtime envelope" in reason:
