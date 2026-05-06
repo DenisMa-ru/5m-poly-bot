@@ -59,13 +59,43 @@ class FileLock:
         self.timeout = timeout
         self.fd = None
 
+    def _maybe_break_stale_lock(self) -> bool:
+        """Best-effort recovery for stale lock files after crashes/OOM kills."""
+        try:
+            if not self.path.exists():
+                return False
+            age = time.time() - self.path.stat().st_mtime
+            if age < max(self.timeout, 5.0) * 6:
+                return False
+            pid_txt = ""
+            try:
+                pid_txt = self.path.read_text(encoding="utf-8").strip()
+            except Exception:
+                pid_txt = ""
+            pid = int(pid_txt) if pid_txt.isdigit() else None
+            if pid is not None:
+                try:
+                    os.kill(pid, 0)
+                    return False
+                except Exception:
+                    pass
+            self.path.unlink(missing_ok=True)
+            return True
+        except Exception:
+            return False
+
     def __enter__(self):
         started = time.time()
         while True:
             try:
                 self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                try:
+                    os.write(self.fd, str(os.getpid()).encode("utf-8"))
+                except Exception:
+                    pass
                 return self
             except FileExistsError:
+                self._maybe_break_stale_lock()
                 if time.time() - started >= self.timeout:
                     raise TimeoutError(f"Timed out acquiring lock for {self.path}")
                 time.sleep(0.05)
