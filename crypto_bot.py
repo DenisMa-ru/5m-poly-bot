@@ -2272,6 +2272,15 @@ class CryptoBot:
                 ),
                 "size_fraction": 0.0,
             }
+        if delta_pct < 0.020:
+            return {
+                "decision": "deny",
+                "reason": (
+                    "low delta denied by runtime envelope "
+                    f"(delta={delta_pct:.4f}% < 0.020% pm={pm:.3f} t={time_left:.1f}s conf={confidence:.0%})"
+                ),
+                "size_fraction": 0.0,
+            }
         pm_in_core_zone = CORE_EV_PM_MIN <= pm <= CORE_EV_PM_MAX
         pm_in_flex_zone = CORE_EV_FLEX_PM_MIN <= pm <= CORE_EV_FLEX_PM_MAX
         if not pm_in_flex_zone:
@@ -2301,39 +2310,14 @@ class CryptoBot:
                 "size_fraction": 0.0,
             }
         if not bool(signal_data.get("trend_aligned")) or bool(signal_data.get("trend_conflict")):
-            if time_left < 20:
-                return {
-                    "decision": "deny",
-                    "reason": (
-                        "late trend conflict micro denied by runtime envelope "
-                        f"(t={time_left:.1f}s delta={delta_pct:.4f}% 1m={indicator_confirm:+.2f})"
-                    ),
-                    "size_fraction": 0.0,
-                }
-            trend_micro_ok = (
-                FULL_WINDOW_CORE_EV_ENABLED
-                and CORE_EV_ENTRY_TIME_MIN <= time_left <= min(CORE_EV_ENTRY_TIME_MAX, FULL_WINDOW_CORE_EV_TIME_LEFT_MAX)
-                and delta_pct >= CORE_EV_TREND_CONFLICT_MICRO_DELTA_MIN_PCT
-                and confidence >= CORE_EV_TREND_CONFLICT_MICRO_CONFIDENCE_MIN
-                and indicator_confirm >= CORE_EV_TREND_CONFLICT_MICRO_INDICATOR_MIN
-            )
-            if trend_micro_ok:
-                return {
-                    "decision": "micro_allow",
-                    "reason": (
-                        "trend conflict haircut to micro-size entry "
-                        f"(delta={delta_pct:.4f}% conf={confidence:.0%} 1m={indicator_confirm:+.2f})"
-                    ),
-                    "bucket_key": "",
-                    "bucket_level": "trend_conflict",
-                    "sample_size": 0,
-                    "historical_roi": 0.0,
-                    "historical_win_rate": 0.0,
-                    "recent_roi": 0.0,
-                    "recent_trades": 0,
-                    "size_fraction": CORE_EV_MICRO_RISK_PCT,
-                }
-            return {"decision": "deny", "reason": "core ev requires aligned non-conflicting trend", "size_fraction": 0.0}
+            return {
+                "decision": "deny",
+                "reason": (
+                    "trend conflict micro disabled by runtime envelope "
+                    f"(delta={delta_pct:.4f}% conf={confidence:.0%} 1m={indicator_confirm:+.2f} t={time_left:.1f}s)"
+                ),
+                "size_fraction": 0.0,
+            }
         if shadow_live_decision == "deny":
             return {"decision": "deny", "reason": "shadow live deny", "size_fraction": 0.0}
         if bool(signal_data.get("reversal_flag")) and not bool(signal_data.get("pullback_recovered")):

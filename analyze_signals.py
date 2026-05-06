@@ -308,6 +308,10 @@ def core_ev_branch_label(signal: dict) -> str:
         return "weak_confidence_runtime_deny"
     if "toxic delta bucket denied by runtime envelope" in reason:
         return "toxic_delta_runtime_deny"
+    if "low delta denied by runtime envelope" in reason:
+        return "low_delta_runtime_deny"
+    if "trend conflict micro disabled by runtime envelope" in reason:
+        return "trend_conflict_micro_disabled"
     if "trend conflict haircut to micro-size entry" in reason:
         return "trend_conflict_micro"
     if "late trend conflict micro denied by runtime envelope" in reason:
