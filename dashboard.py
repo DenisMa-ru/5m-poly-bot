@@ -23,6 +23,7 @@ DEFAULT_LOG = Path("/root/5m-poly-bot/bot.log")
 LIVE_LOG = Path("/root/5m-poly-bot/bot-live.log")
 SIGNALS_FILE = Path("/root/5m-poly-bot/signals.json")
 WINDOW_SAMPLES_FILE = Path("/root/5m-poly-bot/window_samples.json")
+WINDOW_SAMPLES_JSONL_FILE = Path("/root/5m-poly-bot/window_samples.jsonl")
 CORE_EV_RULES_FILE = Path("/root/5m-poly-bot/core_ev_rules.json")
 SETTINGS_FILE = Path("/root/5m-poly-bot/settings.json")
 SESSION_STATE_FILE = Path("/root/5m-poly-bot/session_state.json")
@@ -283,6 +284,23 @@ def load_saved_signals():
 def load_window_samples():
     """Load full-window observation samples."""
     try:
+        if WINDOW_SAMPLES_JSONL_FILE.exists():
+            tail = deque(maxlen=50000)
+            with WINDOW_SAMPLES_JSONL_FILE.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    tail.append(line)
+            samples = []
+            for raw in tail:
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    samples.append(obj)
+            return samples
         data = json.loads(WINDOW_SAMPLES_FILE.read_text())
         return data if isinstance(data, list) else []
     except:

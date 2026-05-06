@@ -39,6 +39,7 @@ load_dotenv()
 BOT_DIR = Path(__file__).parent
 SIGNALS_FILE = BOT_DIR / "signals.json"
 WINDOW_SAMPLES_FILE = BOT_DIR / "window_samples.json"
+WINDOW_SAMPLES_JSONL_FILE = BOT_DIR / "window_samples.jsonl"
 SETTINGS_FILE = BOT_DIR / "settings.json"
 PID_FILE = BOT_DIR / "bot.pid"
 CORE_EV_RULES_FILE = BOT_DIR / "core_ev_rules.json"
@@ -143,6 +144,29 @@ def save_signals_file(signals: list):
 
 def load_window_samples_file() -> list:
     """Load full-window observation history safely."""
+    if WINDOW_SAMPLES_JSONL_FILE.exists():
+        # Prefer JSONL to avoid loading/re-writing large JSON arrays at runtime.
+        try:
+            from collections import deque
+
+            tail = deque(maxlen=50000)
+            with WINDOW_SAMPLES_JSONL_FILE.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    tail.append(line)
+            samples = []
+            for raw in tail:
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    samples.append(obj)
+            return samples
+        except Exception:
+            return []
     if not WINDOW_SAMPLES_FILE.exists():
         return []
     try:
@@ -161,10 +185,10 @@ def save_window_samples_file(samples: list):
 def save_window_sample(sample_data: dict):
     """Append a full-window observation sample for offline EV analysis."""
     try:
-        with FileLock(WINDOW_SAMPLES_FILE):
-            samples = load_window_samples_file()
-            samples.append(sample_data)
-            atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2, ensure_ascii=True))
+        # JSONL append avoids loading/re-writing a huge JSON list every tick.
+        with FileLock(WINDOW_SAMPLES_JSONL_FILE):
+            with WINDOW_SAMPLES_JSONL_FILE.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(sample_data, ensure_ascii=True) + "\n")
     except Exception as e:
         log(f"[WINDOW SAMPLE SAVE ERROR] {e}")
 

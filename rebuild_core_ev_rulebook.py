@@ -13,6 +13,7 @@ from analyze_signals import build_core_ev_rulebook, load_signals, select_core_ev
 BOT_DIR = Path(__file__).parent
 DEFAULT_SIGNALS_FILE = BOT_DIR / "signals.json"
 DEFAULT_WINDOW_SAMPLES_FILE = BOT_DIR / "window_samples.json"
+DEFAULT_WINDOW_SAMPLES_JSONL_FILE = BOT_DIR / "window_samples.jsonl"
 DEFAULT_ACTIVE_RULEBOOK_FILE = BOT_DIR / "core_ev_rules.json"
 DEFAULT_CANDIDATE_RULEBOOK_FILE = BOT_DIR / "core_ev_rules.candidate.json"
 DEFAULT_PREV_RULEBOOK_FILE = BOT_DIR / "core_ev_rules.prev.json"
@@ -95,6 +96,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Safely rebuild Core EV rulebook with guardrails")
     parser.add_argument("--file", default=str(DEFAULT_SIGNALS_FILE), help="Path to signals.json")
     parser.add_argument("--window-file", default=str(DEFAULT_WINDOW_SAMPLES_FILE), help="Path to window_samples.json")
+    parser.add_argument("--window-jsonl-file", default=str(DEFAULT_WINDOW_SAMPLES_JSONL_FILE), help="Path to window_samples.jsonl")
     parser.add_argument("--source", choices=["window", "signals"], default="window", help="Dataset source for rulebook generation")
     parser.add_argument("--active-rules", default=str(DEFAULT_ACTIVE_RULEBOOK_FILE), help="Active rulebook path")
     parser.add_argument("--candidate-rules", default=str(DEFAULT_CANDIDATE_RULEBOOK_FILE), help="Candidate rulebook path")
@@ -114,7 +116,11 @@ def main() -> int:
     parser.add_argument("--default-amount", type=float, default=10.0, help="Fallback amount for records without amount field")
     args = parser.parse_args()
 
-    source_path = Path(args.window_file if args.source == "window" else args.file)
+    if args.source == "window":
+        jsonl_path = Path(args.window_jsonl_file)
+        source_path = jsonl_path if jsonl_path.exists() else Path(args.window_file)
+    else:
+        source_path = Path(args.file)
     if not source_path.exists():
         print(f"Source file not found: {source_path}")
         return 1

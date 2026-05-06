@@ -19,6 +19,7 @@ from pathlib import Path
 
 DEFAULT_FILE = Path(__file__).with_name("signals.json")
 DEFAULT_WINDOW_SAMPLES_FILE = Path(__file__).with_name("window_samples.json")
+DEFAULT_WINDOW_SAMPLES_JSONL_FILE = Path(__file__).with_name("window_samples.jsonl")
 DEFAULT_CORE_EV_RULES_FILE = Path(__file__).with_name("core_ev_rules.json")
 
 
