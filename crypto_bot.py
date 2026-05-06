@@ -2572,6 +2572,37 @@ class CryptoBot:
             recent_roi = float(selected_stats.get("recent_roi", recent_roi) or recent_roi)
             recent_trades = int(selected_stats.get("recent_trades", recent_trades) or recent_trades)
 
+        # Variant A: downgrade strong_allow -> allow unless strict conditions are met.
+        # Rationale: historical analysis showed strong_allow trades underperforming; we keep the
+        # signal but reduce aggressiveness unless we have strong statistical confirmation.
+        def _strong_allow_strict_ok() -> bool:
+            if decision != "strong_allow":
+                return False
+            # Require max specificity and a non-trivial sample.
+            if bucket_level != "L3":
+                return False
+            if sample_size < 20:
+                return False
+            # Require historical edge and avoid buckets that recently turned negative.
+            if historical_roi < 5.0:
+                return False
+            if not recent_positive_ok(selected_stats):
+                return False
+            return True
+
+        if decision == "strong_allow" and not _strong_allow_strict_ok():
+            decision = "allow"
+            # Keep the original context in the reason for auditability.
+            base_reason = str(selected_stats.get("reason", "") or "").strip()
+            if base_reason:
+                base_reason = f" ({base_reason})"
+            selected_stats = dict(selected_stats)
+            selected_stats["reason"] = (
+                "strong_allow downgraded to allow by runtime envelope"
+                f" (n={sample_size} roi={historical_roi:+.1f}% recent={recent_roi:+.1f}%)"
+                f"{base_reason}"
+            )
+
         min_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(FULL_WINDOW_CORE_EV_MIN_LEVEL, 2)
         bucket_level_rank = {"L1": 1, "L2": 2, "L3": 3}.get(bucket_level, 0)
         if FULL_WINDOW_CORE_EV_ENABLED and bucket_level_rank < min_level_rank:
