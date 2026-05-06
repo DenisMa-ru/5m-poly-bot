@@ -2154,6 +2154,24 @@ class CryptoBot:
         sample["service_name"] = self.service_name
         sample["record_type"] = "window_sample"
         sample["sample_source"] = "full_window_observe"
+
+        # Window samples are saved before _evaluate_entry() runs, so Core EV fields are
+        # still at their defaults (unknown/empty) unless we explicitly evaluate here.
+        # This keeps offline analytics (analyze_signals / rulebook builds) consistent.
+        if CORE_EV_ENABLED:
+            shadow_live_decision = str(snapshot.get("shadow_live_decision", sample.get("shadow_live_decision", "neutral")) or "neutral")
+            core_ev = self._evaluate_core_ev_gate(sample, shadow_live_decision)
+            sample["core_ev_bucket_key"] = str(core_ev.get("bucket_key", "") or "")
+            sample["core_ev_bucket_level"] = str(core_ev.get("bucket_level", "") or "")
+            sample["core_ev_decision"] = str(core_ev.get("decision", "unknown") or "unknown")
+            sample["core_ev_reason"] = str(core_ev.get("reason", "") or "")
+            sample["core_ev_sample_size"] = int(core_ev.get("sample_size", 0) or 0)
+            sample["core_ev_historical_roi"] = float(core_ev.get("historical_roi", 0) or 0)
+            sample["core_ev_historical_win_rate"] = float(core_ev.get("historical_win_rate", 0) or 0)
+            sample["core_ev_recent_roi"] = float(core_ev.get("recent_roi", 0) or 0)
+            sample["core_ev_recent_trades"] = int(core_ev.get("recent_trades", 0) or 0)
+            sample["core_ev_size_fraction"] = float(core_ev.get("size_fraction", 0) or 0)
+
         save_window_sample(sample)
 
     def _candidate_priority(self, signal_data: dict, core_ev: dict, shadow_live_decision: str, shadow_live_score: float) -> tuple:
