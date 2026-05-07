@@ -182,6 +182,17 @@ def save_window_samples_file(samples: list):
         atomic_write_text(WINDOW_SAMPLES_FILE, json.dumps(samples[-50000:], indent=2, ensure_ascii=True))
 
 
+def save_window_samples_jsonl_file(samples: list):
+    """Persist full-window observation history back to JSONL."""
+    lines = []
+    for sample in samples[-50000:]:
+        if isinstance(sample, dict):
+            lines.append(json.dumps(sample, ensure_ascii=True))
+    payload = ("\n".join(lines) + "\n") if lines else ""
+    with FileLock(WINDOW_SAMPLES_JSONL_FILE):
+        atomic_write_text(WINDOW_SAMPLES_JSONL_FILE, payload)
+
+
 def save_window_sample(sample_data: dict):
     """Append a full-window observation sample for offline EV analysis."""
     try:
@@ -3878,7 +3889,11 @@ class CryptoBot:
                 if isinstance(signals, list):
                     resolve_records(signals, save_signals_file, apply_bank_updates=True)
 
-            if WINDOW_SAMPLES_FILE.exists():
+            if WINDOW_SAMPLES_JSONL_FILE.exists():
+                samples = load_window_samples_file()
+                if isinstance(samples, list):
+                    resolve_records(samples, save_window_samples_jsonl_file, apply_bank_updates=False)
+            elif WINDOW_SAMPLES_FILE.exists():
                 samples = load_window_samples_file()
                 if isinstance(samples, list):
                     resolve_records(samples, save_window_samples_file, apply_bank_updates=False)
