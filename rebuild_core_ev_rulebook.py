@@ -47,6 +47,24 @@ def parse_ts(value: str) -> datetime | None:
         return None
 
 
+def load_records(path: Path, source_type: str) -> list[dict]:
+    if source_type == "window" and path.suffix.lower() == ".jsonl":
+        records: list[dict] = []
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    records.append(row)
+        return records
+    return load_signals(path)
+
+
 def filter_recent_records(records: list[dict], lookback_hours: float) -> list[dict]:
     if lookback_hours <= 0:
         return records
@@ -125,7 +143,7 @@ def main() -> int:
         print(f"Source file not found: {source_path}")
         return 1
 
-    raw_records = load_signals(source_path)
+    raw_records = load_records(source_path, args.source)
     if args.source == "window":
         core_records = select_core_ev_records(raw_records)
         args.core_ev_source_label = "window_samples"
