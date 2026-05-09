@@ -2077,17 +2077,13 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
         result["maker_cancel_reason"] = result["failure_type"]
         return result
 
-    # If spread is too tight relative to tick size, we cannot place a post-only limit
-    # order inside the spread without crossing the ask.
-    if (best_ask - best_bid) <= MAKER_ENTRY_TICK_SIZE + 1e-12:
-        result["failure_type"] = "no_tick_room"
-        result["detail"] = f"spread={best_ask - best_bid:.3f} <= tick={MAKER_ENTRY_TICK_SIZE:.3f}"
-        result["maker_cancel_reason"] = result["failure_type"]
-        return result
-
-    # For maker entry we primarily want to sit on/just above best bid (post-only),
-    # not chase the (potentially stale/off-source) desired_price snapshot.
-    candidate_price = min(best_bid + MAKER_ENTRY_TICK_SIZE, best_ask - MAKER_ENTRY_TICK_SIZE)
+    # For maker entry we want a post-only limit on the bid side.
+    # When spread is only 1 tick, "best_bid + tick" would cross the ask, so we join best_bid.
+    spread_ticks = (best_ask - best_bid) / MAKER_ENTRY_TICK_SIZE if MAKER_ENTRY_TICK_SIZE > 0 else 0
+    if spread_ticks <= 1.000001:
+        candidate_price = best_bid
+    else:
+        candidate_price = min(best_bid + MAKER_ENTRY_TICK_SIZE, best_ask - MAKER_ENTRY_TICK_SIZE)
     limit_price = _round_to_tick(candidate_price, MAKER_ENTRY_TICK_SIZE)
     # After tick-rounding we still want a strict post-only price inside the spread.
     if limit_price < best_bid or limit_price >= best_ask or limit_price <= 0:
