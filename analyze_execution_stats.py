@@ -137,6 +137,9 @@ def summarize_maker_entry(records: list[dict]) -> dict:
     improvements = []
     improvements_vs_ask = []
     slippage_vs_bid = []
+    pm_minus_mid = []
+    pm_minus_bid = []
+    pm_minus_ask = []
     for r in filled:
         pm = _safe_float(r.get("pm"), default=None)
         fill = _safe_float(r.get("maker_fill_price"), default=None)
@@ -152,8 +155,12 @@ def summarize_maker_entry(records: list[dict]) -> dict:
         # - slippage vs bid: fill - best_bid (positive is worse vs joining bid)
         if best_ask is not None:
             improvements_vs_ask.append(best_ask - fill)
+            pm_minus_ask.append(pm - best_ask)
         if best_bid is not None:
             slippage_vs_bid.append(fill - best_bid)
+            pm_minus_bid.append(pm - best_bid)
+        if best_bid is not None and best_ask is not None and best_bid > 0 and best_ask > 0:
+            pm_minus_mid.append(pm - ((best_bid + best_ask) / 2.0))
 
     # Time buckets
     by_hour = defaultdict(lambda: {"attempts": 0, "filled": 0})
@@ -211,6 +218,15 @@ def summarize_maker_entry(records: list[dict]) -> dict:
         "slippage_vs_bid_avg": None if not slippage_vs_bid else round(_mean(slippage_vs_bid) or 0.0, 4),
         "slippage_vs_bid_min": None if not slippage_vs_bid else round(min(slippage_vs_bid), 4),
         "slippage_vs_bid_max": None if not slippage_vs_bid else round(max(slippage_vs_bid), 4),
+        "pm_minus_mid_avg": None if not pm_minus_mid else round(_mean(pm_minus_mid) or 0.0, 4),
+        "pm_minus_mid_min": None if not pm_minus_mid else round(min(pm_minus_mid), 4),
+        "pm_minus_mid_max": None if not pm_minus_mid else round(max(pm_minus_mid), 4),
+        "pm_minus_bid_avg": None if not pm_minus_bid else round(_mean(pm_minus_bid) or 0.0, 4),
+        "pm_minus_bid_min": None if not pm_minus_bid else round(min(pm_minus_bid), 4),
+        "pm_minus_bid_max": None if not pm_minus_bid else round(max(pm_minus_bid), 4),
+        "pm_minus_ask_avg": None if not pm_minus_ask else round(_mean(pm_minus_ask) or 0.0, 4),
+        "pm_minus_ask_min": None if not pm_minus_ask else round(min(pm_minus_ask), 4),
+        "pm_minus_ask_max": None if not pm_minus_ask else round(max(pm_minus_ask), 4),
         "by_hour": by_hour,
         "by_dow": by_dow,
         "diagnostics": diagnostics,
@@ -261,12 +277,28 @@ def main() -> int:
     ap.add_argument("--signals", default="signals.json")
     ap.add_argument("--source", choices=["window_samples", "signals"], default="window_samples")
     ap.add_argument("--time-breakdown", action="store_true", help="Print fill rate by hour/day-of-week")
+    ap.add_argument(
+        "--since-ts",
+        default="",
+        help="Only include records with timestamp >= this UTC ISO string (e.g. 2026-05-09T00:00:00Z)",
+    )
     args = ap.parse_args()
 
     if args.source == "signals":
         records = _load_json_array(Path(args.signals))
     else:
         records = list(_iter_jsonl(Path(args.window_samples_jsonl)))
+
+    if args.since_ts:
+        since = _parse_ts(args.since_ts)
+        if since is not None:
+            filtered = []
+            for r in records:
+                ts = _parse_ts(r.get("timestamp"))
+                if ts is None or ts < since:
+                    continue
+                filtered.append(r)
+            records = filtered
 
     maker = summarize_maker_entry(records)
     pnl = summarize_realized_pnl(records)
@@ -292,6 +324,21 @@ def main() -> int:
         print(
             "slippage_vs_best_bid_at_entry (fill - bid) avg/min/max: "
             f"{maker['slippage_vs_bid_avg']} / {maker['slippage_vs_bid_min']} / {maker['slippage_vs_bid_max']}"
+        )
+    if maker.get("pm_minus_mid_avg") is not None:
+        print(
+            "pm_minus_clob_mid_at_entry (pm - mid) avg/min/max: "
+            f"{maker['pm_minus_mid_avg']} / {maker['pm_minus_mid_min']} / {maker['pm_minus_mid_max']}"
+        )
+    if maker.get("pm_minus_bid_avg") is not None:
+        print(
+            "pm_minus_best_bid_at_entry (pm - bid) avg/min/max: "
+            f"{maker['pm_minus_bid_avg']} / {maker['pm_minus_bid_min']} / {maker['pm_minus_bid_max']}"
+        )
+    if maker.get("pm_minus_ask_avg") is not None:
+        print(
+            "pm_minus_best_ask_at_entry (pm - ask) avg/min/max: "
+            f"{maker['pm_minus_ask_avg']} / {maker['pm_minus_ask_min']} / {maker['pm_minus_ask_max']}"
         )
     if maker["cancel_reasons"]:
         print("cancel reasons (not filled):")
