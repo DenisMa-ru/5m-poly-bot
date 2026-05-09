@@ -1722,6 +1722,9 @@ def _paper_simulate_maker_fill(limit_price: float, side: str, token_id: str, *,
         result["ask_depth_top_n"] = first_book.get("ask_depth")
         result["book_imbalance_at_entry"] = first_book.get("book_imbalance")
 
+    entry_best_bid = float(result.get("best_bid_at_entry") or 0.0)
+    entry_best_ask = float(result.get("best_ask_at_entry") or 0.0)
+
     while True:
         elapsed = time.time() - start
         result["order_rest_seconds"] = round(elapsed, 3)
@@ -1739,6 +1742,17 @@ def _paper_simulate_maker_fill(limit_price: float, side: str, token_id: str, *,
                 result["maker_filled"] = True
                 result["maker_fill_price"] = _round_to_tick(limit_price, tick_size)
                 result["maker_fill_latency_ms"] = int(elapsed * 1000)
+                return result
+
+            # Join-bid fill heuristic: if we were resting at/below the bid and the bid
+            # later moved down, assume our order at the old bid price was consumed.
+            # This is a best-effort approximation when we do not have trade prints.
+            if entry_best_bid > 0 and limit_price <= entry_best_bid + 1e-9 and best_bid > 0 and best_bid + 1e-9 < limit_price:
+                result["ok"] = True
+                result["maker_filled"] = True
+                result["maker_fill_price"] = _round_to_tick(limit_price, tick_size)
+                result["maker_fill_latency_ms"] = int(elapsed * 1000)
+                result["maker_cancel_reason"] = ""
                 return result
         elif side == "sell":
             if best_bid > 0 and best_bid + 1e-9 >= limit_price:
