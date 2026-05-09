@@ -2094,7 +2094,9 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
     # For maker entry we want a post-only limit on the bid side.
     # When spread is only 1 tick, "best_bid + tick" would cross the ask, so we join best_bid.
     spread_ticks = (best_ask - best_bid) / MAKER_ENTRY_TICK_SIZE if MAKER_ENTRY_TICK_SIZE > 0 else 0
-    if spread_ticks <= 1.000001:
+    # Be defensive against float / rounding edge-cases where best_ask-best_bid is ~1 tick
+    # but ends up slightly above 1.0 due to precision.
+    if spread_ticks <= 1.000001 or (best_ask - MAKER_ENTRY_TICK_SIZE) <= best_bid + 1e-9:
         candidate_price = best_bid
     else:
         candidate_price = min(best_bid + MAKER_ENTRY_TICK_SIZE, best_ask - MAKER_ENTRY_TICK_SIZE)
