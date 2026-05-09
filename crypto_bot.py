@@ -2046,18 +2046,22 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
     if amount_usdc <= 0:
         result["failure_type"] = "invalid_amount"
         result["detail"] = f"amount_usdc must be > 0 (got {amount_usdc})"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
     if desired_price <= 0:
         result["failure_type"] = "invalid_price"
         result["detail"] = f"desired_price must be > 0 (got {desired_price})"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
     if time_left < MAKER_ENTRY_MIN_TIME_LEFT:
         result["failure_type"] = "late_signal"
         result["detail"] = f"time_left={time_left:.1f}s < maker minimum {MAKER_ENTRY_MIN_TIME_LEFT:.1f}s"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
     if signal_age_sec > MAKER_ENTRY_MAX_SIGNAL_AGE_SEC:
         result["failure_type"] = "signal_stale"
         result["detail"] = f"signal_age_sec={signal_age_sec:.2f} > {MAKER_ENTRY_MAX_SIGNAL_AGE_SEC:.2f}"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
     best_bid = result["best_bid_at_entry"]
     best_ask = result["best_ask_at_entry"]
@@ -2065,10 +2069,12 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
     if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
         result["failure_type"] = "empty_book"
         result["detail"] = f"best_bid={best_bid:.3f} best_ask={best_ask:.3f}"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
     if spread > MAKER_ENTRY_MAX_SPREAD:
         result["failure_type"] = "wide_spread"
         result["detail"] = f"spread={spread:.3f} > max {MAKER_ENTRY_MAX_SPREAD:.3f}"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
 
     candidate_price = min(best_bid + MAKER_ENTRY_TICK_SIZE, desired_price - MAKER_ENTRY_TICK_SIZE, best_ask - MAKER_ENTRY_TICK_SIZE)
@@ -2076,6 +2082,7 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
     if limit_price <= best_bid or limit_price >= best_ask or limit_price <= 0:
         result["failure_type"] = "invalid_maker_price"
         result["detail"] = f"limit_price={limit_price:.3f} best_bid={best_bid:.3f} best_ask={best_ask:.3f}"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
     result["limit_price"] = limit_price
     size = round(amount_usdc / limit_price, 2)
@@ -2083,6 +2090,7 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
     if size <= 0:
         result["failure_type"] = "invalid_size"
         result["detail"] = f"computed size must be > 0 (got {size})"
+        result["maker_cancel_reason"] = result["failure_type"]
         return result
 
     # Paper/dry-run simulation: use the live orderbook to approximate fill/no-fill.
