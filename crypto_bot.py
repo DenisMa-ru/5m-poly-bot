@@ -35,7 +35,7 @@ import uuid
 
 load_dotenv()
 
-# ─── FILE PATHS ────────────────────────────────────────────────────────────────
+# ─── FILE PATHS ────────────────────────────────────────────────────────
 BOT_DIR = Path(__file__).parent
 SIGNALS_FILE = BOT_DIR / "signals.json"
 WINDOW_SAMPLES_FILE = BOT_DIR / "window_samples.json"
@@ -280,7 +280,7 @@ def ensure_single_instance():
 
     raise RuntimeError(f"Another bot process is already running with PID {existing_pid}")
 
-# ─── SETTINGS ──────────────────────────────────────────────────────────────────
+# ─── SETTINGS ──────────────────────────────────────────────────────────
 def load_settings():
     """Load settings from settings.json, fallback to defaults."""
     try:
@@ -330,7 +330,7 @@ def get_setting(key, default):
     s = load_settings()
     return s.get(key, default)
 
-# ─── SIGNAL SAVING ─────────────────────────────────────────────────────────────
+# ─── SIGNAL SAVING ─────────────────────────────────────────────────────
 def save_signal(signal_data):
     """Append a signal to signals.json for dashboard history."""
     try:
@@ -366,6 +366,23 @@ FULL_WINDOW_ENTRY_COMMIT_TIME_LEFT = float(_bot_settings.get("full_window_entry_
 FULL_WINDOW_ENTRY_MIN_SCORE_GAIN = float(_bot_settings.get("full_window_entry_min_score_gain", 0.15) or 0.15)
 WAKE_BEFORE       = int(_bot_settings.get("wake_before", max(65, OBSERVE_WINDOW_SECONDS)) or max(65, OBSERVE_WINDOW_SECONDS))
 POLL_INTERVAL     = 3
+EXECUTION_MODE = str(_bot_settings.get("execution_mode", "taker") or "taker").strip().lower()
+MAKER_ENTRY_TIMEOUT_SEC = float(_bot_settings.get("maker_entry_timeout_sec", 5.0) or 5.0)
+MAKER_ENTRY_POLL_INTERVAL_SEC = float(_bot_settings.get("maker_entry_poll_interval_sec", 0.5) or 0.5)
+MAKER_ENTRY_MAX_SPREAD = float(_bot_settings.get("maker_entry_max_spread", 0.02) or 0.02)
+MAKER_ENTRY_TICK_SIZE = float(_bot_settings.get("maker_entry_tick_size", 0.01) or 0.01)
+MAKER_ENTRY_BOOK_DEPTH_LEVELS = int(_bot_settings.get("maker_entry_book_depth_levels", 5) or 5)
+MAKER_ENTRY_MIN_TIME_LEFT = float(_bot_settings.get("maker_entry_min_time_left", 20) or 20)
+MAKER_ENTRY_MAX_SIGNAL_AGE_SEC = float(_bot_settings.get("maker_entry_max_signal_age_sec", 3) or 3)
+MAKER_ENTRY_MIN_FILL_RATIO = float(_bot_settings.get("maker_entry_min_fill_ratio", 0.80) or 0.80)
+
+# Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
+MAKER_EXIT_ENABLED = bool(_bot_settings.get("maker_exit_enabled", False))
+MAKER_EXIT_TARGET_IMPROVEMENT = float(_bot_settings.get("maker_exit_target_improvement", 0.02) or 0.02)
+MAKER_EXIT_FORCE_TAKER_TIME_LEFT = float(_bot_settings.get("maker_exit_force_taker_time_left", 10.0) or 10.0)
+MAKER_EXIT_TIMEOUT_SEC = float(_bot_settings.get("maker_exit_timeout_sec", 6.0) or 6.0)
+MAKER_EXIT_POLL_INTERVAL_SEC = float(_bot_settings.get("maker_exit_poll_interval_sec", 0.5) or 0.5)
+MAKER_EXIT_TICK_SIZE = float(_bot_settings.get("maker_exit_tick_size", 0.01) or 0.01)
 
 DELTA_SKIP        = _bot_settings.get("delta_skip", 0.0005)
 DELTA_WEAK        = 0.001
@@ -444,7 +461,7 @@ MARKETS = {
     "eth-updown-5m": "ETH",
 }
 
-# ─── UTILS ─────────────────────────────────────────────────────────────────────
+# ─── UTILS ─────────────────────────────────────────────────────────────
 def ts_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -494,20 +511,18 @@ def bucket_pm_value(pm_price: float) -> str:
     if pm_price < 0.67:
         return "0.64-0.669"
     if pm_price < 0.70:
-        return "0.67-0.699"
-    if pm_price < 0.80:
         return "0.70-0.799"
-    if pm_price < 0.90:
+    if pm_price < 0.80:
         return "0.80-0.899"
-    if pm_price < 0.94:
+    if pm_price < 0.90:
         return "0.90-0.939"
-    if pm_price < 0.95:
+    if pm_price < 0.94:
         return "0.94-0.949"
-    if pm_price < 0.96:
+    if pm_price < 0.95:
         return "0.95-0.959"
-    if pm_price < 0.97:
+    if pm_price < 0.96:
         return "0.96-0.969"
-    if pm_price < 0.98:
+    if pm_price < 0.97:
         return "0.97-0.979"
     return ">=0.98"
 
@@ -600,7 +615,7 @@ def window_open_ts():
     """Timestamp of the current period's open (multiple of 300)."""
     return (now_unix() // 300) * 300
 
-# ─── BINANCE API ───────────────────────────────────────────────────────────────
+# ─── BINANCE API ───────────────────────────────────────────────────────
 def get_binance_candles(symbol: str, interval: str = "1m", limit: int = 6) -> list:
     """Fetches the last N candles from Binance."""
     try:
@@ -1066,7 +1081,7 @@ def estimate_model_prob(
 
     return max(0.01, min(market_prob + adjustment, 0.99))
 
-# ─── POLYMARKET API ────────────────────────────────────────────────────────────
+# ─── POLYMARKET API ──────────────────────────────────────────────────────────
 def get_market_for_close(slug_prefix: str, close_ts: int) -> dict | None:
     start_ts = close_ts - 300
     slug = f"{slug_prefix}-{start_ts}"
@@ -1539,8 +1554,962 @@ def _preflight_live_order(client, amount_usdc: float) -> tuple[bool, str, str]:
         failure_type, detail = _classify_polymarket_exception(exc)
         return False, failure_type, detail
 
+
+def get_orderbook_summary(token_id: str, depth_levels: int = 5) -> dict:
+    try:
+        resp = requests.get(f"{CLOB_API}/book", params={"token_id": token_id}, timeout=3)
+        resp.raise_for_status()
+        payload = resp.json()
+        bids = payload.get("bids", []) if isinstance(payload, dict) else []
+        asks = payload.get("asks", []) if isinstance(payload, dict) else []
+
+        def _price_size(row) -> tuple[float, float]:
+            if isinstance(row, dict):
+                price = float(row.get("price", 0) or 0)
+                size = float(row.get("size", row.get("amount", 0)) or 0)
+                return price, size
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                try:
+                    return float(row[0] or 0), float(row[1] or 0)
+                except Exception:
+                    return 0.0, 0.0
+            return 0.0, 0.0
+
+        bid_rows = [_price_size(row) for row in bids]
+        ask_rows = [_price_size(row) for row in asks]
+        bid_rows = [(p, s) for p, s in bid_rows if p > 0 and s >= 0]
+        ask_rows = [(p, s) for p, s in ask_rows if p > 0 and s >= 0]
+        best_bid = max((p for p, _ in bid_rows), default=0.0)
+        best_ask = min((p for p, _ in ask_rows), default=0.0)
+        bid_depth = sum(size for _, size in bid_rows[:max(1, depth_levels)])
+        ask_depth = sum(size for _, size in ask_rows[:max(1, depth_levels)])
+        spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0.0
+        imbalance = 0.0
+        depth_total = bid_depth + ask_depth
+        if depth_total > 0:
+            imbalance = (bid_depth - ask_depth) / depth_total
+        return {
+            "ok": True,
+            "best_bid_price": round(best_bid, 4),
+            "best_ask_price": round(best_ask, 4),
+            "spread": round(spread, 4),
+            "bid_depth": round(bid_depth, 4),
+            "ask_depth": round(ask_depth, 4),
+            "book_imbalance": round(imbalance, 4),
+        }
+    except Exception as exc:
+        failure_type, detail = _classify_polymarket_exception(exc)
+        return {
+            "ok": False,
+            "failure_type": failure_type,
+            "detail": detail,
+            "best_bid_price": 0.0,
+            "best_ask_price": 0.0,
+            "spread": 0.0,
+            "bid_depth": 0.0,
+            "ask_depth": 0.0,
+            "book_imbalance": 0.0,
+        }
+
+
+def _round_to_tick(value: float, tick_size: float) -> float:
+    if tick_size <= 0:
+        return round(value, 2)
+    ticks = int(value / tick_size)
+    return round(ticks * tick_size, 2)
+
+
+def _safe_get_order_status(client, order_id: str) -> tuple[str, dict | None]:
+    getters = [
+        lambda: client.get_order(order_id),
+        lambda: client.get_order_status(order_id),
+        lambda: client.get_orders(order_id=order_id),
+    ]
+    for getter in getters:
+        try:
+            payload = getter()
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            status = str(payload.get("status", payload.get("orderStatus", "")) or "")
+            return status.lower(), payload
+        if isinstance(payload, list) and payload:
+            row = payload[0] if isinstance(payload[0], dict) else None
+            if row is not None:
+                status = str(row.get("status", row.get("orderStatus", "")) or "")
+                return status.lower(), row
+    return "", None
+
+
+def _safe_cancel_order(client, order_id: str) -> bool:
+    cancelers = [
+        lambda: client.cancel(order_id),
+        lambda: client.cancel_order(order_id),
+        lambda: client.cancel_orders([order_id]),
+    ]
+    for canceler in cancelers:
+        try:
+            canceler()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _extract_fill_price(payload: dict | None, fallback_price: float) -> float:
+    if not isinstance(payload, dict):
+        return fallback_price
+    for key in ("avgPrice", "averagePrice", "price", "matchedPrice"):
+        try:
+            value = float(payload.get(key, 0) or 0)
+            if value > 0:
+                return value
+        except Exception:
+            continue
+    return fallback_price
+
+
+def _extract_fill_size(payload: dict | None, fallback_size: float) -> float:
+    if not isinstance(payload, dict):
+        return fallback_size
+    for key in ("sizeMatched", "matchedAmount", "filledSize", "size"):
+        try:
+            value = float(payload.get(key, 0) or 0)
+            if value > 0:
+                return value
+        except Exception:
+            continue
+    return fallback_size
+
+
+def _paper_simulate_maker_fill(limit_price: float, side: str, token_id: str, *,
+                               timeout_sec: float, poll_interval_sec: float,
+                               tick_size: float, fill_size: float,
+                               time_left: float, force_taker_time_left: float | None = None) -> dict:
+    """Best-effort paper/dry-run simulation using orderbook snapshots.
+
+    For BUY (maker_entry): fill when best_ask <= limit_price.
+    For SELL (maker_exit): fill when best_bid >= limit_price.
+
+    If force_taker_time_left is provided and time_left drops below it before a maker fill,
+    returns forced_taker with price=best_bid/best_ask (depending on side).
+    """
+    start = time.time()
+    side = str(side or "").strip().lower()
+    result = {
+        "ok": False,
+        "maker_filled": False,
+        "maker_fill_price": None,
+        "maker_fill_size": fill_size,
+        "maker_fill_latency_ms": None,
+        "maker_cancel_reason": "",
+        "order_rest_seconds": 0.0,
+        "forced_taker": False,
+        "forced_taker_price": None,
+        "best_bid_at_entry": None,
+        "best_ask_at_entry": None,
+        "spread_at_entry": None,
+        "bid_depth_top_n": None,
+        "ask_depth_top_n": None,
+        "book_imbalance_at_entry": None,
+    }
+    first_book = get_orderbook_summary(token_id, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+    if isinstance(first_book, dict):
+        result["best_bid_at_entry"] = first_book.get("best_bid_price")
+        result["best_ask_at_entry"] = first_book.get("best_ask_price")
+        result["spread_at_entry"] = first_book.get("spread")
+        result["bid_depth_top_n"] = first_book.get("bid_depth")
+        result["ask_depth_top_n"] = first_book.get("ask_depth")
+        result["book_imbalance_at_entry"] = first_book.get("book_imbalance")
+
+    while True:
+        elapsed = time.time() - start
+        result["order_rest_seconds"] = round(elapsed, 3)
+        if elapsed >= timeout_sec:
+            result["maker_cancel_reason"] = "timeout"
+            return result
+
+        book = get_orderbook_summary(token_id, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+        best_bid = float(book.get("best_bid_price", 0) or 0) if isinstance(book, dict) else 0.0
+        best_ask = float(book.get("best_ask_price", 0) or 0) if isinstance(book, dict) else 0.0
+
+        if side == "buy":
+            if best_ask > 0 and best_ask <= limit_price + 1e-9:
+                result["ok"] = True
+                result["maker_filled"] = True
+                result["maker_fill_price"] = _round_to_tick(limit_price, tick_size)
+                result["maker_fill_latency_ms"] = int(elapsed * 1000)
+                return result
+        elif side == "sell":
+            if best_bid > 0 and best_bid + 1e-9 >= limit_price:
+                result["ok"] = True
+                result["maker_filled"] = True
+                result["maker_fill_price"] = _round_to_tick(limit_price, tick_size)
+                result["maker_fill_latency_ms"] = int(elapsed * 1000)
+                return result
+        else:
+            result["maker_cancel_reason"] = "invalid_side"
+            return result
+
+        if force_taker_time_left is not None:
+            time_left_now = float(time_left or 0) - elapsed
+            if time_left_now <= float(force_taker_time_left or 0):
+                result["ok"] = True
+                result["forced_taker"] = True
+                if side == "sell":
+                    result["forced_taker_price"] = best_bid if best_bid > 0 else best_ask
+                else:
+                    result["forced_taker_price"] = best_ask if best_ask > 0 else best_bid
+                result["maker_cancel_reason"] = "forced_taker"
+                result["maker_fill_latency_ms"] = int(elapsed * 1000)
+                return result
+
+        time.sleep(max(0.1, poll_interval_sec))
+
+
+def execute_buy_taker(token_id: str, amount_usdc: float, price: float,
+                      private_key: str, proxy_wallet: str) -> dict:
+    result = {
+        "ok": False,
+        "failure_type": "unknown",
+        "detail": "",
+        "order_status": "",
+        "order_id": "",
+        "size": None,
+        "taker_price": None,
+        "execution_mode": "taker",
+        "post_only": False,
+        "maker_filled": False,
+        "maker_fill_price": None,
+        "maker_fill_size": None,
+        "maker_fill_latency_ms": None,
+        "maker_cancel_reason": "",
+        "best_bid_at_entry": None,
+        "best_ask_at_entry": None,
+        "spread_at_entry": None,
+        "bid_depth_top_n": None,
+        "ask_depth_top_n": None,
+        "book_imbalance_at_entry": None,
+        "limit_price": None,
+        "signal_age_sec_at_order_submit": 0.0,
+        "order_rest_seconds": 0.0,
+        "fallback_used": False,
+    }
+    using_v2 = False
+    signature_type_candidates = _get_polymarket_signature_type_candidates(proxy_wallet)
+    active_signature_type = signature_type_candidates[0]
+    market_order_args = None
+    PartialCreateOrderOptions = None
+    OrderType = None
+
+    try:
+        import importlib
+
+        if amount_usdc <= 0:
+            result["failure_type"] = "invalid_amount"
+            result["detail"] = f"amount_usdc must be > 0 (got {amount_usdc})"
+            log(f"   ❌ BUY failed [{result['failure_type']}]: {result['detail']}")
+            return result
+        if price <= 0:
+            result["failure_type"] = "invalid_price"
+            result["detail"] = f"price must be > 0 (got {price})"
+            log(f"   ❌ BUY failed [{result['failure_type']}]: {result['detail']}")
+            return result
+
+        try:
+            client_module = importlib.import_module("py_clob_client_v2")
+            constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+            client = _build_v2_trade_client(private_key, proxy_wallet, signature_type=active_signature_type)
+            OrderArgs = getattr(client_module, "OrderArgs", None)
+            MarketOrderArgs = getattr(client_module, "MarketOrderArgs", None)
+            OrderType = getattr(client_module, "OrderType", None)
+            PartialCreateOrderOptions = getattr(client_module, "PartialCreateOrderOptions", None)
+            BUY = constants_module.BUY
+            using_v2 = True
+        except Exception as v2_exc:
+            log(f"   ⚠️ V2 trade client unavailable, falling back to legacy path: {v2_exc}")
+            client_module = importlib.import_module("py_clob_client.client")
+            clob_types_module = importlib.import_module("py_clob_client.clob_types")
+            constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+            client = _build_legacy_polymarket_client(private_key, proxy_wallet)
+            client.set_api_creds(client.create_or_derive_api_creds())
+            OrderArgs = clob_types_module.OrderArgs
+            MarketOrderArgs = getattr(clob_types_module, "MarketOrderArgs", None)
+            OrderType = getattr(clob_types_module, "OrderType", None)
+            PartialCreateOrderOptions = None
+            BUY = constants_module.BUY
+            using_v2 = False
+
+        ok, failure_type, detail = _preflight_live_order(client, round(amount_usdc, 2))
+        if not ok:
+            result["failure_type"] = failure_type
+            result["detail"] = detail
+            log(f"   ❌ BUY preflight failed [{failure_type}]: {detail}")
+            return result
+
+        resp = None
+        if MarketOrderArgs is not None and OrderType is not None:
+            market_order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=round(amount_usdc, 2),
+                side=BUY,
+                order_type=OrderType.FOK,
+            )
+            if using_v2 and hasattr(client, "create_and_post_market_order"):
+                options = PartialCreateOrderOptions(tick_size="0.01") if PartialCreateOrderOptions is not None else None
+                kwargs = {
+                    "order_args": market_order_args,
+                    "order_type": OrderType.FOK,
+                }
+                if options is not None:
+                    kwargs["options"] = options
+                resp = client.create_and_post_market_order(**kwargs)
+            else:
+                market_order = client.create_market_order(market_order_args)
+                resp = client.post_order(market_order, orderType=OrderType.FOK)
+        else:
+            taker_price = min(round(price + 0.01, 2), 0.99)
+            size = round(amount_usdc / price, 2)
+            result["taker_price"] = taker_price
+            result["size"] = size
+
+            if size <= 0:
+                result["failure_type"] = "invalid_size"
+                result["detail"] = f"computed order size must be > 0 (got {size})"
+                log(f"   ❌ BUY failed [{result['failure_type']}]: {result['detail']}")
+                return result
+
+            resp = client.create_and_post_order(OrderArgs(
+                token_id=token_id,
+                price=taker_price,
+                size=size,
+                side=BUY,
+            ))
+
+        status = resp.get("status") if isinstance(resp, dict) else "ok"
+        order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+        result["order_status"] = str(status or "")
+        result["order_id"] = str(order_id or "")
+        if status == "matched":
+            result["ok"] = True
+            result["failure_type"] = ""
+            log(f"   ✅ BUY OK: {status} | order {str(order_id)[:20]}...")
+            return result
+
+        result["failure_type"] = "not_filled_immediately"
+        result["detail"] = f"status={status}"
+        log(
+            f"   ❌ BUY not filled immediately [{result['failure_type']}]: "
+            f"{status} | order {str(order_id)[:20]}..."
+        )
+        return result
+    except Exception as e:
+        failure_type, detail = _classify_polymarket_exception(e)
+        if using_v2 and failure_type == "no_match" and market_order_args is not None:
+            try:
+                time.sleep(0.25)
+                log("   ⚠️ BUY got no match from CLOB, retrying market order once")
+                retry_client = _build_v2_trade_client(private_key, proxy_wallet, signature_type=active_signature_type)
+                ok, retry_failure_type, retry_detail = _preflight_live_order(retry_client, round(amount_usdc, 2))
+                if not ok:
+                    result["failure_type"] = retry_failure_type
+                    result["detail"] = f"no_match_retry_preflight:{retry_detail}"
+                    log(f"   ❌ BUY preflight failed after no-match retry [{retry_failure_type}]: {retry_detail}")
+                    return result
+                options = PartialCreateOrderOptions(tick_size="0.01") if PartialCreateOrderOptions is not None else None
+                kwargs = {
+                    "order_args": market_order_args,
+                    "order_type": OrderType.FOK,
+                }
+                if options is not None:
+                    kwargs["options"] = options
+                resp = retry_client.create_and_post_market_order(**kwargs)
+                status = resp.get("status") if isinstance(resp, dict) else "ok"
+                order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+                result["order_status"] = str(status or "")
+                result["order_id"] = str(order_id or "")
+                if status == "matched":
+                    result["ok"] = True
+                    result["failure_type"] = ""
+                    result["detail"] = ""
+                    log(f"   ✅ BUY OK after no-match retry: {status} | order {str(order_id)[:20]}...")
+                    return result
+                result["failure_type"] = "not_filled_immediately"
+                result["detail"] = f"no_match_retry_status={status}"
+                log(
+                    f"   ❌ BUY not filled after no-match retry [{result['failure_type']}]: "
+                    f"{status} | order {str(order_id)[:20]}..."
+                )
+                return result
+            except Exception as retry_exc:
+                retry_failure_type, retry_detail = _classify_polymarket_exception(retry_exc)
+                result["failure_type"] = retry_failure_type
+                result["detail"] = f"initial={detail} | retry={retry_detail}"
+                log(
+                    f"   ❌ BUY failed after no-match retry [{result['failure_type']}]: {result['detail']} "
+                    f"| exc_type={type(retry_exc).__name__}"
+                )
+                return result
+        if using_v2 and failure_type == "signature_type_mismatch" and market_order_args is not None and len(signature_type_candidates) > 1:
+            retry_errors = [f"sig_type={active_signature_type}:{detail}"]
+            for retry_signature_type in signature_type_candidates[1:]:
+                try:
+                    log(f"   ⚠️ V2 signature rejected by CLOB, retrying with signature_type={retry_signature_type}")
+                    retry_client = _build_v2_trade_client(private_key, proxy_wallet, signature_type=retry_signature_type)
+                    ok, retry_failure_type, retry_detail = _preflight_live_order(retry_client, round(amount_usdc, 2))
+                    if not ok:
+                        result["failure_type"] = retry_failure_type
+                        result["detail"] = f"sig_type={retry_signature_type}:{retry_detail}"
+                        log(f"   ❌ BUY preflight failed on retry [{retry_failure_type}]: {retry_detail}")
+                        return result
+                    options = PartialCreateOrderOptions(tick_size="0.01") if PartialCreateOrderOptions is not None else None
+                    kwargs = {
+                        "order_args": market_order_args,
+                        "order_type": OrderType.FOK,
+                    }
+                    if options is not None:
+                        kwargs["options"] = options
+                    resp = retry_client.create_and_post_market_order(**kwargs)
+                    status = resp.get("status") if isinstance(resp, dict) else "ok"
+                    order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+                    result["order_status"] = str(status or "")
+                    result["order_id"] = str(order_id or "")
+                    if status == "matched":
+                        result["ok"] = True
+                        result["failure_type"] = ""
+                        result["detail"] = ""
+                        log(f"   ✅ BUY OK after signature_type retry: {status} | order {str(order_id)[:20]}...")
+                        return result
+                    result["failure_type"] = "not_filled_immediately"
+                    result["detail"] = f"sig_type={retry_signature_type}:status={status}"
+                    log(
+                        f"   ❌ BUY not filled after signature_type retry [{result['failure_type']}]: "
+                        f"{status} | order {str(order_id)[:20]}..."
+                    )
+                    return result
+                except Exception as retry_exc:
+                    retry_failure_type, retry_detail = _classify_polymarket_exception(retry_exc)
+                    retry_errors.append(f"sig_type={retry_signature_type}:{retry_detail}")
+                    if retry_failure_type != "signature_type_mismatch":
+                        result["failure_type"] = retry_failure_type
+                        result["detail"] = " | ".join(retry_errors)
+                        log(
+                            f"   ❌ BUY failed after signature_type retry [{result['failure_type']}]: {result['detail']} "
+                            f"| exc_type={type(retry_exc).__name__}"
+                        )
+                        return result
+            result["failure_type"] = failure_type
+            result["detail"] = " | ".join(retry_errors)
+            log(
+                f"   ❌ BUY failed after signature_type retries [{result['failure_type']}]: {result['detail']} "
+                f"| exc_type={type(e).__name__}"
+            )
+            return result
+        result["failure_type"] = failure_type
+        result["detail"] = detail
+        log(
+            f"   ❌ BUY failed [{result['failure_type']}]: {detail} "
+            f"| exc_type={type(e).__name__}"
+        )
+        return result
+
+
+def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: float,
+                            private_key: str, proxy_wallet: str, orderbook: dict,
+                            signal_age_sec: float, time_left: float) -> dict:
+    result = {
+        "ok": False,
+        "failure_type": "unknown",
+        "detail": "",
+        "order_status": "",
+        "order_id": "",
+        "size": None,
+        "taker_price": None,
+        "execution_mode": "maker_entry",
+        "post_only": True,
+        "maker_filled": False,
+        "maker_fill_price": None,
+        "maker_fill_size": None,
+        "maker_fill_latency_ms": None,
+        "maker_cancel_reason": "",
+        "best_bid_at_entry": float(orderbook.get("best_bid_price", 0) or 0),
+        "best_ask_at_entry": float(orderbook.get("best_ask_price", 0) or 0),
+        "spread_at_entry": float(orderbook.get("spread", 0) or 0),
+        "bid_depth_top_n": float(orderbook.get("bid_depth", 0) or 0),
+        "ask_depth_top_n": float(orderbook.get("ask_depth", 0) or 0),
+        "book_imbalance_at_entry": float(orderbook.get("book_imbalance", 0) or 0),
+        "limit_price": None,
+        "signal_age_sec_at_order_submit": round(float(signal_age_sec or 0.0), 3),
+        "order_rest_seconds": 0.0,
+        "fallback_used": False,
+    }
+    if amount_usdc <= 0:
+        result["failure_type"] = "invalid_amount"
+        result["detail"] = f"amount_usdc must be > 0 (got {amount_usdc})"
+        return result
+    if desired_price <= 0:
+        result["failure_type"] = "invalid_price"
+        result["detail"] = f"desired_price must be > 0 (got {desired_price})"
+        return result
+    if time_left < MAKER_ENTRY_MIN_TIME_LEFT:
+        result["failure_type"] = "late_signal"
+        result["detail"] = f"time_left={time_left:.1f}s < maker minimum {MAKER_ENTRY_MIN_TIME_LEFT:.1f}s"
+        return result
+    if signal_age_sec > MAKER_ENTRY_MAX_SIGNAL_AGE_SEC:
+        result["failure_type"] = "signal_stale"
+        result["detail"] = f"signal_age_sec={signal_age_sec:.2f} > {MAKER_ENTRY_MAX_SIGNAL_AGE_SEC:.2f}"
+        return result
+    best_bid = result["best_bid_at_entry"]
+    best_ask = result["best_ask_at_entry"]
+    spread = result["spread_at_entry"]
+    if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
+        result["failure_type"] = "empty_book"
+        result["detail"] = f"best_bid={best_bid:.3f} best_ask={best_ask:.3f}"
+        return result
+    if spread > MAKER_ENTRY_MAX_SPREAD:
+        result["failure_type"] = "wide_spread"
+        result["detail"] = f"spread={spread:.3f} > max {MAKER_ENTRY_MAX_SPREAD:.3f}"
+        return result
+
+    candidate_price = min(best_bid + MAKER_ENTRY_TICK_SIZE, desired_price - MAKER_ENTRY_TICK_SIZE, best_ask - MAKER_ENTRY_TICK_SIZE)
+    limit_price = _round_to_tick(candidate_price, MAKER_ENTRY_TICK_SIZE)
+    if limit_price <= best_bid or limit_price >= best_ask or limit_price <= 0:
+        result["failure_type"] = "invalid_maker_price"
+        result["detail"] = f"limit_price={limit_price:.3f} best_bid={best_bid:.3f} best_ask={best_ask:.3f}"
+        return result
+    result["limit_price"] = limit_price
+    size = round(amount_usdc / limit_price, 2)
+    result["size"] = size
+    if size <= 0:
+        result["failure_type"] = "invalid_size"
+        result["detail"] = f"computed size must be > 0 (got {size})"
+        return result
+
+    # Paper/dry-run simulation: use the live orderbook to approximate fill/no-fill.
+    if not private_key or not proxy_wallet:
+        sim = _paper_simulate_maker_fill(
+            limit_price,
+            "buy",
+            token_id,
+            timeout_sec=MAKER_ENTRY_TIMEOUT_SEC,
+            poll_interval_sec=MAKER_ENTRY_POLL_INTERVAL_SEC,
+            tick_size=MAKER_ENTRY_TICK_SIZE,
+            fill_size=size,
+            time_left=time_left,
+        )
+        if sim.get("ok") and sim.get("maker_filled"):
+            result["ok"] = True
+            result["maker_filled"] = True
+            result["maker_fill_price"] = sim.get("maker_fill_price")
+            result["maker_fill_size"] = sim.get("maker_fill_size")
+            result["maker_fill_latency_ms"] = sim.get("maker_fill_latency_ms")
+            result["order_rest_seconds"] = sim.get("order_rest_seconds", 0.0)
+            result["failure_type"] = ""
+            result["order_status"] = "paper_filled"
+            return result
+        result["failure_type"] = "maker_timeout"
+        result["detail"] = "paper_simulated_timeout"
+        result["maker_cancel_reason"] = str(sim.get("maker_cancel_reason", "timeout") or "timeout")
+        result["order_rest_seconds"] = sim.get("order_rest_seconds", result.get("order_rest_seconds", 0.0))
+        result["order_status"] = "paper_rest"
+        return result
+
+    try:
+        import importlib
+
+        client_module = importlib.import_module("py_clob_client_v2")
+        constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+        client = _build_v2_trade_client(private_key, proxy_wallet)
+        OrderArgs = getattr(client_module, "OrderArgs", None)
+        OrderType = getattr(client_module, "OrderType", None)
+        PartialCreateOrderOptions = getattr(client_module, "PartialCreateOrderOptions", None)
+        BUY = constants_module.BUY
+        if OrderArgs is None or OrderType is None:
+            result["failure_type"] = "maker_not_supported"
+            result["detail"] = "required order classes unavailable in py_clob_client_v2"
+            return result
+
+        ok, failure_type, detail = _preflight_live_order(client, round(amount_usdc, 2))
+        if not ok:
+            result["failure_type"] = failure_type
+            result["detail"] = detail
+            return result
+
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=limit_price,
+            size=size,
+            side=BUY,
+        )
+        options = PartialCreateOrderOptions(tick_size=f"{MAKER_ENTRY_TICK_SIZE:.2f}") if PartialCreateOrderOptions is not None else None
+        resp = None
+        if hasattr(client, "create_and_post_order"):
+            kwargs = {"order_args": order_args}
+            if options is not None:
+                kwargs["options"] = options
+            try:
+                kwargs["order_type"] = OrderType.GTC
+            except Exception:
+                pass
+            try:
+                kwargs["post_only"] = True
+                resp = client.create_and_post_order(**kwargs)
+            except TypeError:
+                kwargs.pop("post_only", None)
+                resp = client.create_and_post_order(**kwargs)
+        elif hasattr(client, "create_order") and hasattr(client, "post_order"):
+            signed = client.create_order(order_args)
+            try:
+                resp = client.post_order(signed, OrderType.GTC, True)
+            except TypeError:
+                resp = client.post_order(signed, OrderType.GTC)
+        else:
+            result["failure_type"] = "maker_not_supported"
+            result["detail"] = "client lacks create/post order methods"
+            return result
+
+        status = str(resp.get("status", "") or "").lower() if isinstance(resp, dict) else ""
+        order_id = str(resp.get("orderID", "") or resp.get("orderId", "") or "") if isinstance(resp, dict) else ""
+        result["order_status"] = status
+        result["order_id"] = order_id
+        start_ts = time.time()
+        if status in {"matched", "filled"}:
+            result["ok"] = True
+            result["maker_filled"] = True
+            result["maker_fill_price"] = _extract_fill_price(resp, limit_price)
+            result["maker_fill_size"] = _extract_fill_size(resp, size)
+            result["maker_fill_latency_ms"] = 0
+            result["failure_type"] = ""
+            return result
+
+        while time.time() - start_ts < MAKER_ENTRY_TIMEOUT_SEC:
+            time.sleep(max(0.1, MAKER_ENTRY_POLL_INTERVAL_SEC))
+            elapsed = time.time() - start_ts
+            result["order_rest_seconds"] = round(elapsed, 3)
+            current_status, payload = _safe_get_order_status(client, order_id)
+            if current_status in {"matched", "filled", "complete", "completed"}:
+                fill_size = _extract_fill_size(payload, size)
+                fill_ratio = (fill_size / size) if size > 0 else 0.0
+                if fill_ratio < MAKER_ENTRY_MIN_FILL_RATIO:
+                    _safe_cancel_order(client, order_id)
+                    result["failure_type"] = "partial_fill_below_min_ratio"
+                    result["detail"] = f"fill_ratio={fill_ratio:.2f} < {MAKER_ENTRY_MIN_FILL_RATIO:.2f}"
+                    result["maker_cancel_reason"] = "partial_fill_below_min_ratio"
+                    result["maker_fill_size"] = fill_size
+                    return result
+                result["ok"] = True
+                result["maker_filled"] = True
+                result["maker_fill_price"] = _extract_fill_price(payload, limit_price)
+                result["maker_fill_size"] = fill_size
+                result["maker_fill_latency_ms"] = int(elapsed * 1000)
+                result["order_status"] = current_status
+                result["failure_type"] = ""
+                return result
+            if current_status in {"cancelled", "canceled", "rejected"}:
+                result["failure_type"] = current_status or "maker_rejected"
+                result["detail"] = f"status={current_status or 'unknown'}"
+                result["maker_cancel_reason"] = current_status or "rejected"
+                return result
+
+        _safe_cancel_order(client, order_id)
+        result["failure_type"] = "maker_timeout"
+        result["detail"] = f"not filled within {MAKER_ENTRY_TIMEOUT_SEC:.1f}s"
+        result["maker_cancel_reason"] = "timeout"
+        result["order_rest_seconds"] = round(MAKER_ENTRY_TIMEOUT_SEC, 3)
+        return result
+    except Exception as exc:
+        failure_type, detail = _classify_polymarket_exception(exc)
+        result["failure_type"] = failure_type
+        result["detail"] = detail
+        return result
+
+
 def execute_buy(token_id: str, amount_usdc: float, price: float,
-                private_key: str, proxy_wallet: str) -> dict:
+                private_key: str, proxy_wallet: str, *, execution_mode: str = "taker",
+                orderbook: dict | None = None, signal_age_sec: float = 0.0,
+                time_left: float = 0.0) -> dict:
+    mode = str(execution_mode or "taker").strip().lower()
+    if mode == "maker_entry":
+        return execute_buy_maker_entry(
+            token_id,
+            amount_usdc,
+            price,
+            private_key,
+            proxy_wallet,
+            orderbook or {},
+            signal_age_sec,
+            time_left,
+        )
+    return execute_buy_taker(token_id, amount_usdc, price, private_key, proxy_wallet)
+
+
+def execute_sell_taker(token_id: str, size: float, price: float,
+                       private_key: str, proxy_wallet: str) -> dict:
+    """Taker-ish sell: best-effort immediate execution.
+
+    This bot historically held to expiry; Phase 2 introduces optional active exit.
+    """
+    result = {
+        "ok": False,
+        "failure_type": "unknown",
+        "detail": "",
+        "order_status": "",
+        "order_id": "",
+        "size": size,
+        "taker_price": None,
+        "execution_mode": "taker_exit",
+        "post_only": False,
+        "maker_filled": False,
+        "maker_fill_price": None,
+        "maker_fill_size": None,
+        "maker_fill_latency_ms": None,
+        "maker_cancel_reason": "",
+        "best_bid_at_entry": None,
+        "best_ask_at_entry": None,
+        "spread_at_entry": None,
+        "bid_depth_top_n": None,
+        "ask_depth_top_n": None,
+        "book_imbalance_at_entry": None,
+        "limit_price": None,
+        "signal_age_sec_at_order_submit": 0.0,
+        "order_rest_seconds": 0.0,
+        "fallback_used": False,
+    }
+    try:
+        import importlib
+
+        if size <= 0:
+            result["failure_type"] = "invalid_size"
+            result["detail"] = f"size must be > 0 (got {size})"
+            return result
+        if price <= 0:
+            result["failure_type"] = "invalid_price"
+            result["detail"] = f"price must be > 0 (got {price})"
+            return result
+
+        client_module = importlib.import_module("py_clob_client_v2")
+        constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+        client = _build_v2_trade_client(private_key, proxy_wallet)
+        OrderArgs = getattr(client_module, "OrderArgs", None)
+        OrderType = getattr(client_module, "OrderType", None)
+        SELL = getattr(constants_module, "SELL", None)
+        if OrderArgs is None or OrderType is None or SELL is None:
+            result["failure_type"] = "sell_not_supported"
+            result["detail"] = "py_clob_client_v2 missing OrderArgs/OrderType/SELL"
+            return result
+
+        limit_price = min(round(price - 0.01, 2), 0.99)
+        limit_price = max(0.01, limit_price)
+        result["taker_price"] = limit_price
+
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=limit_price,
+            size=round(size, 2),
+            side=SELL,
+        )
+        resp = client.create_and_post_order(order_args=order_args, order_type=OrderType.FOK)
+        status = str(resp.get("status", "") or "") if isinstance(resp, dict) else ""
+        order_id = str(resp.get("orderID", "") or resp.get("orderId", "") or "") if isinstance(resp, dict) else ""
+        result["order_status"] = status
+        result["order_id"] = order_id
+        if str(status).lower() in {"matched", "filled"}:
+            result["ok"] = True
+            result["failure_type"] = ""
+            return result
+        result["failure_type"] = "not_filled_immediately"
+        result["detail"] = f"status={status}"
+        return result
+    except Exception as exc:
+        failure_type, detail = _classify_polymarket_exception(exc)
+        result["failure_type"] = failure_type
+        result["detail"] = detail
+        return result
+
+
+def execute_sell_maker_exit(token_id: str, size: float, entry_price: float,
+                            private_key: str, proxy_wallet: str, time_left: float) -> dict:
+    """Phase 2: maker exit as TP limit sell, with forced taker near close."""
+    result = {
+        "ok": False,
+        "failure_type": "unknown",
+        "detail": "",
+        "order_status": "",
+        "order_id": "",
+        "size": size,
+        "taker_price": None,
+        "execution_mode": "maker_exit",
+        "post_only": True,
+        "maker_filled": False,
+        "maker_fill_price": None,
+        "maker_fill_size": None,
+        "maker_fill_latency_ms": None,
+        "maker_cancel_reason": "",
+        "best_bid_at_entry": None,
+        "best_ask_at_entry": None,
+        "spread_at_entry": None,
+        "bid_depth_top_n": None,
+        "ask_depth_top_n": None,
+        "book_imbalance_at_entry": None,
+        "limit_price": None,
+        "signal_age_sec_at_order_submit": 0.0,
+        "order_rest_seconds": 0.0,
+        "fallback_used": False,
+        "exit_forced_taker": False,
+        "exit_taker_price": None,
+    }
+
+    if size <= 0:
+        result["failure_type"] = "invalid_size"
+        result["detail"] = f"size must be > 0 (got {size})"
+        return result
+    if entry_price <= 0:
+        result["failure_type"] = "invalid_entry_price"
+        result["detail"] = f"entry_price must be > 0 (got {entry_price})"
+        return result
+
+    tp_price = _round_to_tick(entry_price + MAKER_EXIT_TARGET_IMPROVEMENT, MAKER_EXIT_TICK_SIZE)
+    tp_price = min(max(tp_price, 0.01), 0.99)
+    result["limit_price"] = tp_price
+
+    # Paper/dry-run simulation (when creds absent).
+    if not private_key or not proxy_wallet:
+        sim = _paper_simulate_maker_fill(
+            tp_price,
+            "sell",
+            token_id,
+            timeout_sec=MAKER_EXIT_TIMEOUT_SEC,
+            poll_interval_sec=MAKER_EXIT_POLL_INTERVAL_SEC,
+            tick_size=MAKER_EXIT_TICK_SIZE,
+            fill_size=size,
+            time_left=time_left,
+            force_taker_time_left=MAKER_EXIT_FORCE_TAKER_TIME_LEFT,
+        )
+        if sim.get("forced_taker"):
+            result["ok"] = True
+            result["exit_forced_taker"] = True
+            result["exit_taker_price"] = sim.get("forced_taker_price")
+            result["taker_price"] = sim.get("forced_taker_price")
+            result["maker_cancel_reason"] = "forced_taker"
+            result["order_status"] = "paper_forced_taker"
+            result["failure_type"] = ""
+            result["order_rest_seconds"] = sim.get("order_rest_seconds", 0.0)
+            return result
+        if sim.get("ok") and sim.get("maker_filled"):
+            result["ok"] = True
+            result["maker_filled"] = True
+            result["maker_fill_price"] = sim.get("maker_fill_price")
+            result["maker_fill_size"] = sim.get("maker_fill_size")
+            result["maker_fill_latency_ms"] = sim.get("maker_fill_latency_ms")
+            result["order_status"] = "paper_tp_filled"
+            result["failure_type"] = ""
+            result["order_rest_seconds"] = sim.get("order_rest_seconds", 0.0)
+            return result
+        result["failure_type"] = "maker_exit_timeout"
+        result["detail"] = "paper_simulated_timeout"
+        result["maker_cancel_reason"] = str(sim.get("maker_cancel_reason", "timeout") or "timeout")
+        result["order_status"] = "paper_exit_rest"
+        result["order_rest_seconds"] = sim.get("order_rest_seconds", 0.0)
+        return result
+
+    # Live path (best-effort): place post-only GTC and poll; forced taker near close.
+    try:
+        import importlib
+        client_module = importlib.import_module("py_clob_client_v2")
+        constants_module = importlib.import_module("py_clob_client.order_builder.constants")
+        client = _build_v2_trade_client(private_key, proxy_wallet)
+        OrderArgs = getattr(client_module, "OrderArgs", None)
+        OrderType = getattr(client_module, "OrderType", None)
+        PartialCreateOrderOptions = getattr(client_module, "PartialCreateOrderOptions", None)
+        SELL = getattr(constants_module, "SELL", None)
+        if OrderArgs is None or OrderType is None or SELL is None:
+            result["failure_type"] = "maker_exit_not_supported"
+            result["detail"] = "required classes unavailable in py_clob_client_v2"
+            return result
+
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=tp_price,
+            size=round(size, 2),
+            side=SELL,
+        )
+        options = PartialCreateOrderOptions(tick_size=f"{MAKER_EXIT_TICK_SIZE:.2f}") if PartialCreateOrderOptions is not None else None
+        kwargs = {"order_args": order_args}
+        if options is not None:
+            kwargs["options"] = options
+        try:
+            kwargs["order_type"] = OrderType.GTC
+        except Exception:
+            pass
+        try:
+            kwargs["post_only"] = True
+            resp = client.create_and_post_order(**kwargs)
+        except TypeError:
+            kwargs.pop("post_only", None)
+            resp = client.create_and_post_order(**kwargs)
+
+        status = str(resp.get("status", "") or "").lower() if isinstance(resp, dict) else ""
+        order_id = str(resp.get("orderID", "") or resp.get("orderId", "") or "") if isinstance(resp, dict) else ""
+        result["order_status"] = status
+        result["order_id"] = order_id
+        start_ts = time.time()
+        if status in {"matched", "filled"}:
+            result["ok"] = True
+            result["maker_filled"] = True
+            result["maker_fill_price"] = _extract_fill_price(resp, tp_price)
+            result["maker_fill_size"] = _extract_fill_size(resp, size)
+            result["maker_fill_latency_ms"] = 0
+            result["failure_type"] = ""
+            return result
+
+        while time.time() - start_ts < MAKER_EXIT_TIMEOUT_SEC:
+            time.sleep(max(0.1, MAKER_EXIT_POLL_INTERVAL_SEC))
+            elapsed = time.time() - start_ts
+            result["order_rest_seconds"] = round(elapsed, 3)
+
+            if float(time_left or 0) - elapsed <= MAKER_EXIT_FORCE_TAKER_TIME_LEFT:
+                _safe_cancel_order(client, order_id)
+                result["maker_cancel_reason"] = "forced_taker"
+                result["exit_forced_taker"] = True
+                taker_resp = execute_sell_taker(token_id, size, tp_price, private_key, proxy_wallet)
+                result["exit_taker_price"] = taker_resp.get("taker_price")
+                result["taker_price"] = taker_resp.get("taker_price")
+                result["order_status"] = "forced_taker"
+                result["ok"] = bool(taker_resp.get("ok"))
+                result["failure_type"] = "" if result["ok"] else str(taker_resp.get("failure_type", "taker_failed") or "taker_failed")
+                result["detail"] = str(taker_resp.get("detail", "") or "")
+                return result
+
+            current_status, payload = _safe_get_order_status(client, order_id)
+            if current_status in {"matched", "filled", "complete", "completed"}:
+                result["ok"] = True
+                result["maker_filled"] = True
+                result["maker_fill_price"] = _extract_fill_price(payload, tp_price)
+                result["maker_fill_size"] = _extract_fill_size(payload, size)
+                result["maker_fill_latency_ms"] = int(elapsed * 1000)
+                result["order_status"] = current_status
+                result["failure_type"] = ""
+                return result
+            if current_status in {"cancelled", "canceled", "rejected"}:
+                result["failure_type"] = current_status or "maker_exit_rejected"
+                result["detail"] = f"status={current_status or 'unknown'}"
+                result["maker_cancel_reason"] = current_status or "rejected"
+                return result
+
+        _safe_cancel_order(client, order_id)
+        result["failure_type"] = "maker_exit_timeout"
+        result["detail"] = f"not filled within {MAKER_EXIT_TIMEOUT_SEC:.1f}s"
+        result["maker_cancel_reason"] = "timeout"
+        result["order_rest_seconds"] = round(MAKER_EXIT_TIMEOUT_SEC, 3)
+        return result
+    except Exception as exc:
+        failure_type, detail = _classify_polymarket_exception(exc)
+        result["failure_type"] = failure_type
+        result["detail"] = detail
+        return result
+
+def execute_buy_legacy(token_id: str, amount_usdc: float, price: float,
+                       private_key: str, proxy_wallet: str) -> dict:
     result = {
         "ok": False,
         "failure_type": "unknown",
@@ -1774,7 +2743,7 @@ def get_collateral_balance_allowance(private_key: str, proxy_wallet: str) -> tup
     state = get_collateral_state(private_key, proxy_wallet)
     return state.get("balance"), state.get("allowance")
 
-# ─── BOT ───────────────────────────────────────────────────────────────────────
+# ─── BOT ───────────────────────────────────────────────────────────────
 class CryptoBot:
 
     def __init__(self, paper: bool, dry_run: bool, amount: float):
@@ -1797,7 +2766,7 @@ class CryptoBot:
         self.roi_alert_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         self.roi_alert_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-        # Банк (начальный капитал) и текущий баланс
+        # Банк (начальный капітал) і текущій баланс
         settings = load_settings()
         self.settings = settings
         self.session_state = load_session_state()
@@ -1975,7 +2944,7 @@ class CryptoBot:
                 f"https://api.telegram.org/bot{self.roi_alert_token}/sendMessage",
                 json={
                     "chat_id": self.roi_alert_chat_id,
-                    "text": f"ROI alert: session {self.session_id} reached {roi_pct:.2f}% | bank ${self.bank_balance:.2f}",
+                    "text": f"ROI alert: session {self.session_id} reached {roi_pct:.2f}% | bank=${self.bank_balance:.2f}",
                 },
                 timeout=10,
             )
@@ -2091,6 +3060,41 @@ class CryptoBot:
             "execution_failure_detail": "",
             "execution_order_status": "",
             "execution_order_id": "",
+            "execution_mode": "taker",
+            "post_only": False,
+            "limit_price": None,
+            "best_bid_at_entry": None,
+            "best_ask_at_entry": None,
+            "spread_at_entry": None,
+            "bid_depth_top_n": None,
+            "ask_depth_top_n": None,
+            "book_imbalance_at_entry": None,
+            "signal_age_sec_at_order_submit": 0.0,
+            "order_rest_seconds": 0.0,
+            "maker_filled": False,
+            "maker_fill_price": None,
+            "maker_fill_size": None,
+            "maker_fill_latency_ms": None,
+            "maker_cancel_reason": "",
+            "fallback_used": False,
+            "execution_entry_price": None,
+            "maker_exit_enabled": False,
+            "exit_attempted": False,
+            "exit_ok": False,
+            "exit_execution_mode": "",
+            "exit_post_only": False,
+            "exit_limit_price": None,
+            "exit_order_status": "",
+            "exit_order_id": "",
+            "exit_order_rest_seconds": 0.0,
+            "exit_maker_filled": False,
+            "exit_maker_fill_price": None,
+            "exit_maker_fill_size": None,
+            "exit_maker_fill_latency_ms": None,
+            "exit_maker_cancel_reason": "",
+            "exit_fallback_used": False,
+            "exit_forced_taker": False,
+            "exit_taker_price": None,
             "stable_ticks": window_features.get("stable_ticks", 0),
             "direction_persistence": window_features.get("direction_persistence", 0.0),
             "delta_slope": window_features.get("delta_slope", 0.0),
@@ -2793,18 +3797,18 @@ class CryptoBot:
 
         if sleep_secs > 0:
             log(f"💤 Sleeping {sleep_secs:.0f}s → next close "
-                f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%S')} UTC")
+                f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%SZ')} UTC")
             time.sleep(sleep_secs)
 
         if now_unix() >= close_ts + 5:
             log(f"⚠️  Arrived too late, skipping close "
-                f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%S')} UTC")
+                f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%SZ')} UTC")
             for prefix in self.active_markets:
                 self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
             return
 
         log(f"⚡ Active window — close "
-            f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%S')} UTC")
+            f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%SZ')} UTC")
 
         entered_slugs = set()
 
@@ -2815,9 +3819,9 @@ class CryptoBot:
                 log("⏰ Market closed.")
                 for prefix in self.active_markets:
                     self.traded_slugs.add(f"{prefix}-{close_ts - 300}")
-                # Проверяем результаты только что закрывшегося раунда.
-                # Раньше здесь использовался предыдущий close_ts, из-за чего
-                # сделки могли сверяться с неправильным рынком Polymarket.
+                # Проверяем результаты только що закрившихся раундів.
+                # Раньше тут використовувався попередній close_ts, із-за чого
+                # зроблені угоди могли звірятися з неправильним ринком Polymarket.
                 self._check_previous_round(close_ts)
                 self._finalize_window_summaries(close_ts)
                 break
@@ -3301,13 +4305,46 @@ class CryptoBot:
             trade_amount,
             signal_tier,
             signal_tier_reason,
+            signal_data,
         )
+
+        # Persist maker/taker execution audit details (both success and failure paths).
+        for key in (
+            "execution_mode",
+            "post_only",
+            "limit_price",
+            "best_bid_at_entry",
+            "best_ask_at_entry",
+            "spread_at_entry",
+            "bid_depth_top_n",
+            "ask_depth_top_n",
+            "book_imbalance_at_entry",
+            "signal_age_sec_at_order_submit",
+            "order_rest_seconds",
+            "maker_filled",
+            "maker_fill_price",
+            "maker_fill_size",
+            "maker_fill_latency_ms",
+            "maker_cancel_reason",
+            "fallback_used",
+        ):
+            if key in execution:
+                signal_data[key] = execution.get(key)
+        if execution.get("size") is not None:
+            signal_data["execution_size"] = execution.get("size")
+        if execution.get("taker_price") is not None:
+            signal_data["execution_taker_price"] = execution.get("taker_price")
+
+        entry_price = execution.get("maker_fill_price") or execution.get("taker_price") or market.get("winner_price")
+        signal_data["execution_entry_price"] = entry_price
         if execution.get("ok"):
             signal_data["entered"] = True
             signal_data["reason"] = "all filters passed"
             signal_data["exec_status"] = "success"
             signal_data["execution_order_status"] = str(execution.get("order_status", "") or "success")
             signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
+            if entry_price:
+                signal_data["pnl_expected"] = (trade_amount / entry_price) - trade_amount
             entered_slugs.add(slug)
             self.traded_slugs.add(slug)
             state = self.shadow_window_state.get(slug)
@@ -3321,10 +4358,6 @@ class CryptoBot:
             signal_data["execution_order_status"] = str(execution.get("order_status", "") or "")
             signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
             signal_data["exec_status"] = signal_data["execution_failure_type"] or signal_data["execution_order_status"] or "exception"
-            if execution.get("size") is not None:
-                signal_data["execution_size"] = execution.get("size")
-            if execution.get("taker_price") is not None:
-                signal_data["execution_taker_price"] = execution.get("taker_price")
             log(
                 f"   [{crypto}] EXECUTION FAILED — type={signal_data['execution_failure_type']} "
                 f"status={signal_data['execution_order_status'] or 'unknown'} "
@@ -3332,6 +4365,17 @@ class CryptoBot:
             )
 
         persist_record(force=True)
+
+        # Record a second window_sample snapshot after execution so offline analytics sees
+        # maker attempts/fills/cancels (Phase 1 requirement).
+        if WINDOW_SAMPLE_LOGGING_ENABLED:
+            execution_sample = dict(signal_data)
+            execution_sample["mode"] = self.mode
+            execution_sample["session_id"] = self.session_id
+            execution_sample["service_name"] = self.service_name
+            execution_sample["record_type"] = "window_sample"
+            execution_sample["sample_source"] = "entry_execution"
+            save_window_sample(execution_sample)
 
     def _observe_shadow_window(self, market: dict, ta: dict, seconds_left: float, allow_log: bool = True) -> dict:
         slug = str(market.get("slug") or "")
@@ -3493,13 +4537,13 @@ class CryptoBot:
         trend_aligned = bool(ta.get("trend_aligned"))
         indicator_confirm = float(ta.get("indicator_confirm", 0) or 0)
         stable_ticks = int(features.get("stable_ticks", 0) or 0)
-        direction_persistence = float(features.get("direction_persistence", 0) or 0)
+        direction_persistence = float(features.get("direction_persistence", 0.0) or 0.0)
         regime = str(features.get("market_regime", "unknown") or "unknown")
         recent_streak = int(features.get("recent_5m_streak", 0) or 0)
-        progress = float(features.get("window_progress_pct", 0) or 0)
-        underpricing_score = float(features.get("underpricing_score", 0) or 0)
-        pm_gap = float(features.get("pm_vs_delta_gap", 0) or 0)
-        pullback_size = float(features.get("pullback_size", 0) or 0)
+        progress = float(features.get("window_progress_pct", 0.0) or 0.0)
+        underpricing_score = float(features.get("underpricing_score", 0.0) or 0.0)
+        pm_gap = float(features.get("pm_vs_delta_gap", 0) or 0.0)
+        pullback_size = float(features.get("pullback_size", 0) or 0.0)
         pullback_recovered = bool(features.get("pullback_recovered"))
         reversal_flag = bool(features.get("reversal_flag"))
         regime_support = regime.startswith("trend_") and recent_streak >= 2
@@ -3559,7 +4603,7 @@ class CryptoBot:
 
     def _evaluate_shadow_live_decision(self, features: dict, shadow: dict, market: dict, ta: dict) -> dict:
         profile = str(shadow.get("profile", "none") or "none")
-        score = float(shadow.get("score", 0) or 0)
+        score = float(shadow.get("score", 0.0) or 0.0)
         candidate = bool(shadow.get("candidate"))
         pm_price = float(market.get("winner_price", 0) or 0)
         delta_pct = float(ta.get("delta_pct", 0) or 0)
@@ -3567,12 +4611,12 @@ class CryptoBot:
         stable_ticks = int(features.get("stable_ticks", 0) or 0)
         recent_streak = int(features.get("recent_5m_streak", 0) or 0)
         regime = str(features.get("market_regime", "unknown") or "unknown")
-        progress = float(features.get("window_progress_pct", 0) or 0)
-        underpricing_score = float(features.get("underpricing_score", 0) or 0)
-        pm_gap = float(features.get("pm_vs_delta_gap", 0) or 0)
+        progress = float(features.get("window_progress_pct", 0.0) or 0.0)
+        underpricing_score = float(features.get("underpricing_score", 0.0) or 0.0)
+        pm_gap = float(features.get("pm_vs_delta_gap", 0) or 0.0)
         pullback_recovered = bool(features.get("pullback_recovered"))
         reversal_flag = bool(features.get("reversal_flag"))
-        direction_persistence = float(features.get("direction_persistence", 0) or 0)
+        direction_persistence = float(features.get("direction_persistence", 0.0) or 0.0)
 
         decision = "neutral"
         reason = "no live shadow edge"
@@ -3701,6 +4745,7 @@ class CryptoBot:
         trade_amount: float,
         signal_tier: str,
         signal_tier_reason: str,
+        signal_data: dict,
     ) -> dict:
         price        = market["winner_price"]
         expected_pnl = (trade_amount / price) - trade_amount
@@ -3724,31 +4769,146 @@ class CryptoBot:
             f"1m={ta.get('indicator_confirm',0):+.2f} | "
             f"model={model_prob:.3f} market={market_prob:.3f} edge={edge:+.3f}")
 
+        configured_mode = str(EXECUTION_MODE or "taker").strip().lower()
+        entry_execution_mode = "maker_entry" if configured_mode in {"maker_entry", "maker_entry_exit", "two_sided_mm"} else "taker"
+        orderbook = {}
+        if entry_execution_mode == "maker_entry":
+            orderbook = get_orderbook_summary(market["winner_token"], depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+        signal_age_sec = 0.0
+        sig_ts_str = str(signal_data.get("timestamp", "") or "")
+        if sig_ts_str:
+            try:
+                sig_dt = datetime.strptime(sig_ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                signal_age_sec = max(0.0, time.time() - float(sig_dt.timestamp()))
+            except Exception:
+                signal_age_sec = 0.0
+
         if self.paper or self.dry_run:
             mode = "📄 PAPER" if self.paper else "🔍 DRY RUN"
-            log(f"   {mode} — not executed on chain")
-            execution = {
-                "ok": True,
-                "failure_type": "",
-                "detail": mode,
-                "order_status": "paper",
-                "order_id": "",
-            }
+            log(f"   {mode} — paper/dry-run execution simulation")
+            if entry_execution_mode == "maker_entry":
+                execution = execute_buy(
+                    market["winner_token"],
+                    trade_amount,
+                    price,
+                    "",
+                    "",
+                    execution_mode="maker_entry",
+                    orderbook=orderbook,
+                    signal_age_sec=signal_age_sec,
+                    time_left=seconds_left,
+                )
+                execution["detail"] = mode
+            else:
+                execution = {
+                    "ok": True,
+                    "failure_type": "",
+                    "detail": mode,
+                    "order_status": "paper",
+                    "order_id": "",
+                    "execution_mode": entry_execution_mode,
+                    "post_only": False,
+                    "limit_price": None,
+                    "best_bid_at_entry": orderbook.get("best_bid_price") if isinstance(orderbook, dict) else None,
+                    "best_ask_at_entry": orderbook.get("best_ask_price") if isinstance(orderbook, dict) else None,
+                    "spread_at_entry": orderbook.get("spread") if isinstance(orderbook, dict) else None,
+                    "bid_depth_top_n": orderbook.get("bid_depth") if isinstance(orderbook, dict) else None,
+                    "ask_depth_top_n": orderbook.get("ask_depth") if isinstance(orderbook, dict) else None,
+                    "book_imbalance_at_entry": orderbook.get("book_imbalance") if isinstance(orderbook, dict) else None,
+                    "signal_age_sec_at_order_submit": round(signal_age_sec, 3),
+                    "order_rest_seconds": 0.0,
+                    "maker_filled": False,
+                    "maker_fill_price": None,
+                    "maker_fill_size": None,
+                    "maker_fill_latency_ms": None,
+                    "maker_cancel_reason": "",
+                    "fallback_used": False,
+                }
         else:
             execution = execute_buy(
                 market["winner_token"], trade_amount, price,
-                self.private_key, self.proxy_wallet
+                self.private_key, self.proxy_wallet,
+                execution_mode=entry_execution_mode,
+                orderbook=orderbook,
+                signal_age_sec=signal_age_sec,
+                time_left=seconds_left,
             )
+
+        executed_price = execution.get("maker_fill_price") or execution.get("taker_price") or price
+        executed_expected_pnl = (trade_amount / executed_price) - trade_amount if executed_price else expected_pnl
+        executed_expected_pct = executed_expected_pnl / trade_amount * 100 if trade_amount > 0 else 0.0
+
+        if entry_execution_mode == "maker_entry":
+            limit_price = execution.get("limit_price")
+            best_bid = execution.get("best_bid_at_entry")
+            best_ask = execution.get("best_ask_at_entry")
+            spread = execution.get("spread_at_entry")
+            filled = bool(execution.get("maker_filled"))
+            cancel_reason = str(execution.get("maker_cancel_reason", "") or "")
+            latency_ms = execution.get("maker_fill_latency_ms")
+            log(
+                f"   🧾 MAKER-ENTRY — limit={limit_price} bid={best_bid} ask={best_ask} spread={spread} "
+                f"filled={filled} cancel={cancel_reason or '-'} latency_ms={latency_ms}"
+            )
+
+        # Phase 2 (optional): maker take-profit exit + forced taker near close.
+        if MAKER_EXIT_ENABLED and execution.get("ok"):
+            entry_price = execution.get("maker_fill_price") or execution.get("taker_price") or price
+            if entry_price and execution.get("size"):
+                exit_exec = execute_sell_maker_exit(
+                    market["winner_token"],
+                    float(execution.get("size") or 0),
+                    float(entry_price),
+                    self.private_key if not (self.paper or self.dry_run) else "",
+                    self.proxy_wallet if not (self.paper or self.dry_run) else "",
+                    time_left=seconds_left,
+                )
+                exit_price = exit_exec.get("maker_fill_price") or exit_exec.get("exit_taker_price") or exit_exec.get("taker_price")
+                exit_label = "live" if not (self.paper or self.dry_run) else "paper"
+                log(
+                    f"   🧾 MAKER-EXIT({exit_label}) — tp={exit_exec.get('limit_price')} ok={exit_exec.get('ok')} "
+                    f"maker_filled={exit_exec.get('maker_filled')} forced_taker={exit_exec.get('exit_forced_taker')} exit_price={exit_price}"
+                )
+
+                # Attach exit telemetry to the same signal record so offline stats can compare
+                # hold-to-expiry vs active exit.
+                signal_data["maker_exit_enabled"] = True
+                signal_data["exit_attempted"] = True
+                signal_data["exit_ok"] = bool(exit_exec.get("ok"))
+                signal_data["exit_execution_mode"] = str(exit_exec.get("execution_mode", "") or "")
+                signal_data["exit_post_only"] = bool(exit_exec.get("post_only"))
+                signal_data["exit_limit_price"] = exit_exec.get("limit_price")
+                signal_data["exit_order_status"] = str(exit_exec.get("order_status", "") or "")
+                signal_data["exit_order_id"] = str(exit_exec.get("order_id", "") or "")
+                signal_data["exit_order_rest_seconds"] = float(exit_exec.get("order_rest_seconds", 0.0) or 0.0)
+                signal_data["exit_maker_filled"] = bool(exit_exec.get("maker_filled"))
+                signal_data["exit_maker_fill_price"] = exit_exec.get("maker_fill_price")
+                signal_data["exit_maker_fill_size"] = exit_exec.get("maker_fill_size")
+                signal_data["exit_maker_fill_latency_ms"] = exit_exec.get("maker_fill_latency_ms")
+                signal_data["exit_maker_cancel_reason"] = str(exit_exec.get("maker_cancel_reason", "") or "")
+                signal_data["exit_fallback_used"] = bool(exit_exec.get("fallback_used"))
+                signal_data["exit_forced_taker"] = bool(exit_exec.get("exit_forced_taker"))
+                signal_data["exit_taker_price"] = exit_exec.get("exit_taker_price")
+
+                # Persist an additional window sample row for exit execution.
+                if WINDOW_SAMPLE_LOGGING_ENABLED:
+                    exit_sample = dict(signal_data)
+                    exit_sample["mode"] = self.mode
+                    exit_sample["session_id"] = self.session_id
+                    exit_sample["service_name"] = self.service_name
+                    exit_sample["record_type"] = "window_sample"
+                    exit_sample["sample_source"] = "exit_execution"
+                    save_window_sample(exit_sample)
 
         if execution.get("ok"):
             self.trades.append({
                 "crypto":       crypto,
                 "title":        market["title"],
                 "side":         market["winner_side"],
-                "price_entry":  price,
+                "price_entry":  executed_price,
                 "amount":       trade_amount,
                 "seconds_left": seconds_left,
-                "pnl_expected": expected_pnl,
+                "pnl_expected": executed_expected_pnl,
                 "delta_pct":    ta.get("delta_pct", 0),
                 "confidence":   ta.get("confidence", 0),
                 "score":        ta.get("score", 0),
@@ -3760,16 +4920,19 @@ class CryptoBot:
                 "edge":         edge,
                 "timestamp":    ts_str(),
             })
-            log(f"   ✅ Trade #{len(self.trades)} recorded [{crypto}]")
+            log(
+                f"   ✅ Trade #{len(self.trades)} recorded [{crypto}] | entry={executed_price:.3f} "
+                f"expected_pnl=+${executed_expected_pnl:.2f} (+{executed_expected_pct:.1f}%)"
+            )
 
         return execution
 
     def _check_previous_round(self, close_ts: int):
         """
-        Проверяет результаты сигналов из уже закрывшихся раундов на Polymarket.
-        Обновляет signals.json с результатами:
-          - для entered=True: фактический результат (WIN/LOSS, realized_pnl)
-          - для entered=False: контрфактический pnl_if_entered для оффлайн-анализа
+        Проверяє результати сигналів із вже закритих раундів на Polymarket.
+        Обновляет signals.json з результатами:
+          - для entered=True: фактичний результат (WIN/LOSS, realized_pnl)
+          - для entered=False: контрфактичний pnl_if_entered для оффлайн-аналізу
         """
         try:
             result_cache = {}
@@ -3846,7 +5009,7 @@ class CryptoBot:
                     winner, loser = outcome
 
                     won = (side == winner)
-                    entry_price = sig.get("pm", 0)
+                    entry_price = sig.get("maker_fill_price") or sig.get("execution_entry_price") or sig.get("execution_taker_price") or sig.get("taker_price") or sig.get("pm", 0)
                     trade_amount = sig.get("amount", self.amount)
 
                     records[i]["won"] = won
