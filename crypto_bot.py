@@ -2077,9 +2077,12 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
         result["maker_cancel_reason"] = result["failure_type"]
         return result
 
-    candidate_price = min(best_bid + MAKER_ENTRY_TICK_SIZE, desired_price - MAKER_ENTRY_TICK_SIZE, best_ask - MAKER_ENTRY_TICK_SIZE)
+    # For maker entry we primarily want to sit on/just above best bid (post-only),
+    # not chase the (potentially stale/off-source) desired_price snapshot.
+    candidate_price = best_bid + MAKER_ENTRY_TICK_SIZE
     limit_price = _round_to_tick(candidate_price, MAKER_ENTRY_TICK_SIZE)
-    if limit_price <= best_bid or limit_price >= best_ask or limit_price <= 0:
+    # After tick-rounding we still want a strict post-only price inside the spread.
+    if limit_price < best_bid or limit_price >= best_ask or limit_price <= 0:
         result["failure_type"] = "invalid_maker_price"
         result["detail"] = f"limit_price={limit_price:.3f} best_bid={best_bid:.3f} best_ask={best_ask:.3f}"
         result["maker_cancel_reason"] = result["failure_type"]
