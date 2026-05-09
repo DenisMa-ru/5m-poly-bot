@@ -367,7 +367,9 @@ FULL_WINDOW_ENTRY_MIN_SCORE_GAIN = float(_bot_settings.get("full_window_entry_mi
 WAKE_BEFORE       = int(_bot_settings.get("wake_before", max(65, OBSERVE_WINDOW_SECONDS)) or max(65, OBSERVE_WINDOW_SECONDS))
 POLL_INTERVAL     = 3
 EXECUTION_MODE = str(_bot_settings.get("execution_mode", "taker") or "taker").strip().lower()
-MAKER_ENTRY_TIMEOUT_SEC = float(_bot_settings.get("maker_entry_timeout_sec", 5.0) or 5.0)
+# Phase 1 tuning: maker-entry needs enough resting time to get fills without taker fallback.
+# Default bumped from 5s -> 12s; can be overridden via settings.json maker_entry_timeout_sec.
+MAKER_ENTRY_TIMEOUT_SEC = float(_bot_settings.get("maker_entry_timeout_sec", 12.0) or 12.0)
 MAKER_ENTRY_POLL_INTERVAL_SEC = float(_bot_settings.get("maker_entry_poll_interval_sec", 0.5) or 0.5)
 MAKER_ENTRY_MAX_SPREAD = float(_bot_settings.get("maker_entry_max_spread", 0.02) or 0.02)
 MAKER_ENTRY_TICK_SIZE = float(_bot_settings.get("maker_entry_tick_size", 0.01) or 0.01)
