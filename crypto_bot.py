@@ -2126,6 +2126,18 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
             fill_size=size,
             time_left=time_left,
         )
+        # Ensure entry book context is always propagated into the execution record
+        # even when simulation short-circuits early.
+        for k in (
+            "best_bid_at_entry",
+            "best_ask_at_entry",
+            "spread_at_entry",
+            "bid_depth_top_n",
+            "ask_depth_top_n",
+            "book_imbalance_at_entry",
+        ):
+            if sim.get(k) is not None:
+                result[k] = sim.get(k)
         if sim.get("ok") and sim.get("maker_filled"):
             result["ok"] = True
             result["maker_filled"] = True

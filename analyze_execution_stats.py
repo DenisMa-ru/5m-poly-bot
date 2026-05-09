@@ -69,6 +69,16 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values)
 
 
+def _summarize_numeric(values: list[float]) -> dict:
+    if not values:
+        return {"avg": None, "min": None, "max": None}
+    return {
+        "avg": round(_mean(values) or 0.0, 4),
+        "min": round(min(values), 4),
+        "max": round(max(values), 4),
+    }
+
+
 def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -116,6 +126,8 @@ def summarize_maker_entry(records: list[dict]) -> dict:
     filled = [r for r in attempts if bool(r.get("maker_filled"))]
     cancels = Counter(_reason_bucket(r) for r in attempts if not bool(r.get("maker_filled")))
 
+    not_filled = [r for r in attempts if not bool(r.get("maker_filled"))]
+
     latencies = [
         float(r.get("maker_fill_latency_ms"))
         for r in filled
@@ -123,6 +135,8 @@ def summarize_maker_entry(records: list[dict]) -> dict:
     ]
 
     improvements = []
+    improvements_vs_ask = []
+    slippage_vs_bid = []
     for r in filled:
         pm = _safe_float(r.get("pm"), default=None)
         fill = _safe_float(r.get("maker_fill_price"), default=None)
@@ -130,6 +144,16 @@ def summarize_maker_entry(records: list[dict]) -> dict:
             continue
         # For a BUY: lower fill vs PM is positive improvement.
         improvements.append(pm - fill)
+
+        best_bid = _safe_float(r.get("best_bid_at_entry"), default=None)
+        best_ask = _safe_float(r.get("best_ask_at_entry"), default=None)
+        # For a BUY:
+        # - improvement vs ask: best_ask - fill (positive is good)
+        # - slippage vs bid: fill - best_bid (positive is worse vs joining bid)
+        if best_ask is not None:
+            improvements_vs_ask.append(best_ask - fill)
+        if best_bid is not None:
+            slippage_vs_bid.append(fill - best_bid)
 
     # Time buckets
     by_hour = defaultdict(lambda: {"attempts": 0, "filled": 0})
@@ -144,6 +168,32 @@ def summarize_maker_entry(records: list[dict]) -> dict:
             by_hour[ts.hour]["filled"] += 1
             by_dow[ts.weekday()]["filled"] += 1
 
+    # Simple diagnostics: which book contexts correlate with fills.
+    def collect(records: list[dict], key: str) -> list[float]:
+        out: list[float] = []
+        for rr in records:
+            v = _safe_float(rr.get(key), default=None)
+            if v is None:
+                continue
+            out.append(v)
+        return out
+
+    diag_keys = [
+        "spread_at_entry",
+        "bid_depth_top_n",
+        "ask_depth_top_n",
+        "book_imbalance_at_entry",
+        "signal_age_sec_at_order_submit",
+        "order_rest_seconds",
+    ]
+    diagnostics = {
+        k: {
+            "filled": _summarize_numeric(collect(filled, k)),
+            "not_filled": _summarize_numeric(collect(not_filled, k)),
+        }
+        for k in diag_keys
+    }
+
     return {
         "attempts": len(attempts),
         "filled": len(filled),
@@ -155,8 +205,15 @@ def summarize_maker_entry(records: list[dict]) -> dict:
         "price_improvement_avg": None if not improvements else round(_mean(improvements) or 0.0, 4),
         "price_improvement_min": None if not improvements else round(min(improvements), 4),
         "price_improvement_max": None if not improvements else round(max(improvements), 4),
+        "improvement_vs_ask_avg": None if not improvements_vs_ask else round(_mean(improvements_vs_ask) or 0.0, 4),
+        "improvement_vs_ask_min": None if not improvements_vs_ask else round(min(improvements_vs_ask), 4),
+        "improvement_vs_ask_max": None if not improvements_vs_ask else round(max(improvements_vs_ask), 4),
+        "slippage_vs_bid_avg": None if not slippage_vs_bid else round(_mean(slippage_vs_bid) or 0.0, 4),
+        "slippage_vs_bid_min": None if not slippage_vs_bid else round(min(slippage_vs_bid), 4),
+        "slippage_vs_bid_max": None if not slippage_vs_bid else round(max(slippage_vs_bid), 4),
         "by_hour": by_hour,
         "by_dow": by_dow,
+        "diagnostics": diagnostics,
     }
 
 
@@ -226,10 +283,32 @@ def main() -> int:
             "price_improvement (pm - fill) avg/min/max: "
             f"{maker['price_improvement_avg']} / {maker['price_improvement_min']} / {maker['price_improvement_max']}"
         )
+    if maker["improvement_vs_ask_avg"] is not None:
+        print(
+            "improvement_vs_best_ask_at_entry (ask - fill) avg/min/max: "
+            f"{maker['improvement_vs_ask_avg']} / {maker['improvement_vs_ask_min']} / {maker['improvement_vs_ask_max']}"
+        )
+    if maker["slippage_vs_bid_avg"] is not None:
+        print(
+            "slippage_vs_best_bid_at_entry (fill - bid) avg/min/max: "
+            f"{maker['slippage_vs_bid_avg']} / {maker['slippage_vs_bid_min']} / {maker['slippage_vs_bid_max']}"
+        )
     if maker["cancel_reasons"]:
         print("cancel reasons (not filled):")
         for reason, cnt in maker["cancel_reasons"].most_common(20):
             print(f"  - {reason}: {cnt} ({_pct(cnt, maker['attempts']):.1f}%)")
+
+    if maker.get("diagnostics") and maker["attempts"]:
+        print("\nbook/context diagnostics (filled vs not_filled):")
+        for key, groups in maker["diagnostics"].items():
+            f = groups.get("filled") or {}
+            nf = groups.get("not_filled") or {}
+            if f.get("avg") is None and nf.get("avg") is None:
+                continue
+            print(
+                f"  - {key}: filled avg/min/max={f.get('avg')} / {f.get('min')} / {f.get('max')} | "
+                f"not_filled avg/min/max={nf.get('avg')} / {nf.get('min')} / {nf.get('max')}"
+            )
 
     if args.time_breakdown and maker["attempts"]:
         print("\nfill rate by hour (UTC):")
