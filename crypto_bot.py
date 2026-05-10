@@ -3123,7 +3123,11 @@ class CryptoBot:
 
         vol_features = {}
         try:
+            # Polymarket market payload may not carry a Binance symbol; derive from our coin mapping.
+            # We log this for offline research only.
             symbol = str(market.get("symbol") or "")
+            if not symbol:
+                symbol = str(BINANCE_SYMBOLS.get(str(crypto or ""), "") or "")
             if symbol:
                 vol_features = get_binance_volume_features_5m(symbol)
         except Exception:
