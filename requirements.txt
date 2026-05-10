@@ -3,3 +3,4 @@ python-dotenv>=1.0.0
 py-clob-client>=0.18.0
 py-clob-client-v2>=1.0.0
 streamlit>=1.30.0
+websocket-client>=1.8.0

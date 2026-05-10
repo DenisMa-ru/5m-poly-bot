@@ -23,6 +23,7 @@ import json
 import argparse
 import requests
 import re
+import threading
 from datetime import datetime, timezone
 from collections import deque
 from dotenv import load_dotenv
@@ -32,6 +33,11 @@ import os
 import signal
 import sys
 import uuid
+
+try:
+    import websocket  # websocket-client
+except Exception:
+    websocket = None
 
 load_dotenv()
 
@@ -345,6 +351,8 @@ def save_signal(signal_data):
 GAMMA_API         = "https://gamma-api.polymarket.com"
 CLOB_API          = "https://clob.polymarket.com"
 BINANCE_API       = "https://api.binance.com"
+
+WS_CLOB_HOST = "wss://ws-subscriptions-clob.polymarket.com"
 
 ENTRY_SECONDS_MAX = _bot_settings.get("entry_max", 20)
 ENTRY_SECONDS_MIN = _bot_settings.get("entry_min", 15)
@@ -1668,6 +1676,153 @@ def get_orderbook_summary(token_id: str, depth_levels: int = 5) -> dict:
         }
 
 
+def get_orderbook_summary_ws(ws_market: 'ClobWsMarketData', token_id: str, depth_levels: int = 5) -> dict:
+    """WS-first orderbook summary.
+
+    Returns the same shape as get_orderbook_summary(), but only includes L1 fields.
+    Falls back to REST if WS is missing/stale.
+    """
+    try:
+        if ws_market is not None:
+            snap = ws_market.get_best(token_id)
+            if isinstance(snap, dict):
+                age = time.time() - float(snap.get("ts", 0) or 0)
+                if 0 <= age <= 2.0:
+                    best_bid = float(snap.get("best_bid", 0) or 0)
+                    best_ask = float(snap.get("best_ask", 0) or 0)
+                    spread = float(snap.get("spread", 0) or 0)
+                    return {
+                        "ok": True,
+                        "best_bid_price": round(best_bid, 4),
+                        "best_ask_price": round(best_ask, 4),
+                        "spread": round(spread, 4),
+                        "bid_depth": 0.0,
+                        "ask_depth": 0.0,
+                        "book_imbalance": 0.0,
+                        "source": "ws",
+                        "ws_age_sec": round(age, 3),
+                    }
+    except Exception:
+        pass
+
+    rest = get_orderbook_summary(token_id, depth_levels=depth_levels)
+    if isinstance(rest, dict):
+        rest.setdefault("source", "rest")
+    return rest
+
+
+class ClobWsMarketData:
+    """Best-effort CLOB market-data feed (orderbook updates).
+
+    Keeps latest best bid/ask/spread per asset_id (token_id). No auth.
+    """
+
+    def __init__(self, *, assets_ids: list[str]):
+        self.assets_ids = [str(x) for x in (assets_ids or []) if str(x)]
+        self.enabled = bool(self.assets_ids) and websocket is not None
+        self._lock = threading.Lock()
+        self._books: dict[str, dict] = {}
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def start(self):
+        if not self.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="clob_ws_market", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def get_best(self, asset_id: str) -> dict | None:
+        if not asset_id:
+            return None
+        with self._lock:
+            snap = self._books.get(str(asset_id))
+            return dict(snap) if isinstance(snap, dict) else None
+
+    def _update_book(self, asset_id: str, bids, asks):
+        try:
+            best_bid = 0.0
+            if isinstance(bids, list) and bids:
+                best_bid = max(float(row[0]) for row in bids if isinstance(row, (list, tuple)) and len(row) >= 2)
+            best_ask = 0.0
+            if isinstance(asks, list) and asks:
+                best_ask = min(float(row[0]) for row in asks if isinstance(row, (list, tuple)) and len(row) >= 2)
+            spread = (best_ask - best_bid) if best_bid > 0 and best_ask > 0 else 0.0
+        except Exception:
+            return
+
+        with self._lock:
+            self._books[str(asset_id)] = {
+                "ts": time.time(),
+                "best_bid": float(best_bid or 0),
+                "best_ask": float(best_ask or 0),
+                "spread": float(spread or 0),
+            }
+
+    def _run(self):
+        url = f"{WS_CLOB_HOST}/ws/market"
+        sub = {
+            "type": "market",
+            "markets": [],
+            "assets_ids": self.assets_ids,
+            "initial_dump": True,
+        }
+
+        def on_open(ws):
+            try:
+                ws.send(json.dumps(sub))
+            except Exception:
+                return
+
+            def ping_loop():
+                while not self._stop.is_set():
+                    time.sleep(50)
+                    try:
+                        ws.send("PING")
+                    except Exception:
+                        return
+
+            threading.Thread(target=ping_loop, name="clob_ws_ping", daemon=True).start()
+
+        def on_message(ws, message):
+            try:
+                obj = json.loads(message)
+            except Exception:
+                return
+            if not isinstance(obj, dict):
+                return
+            if obj.get("type") != "book":
+                return
+            asset_id = str(obj.get("asset_id") or "")
+            if not asset_id:
+                return
+            self._update_book(asset_id, obj.get("bids"), obj.get("asks"))
+
+        def on_error(ws, error):
+            log(f"[CLOB WS ERROR] {error}")
+
+        def on_close(ws, code, reason):
+            log(f"[CLOB WS CLOSED] code={code} reason={reason}")
+
+        while not self._stop.is_set():
+            try:
+                ws = websocket.WebSocketApp(
+                    url,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                ws.run_forever(ping_interval=None)
+            except Exception as exc:
+                log(f"[CLOB WS LOOP ERROR] {exc}")
+            if self._stop.is_set():
+                break
+            time.sleep(3)
+
+
 def _round_to_tick(value: float, tick_size: float) -> float:
     if tick_size <= 0:
         return round(value, 2)
@@ -2901,6 +3056,19 @@ class CryptoBot:
         self.enabled_coins = set(get_enabled_coins(settings))
         self.active_markets = {prefix: coin for prefix, coin in MARKETS.items() if coin in self.enabled_coins}
 
+        # WS market-data feed (best-effort). Used for execution gating.
+        token_ids: list[str] = []
+        for prefix in self.active_markets:
+            try:
+                # Best-effort: fetch current window market once to discover token IDs.
+                m = get_market(MARKETS[prefix], close_ts=next_close_ts())
+                if isinstance(m, dict) and isinstance(m.get("clob_token_ids"), list):
+                    token_ids.extend([str(x) for x in (m.get("clob_token_ids") or [])[:2] if str(x)])
+            except Exception:
+                continue
+        self.ws_market = ClobWsMarketData(assets_ids=sorted(set(token_ids)))
+        self.ws_market.start()
+
         # Prevent duplicate bot processes before continuing.
         try:
             ensure_single_instance()
@@ -3901,6 +4069,11 @@ class CryptoBot:
         """Clean up PID file on exit."""
         try:
             PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            if getattr(self, "ws_market", None) is not None:
+                self.ws_market.stop()
         except Exception:
             pass
         self._print_summary()
@@ -4974,7 +5147,7 @@ class CryptoBot:
         entry_execution_mode = "maker_entry" if configured_mode in {"maker_entry", "maker_entry_exit", "two_sided_mm"} else "taker"
         orderbook = {}
         if entry_execution_mode == "maker_entry":
-            orderbook = get_orderbook_summary(market["winner_token"], depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+            orderbook = get_orderbook_summary_ws(self.ws_market, market["winner_token"], depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
         signal_age_sec = 0.0
         sig_ts_str = str(signal_data.get("timestamp", "") or "")
         if sig_ts_str:
