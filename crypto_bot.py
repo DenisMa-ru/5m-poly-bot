@@ -3061,7 +3061,7 @@ class CryptoBot:
         for prefix in self.active_markets:
             try:
                 # Best-effort: fetch current window market once to discover token IDs.
-                m = get_market(MARKETS[prefix], close_ts=next_close_ts())
+                m = get_market_for_close(prefix, next_close_ts())
                 if isinstance(m, dict) and isinstance(m.get("clob_token_ids"), list):
                     token_ids.extend([str(x) for x in (m.get("clob_token_ids") or [])[:2] if str(x)])
             except Exception:
