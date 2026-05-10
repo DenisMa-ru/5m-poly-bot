@@ -4014,6 +4014,32 @@ class CryptoBot:
         shadow_profile = str(snapshot.get("shadow_profile", signal_data.get("shadow_entry_profile", "none")) or "none")
         shadow_live_mode = str(snapshot.get("shadow_live_mode", signal_data.get("shadow_live_mode", normalize_shadow_live_mode(SHADOW_LIVE_MODE))) or normalize_shadow_live_mode(SHADOW_LIVE_MODE))
 
+        def strategy_force_entry() -> tuple[bool, str]:
+            """Research-driven override layer.
+
+            When enabled, may force an entry attempt even if Core-EV/shadow/full-window would block.
+            """
+            if STRATEGY_MODE != "lag_react_v1":
+                return False, ""
+            try:
+                tl = float(seconds_left or 0)
+                if not (LAG_REACT_TIME_LEFT_MIN <= tl <= LAG_REACT_TIME_LEFT_MAX):
+                    return False, ""
+                side = str(market.get("winner_side") or "")
+                gap = float(snapshot.get("pm_vs_delta_gap", 0) or signal_data.get("pm_vs_delta_gap", 0) or 0)
+                underpricing = float(snapshot.get("underpricing_score", 0) or signal_data.get("underpricing_score", 0) or 0)
+                delta_pct_local = float(ta.get("delta_pct", 0) or 0)
+                if side == "Down" and gap >= LAG_REACT_GAP_MIN_DOWN:
+                    return True, f"lag_react_v1 down: gap={gap:+.3f}>= {LAG_REACT_GAP_MIN_DOWN:.3f} tl={tl:.1f}"
+                if side == "Up" and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP:
+                    return True, (
+                        f"lag_react_v1 up: abs_delta={abs(delta_pct_local):.4f}>= {LAG_REACT_ABS_DELTA_MIN_UP:.4f} "
+                        f"underpricing={underpricing:+.3f}>= {LAG_REACT_UNDERPRICING_MIN_UP:+.3f} tl={tl:.1f}"
+                    )
+            except Exception:
+                return False, ""
+            return False, ""
+
         def persist_record(force: bool = False):
             if persist_signal or force:
                 save_signal(signal_data)
@@ -4029,7 +4055,14 @@ class CryptoBot:
                 f"{shadow_live_reason}"
             )
 
-        shadow_live_blocks = shadow_live_mode in {"block_deny", "hybrid"} and shadow_live_decision == "deny"
+        strategy_forced, strategy_forced_reason = strategy_force_entry()
+        if strategy_forced:
+            signal_data["strategy_mode"] = STRATEGY_MODE
+            signal_data["strategy_forced_entry"] = True
+            signal_data["strategy_forced_reason"] = strategy_forced_reason
+            log(f"   [{crypto}] STRATEGY OVERRIDE — {strategy_forced_reason}")
+
+        shadow_live_blocks = (shadow_live_mode in {"block_deny", "hybrid"} and shadow_live_decision == "deny") and (not strategy_forced)
         shadow_live_relax_filters = shadow_live_mode == "hybrid" and shadow_live_decision in {"allow", "strong_allow"}
 
         if self._daily_loss_limit_hit():
@@ -4192,7 +4225,7 @@ class CryptoBot:
         mismatch_reason = ""
         mismatch_debug = ""
         has_direction_mismatch = bool(ta_dir and ta_dir != pm_side)
-        if has_direction_mismatch:
+        if has_direction_mismatch and not strategy_forced:
             spread = float(market.get("pm_price_spread", 0) or 0)
             source = str(market.get("pm_price_source", "gamma") or "gamma")
             refresh_count = int(market.get("clob_midpoint_refresh_count", 0) or 0)
@@ -4254,7 +4287,7 @@ class CryptoBot:
                 f"roi={signal_data['core_ev_historical_roi']:+.1f}% recent={signal_data['core_ev_recent_roi']:+.1f}% | "
                 f"{signal_data['core_ev_reason']}"
             )
-        if has_direction_mismatch:
+        if has_direction_mismatch and not strategy_forced:
             log(f"   [{crypto}] MISMATCH DEBUG — {mismatch_debug}")
             if core_ev_decision in {"allow", "strong_allow"}:
                 log(
@@ -4315,7 +4348,7 @@ class CryptoBot:
             seconds_left,
         )
         signal_data["full_window_entry_reason"] = full_window_reason
-        if FULL_WINDOW_CORE_EV_ENABLED and not allow_full_window_entry:
+        if FULL_WINDOW_CORE_EV_ENABLED and (not allow_full_window_entry) and (not strategy_forced):
             log(f"   [{crypto}] WAIT — {full_window_reason}")
             signal_data["reason"] = f"full window wait | {full_window_reason}"
             return
