@@ -254,6 +254,93 @@ def summarize_counterfactual_skips(records: list[dict]) -> dict:
     }
 
 
+def _summarize_pnl_groups(records: list[dict], *,
+                          pnl_key: str,
+                          include_only: callable | None = None,
+                          group_keys: list[str],
+                          top: int = 25,
+                          min_trades: int = 5) -> list[dict]:
+    buckets: dict[tuple, list[float]] = defaultdict(list)
+    wins: dict[tuple, int] = defaultdict(int)
+
+    for r in records:
+        if include_only is not None and (not include_only(r)):
+            continue
+        pnl = _safe_float(r.get(pnl_key), default=None)
+        if pnl is None:
+            continue
+        key_tuple = []
+        for k in group_keys:
+            v = r.get(k)
+            if isinstance(v, bool):
+                vv = "true" if v else "false"
+            elif v is None:
+                vv = "unknown"
+            else:
+                vv = str(v)
+                if not vv.strip():
+                    vv = "unknown"
+            key_tuple.append(f"{k}={vv}")
+        key = tuple(key_tuple)
+        buckets[key].append(pnl)
+        if bool(r.get("won")):
+            wins[key] += 1
+
+    rows = []
+    for key, pnls in buckets.items():
+        if len(pnls) < int(min_trades):
+            continue
+        w = wins.get(key, 0)
+        rows.append({
+            "bucket": " | ".join(key),
+            "trades": len(pnls),
+            "win_rate_pct": round(_pct(w, len(pnls)), 1),
+            "pnl_sum": round(sum(pnls), 4),
+            "pnl_avg": round(_mean(pnls) or 0.0, 4),
+            "pnl_min": round(min(pnls), 4),
+            "pnl_max": round(max(pnls), 4),
+        })
+
+    rows.sort(key=lambda r: (r["pnl_sum"], r["trades"]), reverse=True)
+    return rows[: int(top)]
+
+
+def summarize_realized_pnl_by_context(records: list[dict], *, top: int = 25, min_trades: int = 5) -> list[dict]:
+    return _summarize_pnl_groups(
+        records,
+        pnl_key="realized_pnl",
+        include_only=lambda r: bool(r.get("entered")) and r.get("realized_pnl") is not None,
+        group_keys=[
+            "side",
+            "signal_tier",
+            "trend_aligned",
+            "trend_conflict",
+            "market_regime",
+            "shadow_live_decision",
+        ],
+        top=top,
+        min_trades=min_trades,
+    )
+
+
+def summarize_counterfactual_pnl_by_context(records: list[dict], *, top: int = 25, min_trades: int = 5) -> list[dict]:
+    return _summarize_pnl_groups(
+        records,
+        pnl_key="pnl_if_entered",
+        include_only=lambda r: (not bool(r.get("entered"))) and r.get("pnl_if_entered") is not None,
+        group_keys=[
+            "side",
+            "signal_tier",
+            "trend_aligned",
+            "trend_conflict",
+            "market_regime",
+            "shadow_live_decision",
+        ],
+        top=top,
+        min_trades=min_trades,
+    )
+
+
 def summarize_realized_pnl(records: list[dict]) -> dict:
     entered = [r for r in records if bool(r.get("entered"))]
     resolved = [r for r in entered if r.get("realized_pnl") is not None]
@@ -386,6 +473,8 @@ def main() -> int:
     )
     ap.add_argument("--pnl-bucket-min-trades", type=int, default=3)
     ap.add_argument("--pnl-bucket-dims", choices=["coarse", "full"], default="full")
+    ap.add_argument("--pnl-context-min-trades", type=int, default=5)
+    ap.add_argument("--pnl-context-top", type=int, default=20)
     args = ap.parse_args()
 
     if args.source == "signals":
@@ -411,7 +500,21 @@ def main() -> int:
         min_trades=max(1, int(args.pnl_bucket_min_trades or 1)),
         dims=str(args.pnl_bucket_dims or "full"),
     )
+    realized_context = summarize_realized_pnl_by_context(
+        records,
+        top=int(args.pnl_context_top or 20),
+        min_trades=max(1, int(args.pnl_context_min_trades or 1)),
+    )
     skips = summarize_counterfactual_skips(records) if args.source == "window_samples" else None
+    counterfactual_context = (
+        summarize_counterfactual_pnl_by_context(
+            records,
+            top=int(args.pnl_context_top or 20),
+            min_trades=max(1, int(args.pnl_context_min_trades or 1)),
+        )
+        if args.source == "window_samples" else
+        []
+    )
 
     print("=== MAKER ENTRY (Phase 1) ===")
     print(f"attempts: {maker['attempts']}")
@@ -494,6 +597,17 @@ def main() -> int:
             print(f"counterfactual_pnl_avg: {skips['pnl_avg']}")
             print(f"positive/negative: {skips['pnl_positive']} / {skips['pnl_negative']}")
 
+        if counterfactual_context:
+            print(
+                f"\n=== COUNTERFACTUAL PNL BREAKDOWN (min_trades={max(1, int(args.pnl_context_min_trades or 1))}) ==="
+            )
+            for row in counterfactual_context:
+                print(
+                    f"  - trades={row['trades']} win_rate={row['win_rate_pct']}% "
+                    f"pnl_sum={row['pnl_sum']} pnl_avg={row['pnl_avg']} min/max={row['pnl_min']}/{row['pnl_max']}"
+                )
+                print(f"    {row['bucket']}")
+
     print("\n=== REALIZED PNL (no fees) ===")
     print(f"entered:  {pnl['entered']}")
     print(f"resolved: {pnl['resolved']}")
@@ -506,6 +620,17 @@ def main() -> int:
             f"\n=== REALIZED PNL BREAKDOWN (top buckets, min_trades={max(1, int(args.pnl_bucket_min_trades or 1))}, dims={args.pnl_bucket_dims}) ==="
         )
         for row in pnl_buckets:
+            print(
+                f"  - trades={row['trades']} win_rate={row['win_rate_pct']}% "
+                f"pnl_sum={row['pnl_sum']} pnl_avg={row['pnl_avg']} min/max={row['pnl_min']}/{row['pnl_max']}"
+            )
+            print(f"    {row['bucket']}")
+
+    if realized_context:
+        print(
+            f"\n=== REALIZED PNL CONTEXT BREAKDOWN (min_trades={max(1, int(args.pnl_context_min_trades or 1))}) ==="
+        )
+        for row in realized_context:
             print(
                 f"  - trades={row['trades']} win_rate={row['win_rate_pct']}% "
                 f"pnl_sum={row['pnl_sum']} pnl_avg={row['pnl_avg']} min/max={row['pnl_min']}/{row['pnl_max']}"
