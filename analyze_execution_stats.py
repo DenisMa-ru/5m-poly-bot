@@ -233,6 +233,39 @@ def summarize_maker_entry(records: list[dict]) -> dict:
     }
 
 
+def summarize_strategy_override(records: list[dict]) -> dict:
+    attempts = [
+        r
+        for r in records
+        if str(r.get("execution_mode", "") or "") == "maker_entry"
+        and str(r.get("record_type", "") or "") == "window_sample"
+        and str(r.get("sample_source", "") or "") == "entry_execution"
+    ]
+
+    forced = [r for r in attempts if bool(r.get("strategy_forced_entry"))]
+    normal = [r for r in attempts if not bool(r.get("strategy_forced_entry"))]
+
+    def stats(rows: list[dict]) -> dict:
+        filled = [r for r in rows if bool(r.get("maker_filled"))]
+        cancels = Counter(_reason_bucket(r) for r in rows if not bool(r.get("maker_filled")))
+        pnls = [_safe_float(r.get("realized_pnl"), default=None) for r in rows if bool(r.get("entered")) and r.get("realized_pnl") is not None]
+        pnls = [p for p in pnls if p is not None]
+        return {
+            "attempts": len(rows),
+            "filled": len(filled),
+            "fill_rate_pct": round(_pct(len(filled), len(rows)), 2),
+            "cancel_reasons": cancels,
+            "realized_trades": len(pnls),
+            "realized_pnl_sum": None if not pnls else round(sum(pnls), 4),
+            "realized_pnl_avg": None if not pnls else round(_mean(pnls) or 0.0, 4),
+        }
+
+    return {
+        "forced": stats(forced),
+        "normal": stats(normal),
+    }
+
+
 def summarize_counterfactual_skips(records: list[dict]) -> dict:
     skipped = [
         r for r in records
@@ -515,6 +548,7 @@ def main() -> int:
         if args.source == "window_samples" else
         []
     )
+    strategy = summarize_strategy_override(records)
 
     print("=== MAKER ENTRY (Phase 1) ===")
     print(f"attempts: {maker['attempts']}")
@@ -568,6 +602,30 @@ def main() -> int:
                 f"  - {key}: filled avg/min/max={f.get('avg')} / {f.get('min')} / {f.get('max')} | "
                 f"not_filled avg/min/max={nf.get('avg')} / {nf.get('min')} / {nf.get('max')}"
             )
+
+    if strategy and (strategy.get("forced") or strategy.get("normal")):
+        forced = strategy.get("forced") or {}
+        normal = strategy.get("normal") or {}
+        if forced.get("attempts", 0) or normal.get("attempts", 0):
+            print("\n=== STRATEGY OVERRIDE BREAKDOWN (strategy_forced_entry) ===")
+            print(
+                f"forced: attempts={forced.get('attempts',0)} filled={forced.get('filled',0)} "
+                f"fill_rate={forced.get('fill_rate_pct',0):.2f}% realized_trades={forced.get('realized_trades',0)} "
+                f"realized_pnl_sum={forced.get('realized_pnl_sum')}"
+            )
+            if forced.get("cancel_reasons"):
+                print("  forced cancel reasons:")
+                for reason, cnt in forced["cancel_reasons"].most_common(10):
+                    print(f"    - {reason}: {cnt} ({_pct(cnt, forced.get('attempts',0)):.1f}%)")
+            print(
+                f"normal: attempts={normal.get('attempts',0)} filled={normal.get('filled',0)} "
+                f"fill_rate={normal.get('fill_rate_pct',0):.2f}% realized_trades={normal.get('realized_trades',0)} "
+                f"realized_pnl_sum={normal.get('realized_pnl_sum')}"
+            )
+            if normal.get("cancel_reasons"):
+                print("  normal cancel reasons:")
+                for reason, cnt in normal["cancel_reasons"].most_common(10):
+                    print(f"    - {reason}: {cnt} ({_pct(cnt, normal.get('attempts',0)):.1f}%)")
 
     if args.time_breakdown and maker["attempts"]:
         print("\nfill rate by hour (UTC):")
