@@ -339,6 +339,22 @@ def get_setting(key, default):
     s = load_settings()
     return s.get(key, default)
 
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in {"1", "true", "yes", "y", "on"}:
+            return True
+        if v in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return bool(default)
+
 # ─── SIGNAL SAVING ─────────────────────────────────────────────────────
 def save_signal(signal_data):
     """Append a signal to signals.json for dashboard history."""
@@ -373,7 +389,7 @@ WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_en
 # Research-driven strategy override layer (optional).
 # When STRATEGY_MODE is set, it may force entry even when Core-EV would deny.
 STRATEGY_MODE = str(_bot_settings.get("strategy_mode", "") or "").strip().lower()
-STRATEGY_FORCE_ENABLED = bool(_bot_settings.get("strategy_force_enabled", True))
+STRATEGY_FORCE_ENABLED = _as_bool(_bot_settings.get("strategy_force_enabled"), True)
 LAG_REACT_TIME_LEFT_MIN = float(_bot_settings.get("lag_react_time_left_min", 60) or 60)
 LAG_REACT_TIME_LEFT_MAX = float(_bot_settings.get("lag_react_time_left_max", 120) or 120)
 LAG_REACT_PM_MAX_FORCED = float(_bot_settings.get("lag_react_pm_max_forced", 0.80) or 0.80)
@@ -409,7 +425,7 @@ MAKER_ENTRY_MAX_SIGNAL_AGE_SEC = float(_bot_settings.get("maker_entry_max_signal
 MAKER_ENTRY_MIN_FILL_RATIO = float(_bot_settings.get("maker_entry_min_fill_ratio", 0.80) or 0.80)
 
 # Execution-first gating (WS orderbook quality)
-MAKER_ENTRY_REQUIRE_WS = bool(_bot_settings.get("maker_entry_require_ws", True))
+MAKER_ENTRY_REQUIRE_WS = _as_bool(_bot_settings.get("maker_entry_require_ws"), True)
 MAKER_ENTRY_MAX_WS_AGE_SEC = float(_bot_settings.get("maker_entry_max_ws_age_sec", 0.25) or 0.25)
 
 # Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
