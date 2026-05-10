@@ -364,6 +364,7 @@ WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_en
 STRATEGY_MODE = str(_bot_settings.get("strategy_mode", "") or "").strip().lower()
 LAG_REACT_TIME_LEFT_MIN = float(_bot_settings.get("lag_react_time_left_min", 60) or 60)
 LAG_REACT_TIME_LEFT_MAX = float(_bot_settings.get("lag_react_time_left_max", 120) or 120)
+LAG_REACT_PM_MAX_FORCED = float(_bot_settings.get("lag_react_pm_max_forced", 0.80) or 0.80)
 LAG_REACT_GAP_MIN_DOWN = float(_bot_settings.get("lag_react_gap_min_down", 0.25) or 0.25)
 LAG_REACT_GAP_MIN_UP = float(_bot_settings.get("lag_react_gap_min_up", 0.25) or 0.25)
 LAG_REACT_ABS_DELTA_MIN_UP = float(_bot_settings.get("lag_react_abs_delta_min_up", 0.005) or 0.005)
@@ -4078,6 +4079,9 @@ class CryptoBot:
                 if not (LAG_REACT_TIME_LEFT_MIN <= tl <= LAG_REACT_TIME_LEFT_MAX):
                     return False, ""
                 side = str(market.get("winner_side") or "")
+                pm_local = float(snapshot.get("pm", 0) or signal_data.get("pm", 0) or market.get("winner_price") or 0)
+                if pm_local >= LAG_REACT_PM_MAX_FORCED - 1e-12:
+                    return False, ""
                 gap = float(snapshot.get("pm_vs_delta_gap", 0) or signal_data.get("pm_vs_delta_gap", 0) or 0)
                 underpricing = float(snapshot.get("underpricing_score", 0) or signal_data.get("underpricing_score", 0) or 0)
                 delta_pct_local = float(ta.get("delta_pct", 0) or 0)
@@ -4371,21 +4375,25 @@ class CryptoBot:
                     tl = float(seconds_left or 0)
                     if LAG_REACT_TIME_LEFT_MIN <= tl <= LAG_REACT_TIME_LEFT_MAX:
                         side = str(market.get("winner_side") or "")
-                        gap = float(snapshot.get("pm_vs_delta_gap", 0) or signal_data.get("pm_vs_delta_gap", 0) or 0)
-                        underpricing = float(snapshot.get("underpricing_score", 0) or signal_data.get("underpricing_score", 0) or 0)
-                        delta_pct_local = float(ta.get("delta_pct", 0) or 0)
-                        # Research finding:
-                        # - Down performs when pm_vs_delta_gap is high.
-                        # - Up performs when abs(delta) is non-trivial (and optionally underpricing not too negative).
-                        if side == "Down" and gap >= LAG_REACT_GAP_MIN_DOWN:
-                            strategy_forced = True
-                        elif (
-                            side == "Up"
-                            and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP
-                            and gap >= LAG_REACT_GAP_MIN_UP
-                            and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP
-                        ):
-                            strategy_forced = True
+                        pm_local = float(snapshot.get("pm", 0) or signal_data.get("pm", 0) or market.get("winner_price") or 0)
+                        if pm_local >= LAG_REACT_PM_MAX_FORCED - 1e-12:
+                            strategy_forced = False
+                        else:
+                            gap = float(snapshot.get("pm_vs_delta_gap", 0) or signal_data.get("pm_vs_delta_gap", 0) or 0)
+                            underpricing = float(snapshot.get("underpricing_score", 0) or signal_data.get("underpricing_score", 0) or 0)
+                            delta_pct_local = float(ta.get("delta_pct", 0) or 0)
+                            # Research finding:
+                            # - Down performs when pm_vs_delta_gap is high.
+                            # - Up performs when abs(delta) is non-trivial (and optionally underpricing not too negative).
+                            if side == "Down" and gap >= LAG_REACT_GAP_MIN_DOWN:
+                                strategy_forced = True
+                            elif (
+                                side == "Up"
+                                and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP
+                                and gap >= LAG_REACT_GAP_MIN_UP
+                                and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP
+                            ):
+                                strategy_forced = True
                 except Exception:
                     strategy_forced = False
 
