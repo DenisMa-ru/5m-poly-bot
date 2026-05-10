@@ -77,6 +77,8 @@ class Rule:
     delta_abs_min: float | None
     pm_vs_delta_gap_min: float | None
     underpricing_min: float | None
+    vol_ratio_min: float | None
+    vol_ratio_max: float | None
 
     def label(self) -> str:
         parts = [f"tl=[{self.time_left_min:.0f},{self.time_left_max:.0f}]" ]
@@ -100,6 +102,10 @@ class Rule:
             parts.append(f"gap>={self.pm_vs_delta_gap_min:.3f}")
         if self.underpricing_min is not None:
             parts.append(f"underpricing>={self.underpricing_min:.3f}")
+        if self.vol_ratio_min is not None:
+            parts.append(f"vol_ratio>={self.vol_ratio_min:.2f}")
+        if self.vol_ratio_max is not None:
+            parts.append(f"vol_ratio<={self.vol_ratio_max:.2f}")
         return " | ".join(parts)
 
 
@@ -154,6 +160,15 @@ def _matches(rule: Rule, r: dict) -> bool:
     if rule.underpricing_min is not None:
         u = _safe_float(r.get("underpricing_score"), default=None)
         if u is None or u + 1e-12 < rule.underpricing_min:
+            return False
+
+    if rule.vol_ratio_min is not None or rule.vol_ratio_max is not None:
+        vr = _safe_float(r.get("vol_ratio_5m_ma7"), default=None)
+        if vr is None:
+            return False
+        if rule.vol_ratio_min is not None and vr + 1e-12 < rule.vol_ratio_min:
+            return False
+        if rule.vol_ratio_max is not None and vr > rule.vol_ratio_max + 1e-12:
             return False
 
     return True
@@ -234,6 +249,19 @@ def build_rule_grid(args) -> list[Rule]:
         # underpricing_score is often negative; higher (closer to 0 or positive) means less underpriced.
         underpricing_mins = [None, -0.6, -0.4, -0.2, 0.0]
 
+    vol_ratio_ranges = [(None, None)]
+    if args.vol_ratio_grid:
+        # Research ranges: spikes (>=1.2..2.0) and dry periods (<=0.9..0.6)
+        vol_ratio_ranges = [
+            (None, None),
+            (1.2, None),
+            (1.5, None),
+            (2.0, None),
+            (None, 0.9),
+            (None, 0.75),
+            (None, 0.6),
+        ]
+
     rules: list[Rule] = []
     for tl_min, tl_max in tl_windows:
         for side in sides:
@@ -245,20 +273,23 @@ def build_rule_grid(args) -> list[Rule]:
                                 for dmin in delta_abs_mins:
                                     for gmin in gap_mins:
                                         for umin in underpricing_mins:
-                                            rules.append(Rule(
-                                                side=side,
-                                                time_left_min=float(tl_min),
-                                                time_left_max=float(tl_max),
-                                                spread_max=spread_max,
-                                                imbalance_min=imb_min,
-                                                imbalance_max=imb_max,
-                                                trend_aligned=ta,
-                                                trend_conflict=tc,
-                                                market_regime=rg,
-                                                delta_abs_min=dmin,
-                                                pm_vs_delta_gap_min=gmin,
-                                                underpricing_min=umin,
-                                            ))
+                                            for vr_min, vr_max in vol_ratio_ranges:
+                                                rules.append(Rule(
+                                                    side=side,
+                                                    time_left_min=float(tl_min),
+                                                    time_left_max=float(tl_max),
+                                                    spread_max=spread_max,
+                                                    imbalance_min=imb_min,
+                                                    imbalance_max=imb_max,
+                                                    trend_aligned=ta,
+                                                    trend_conflict=tc,
+                                                    market_regime=rg,
+                                                    delta_abs_min=dmin,
+                                                    pm_vs_delta_gap_min=gmin,
+                                                    underpricing_min=umin,
+                                                    vol_ratio_min=vr_min,
+                                                    vol_ratio_max=vr_max,
+                                                ))
     return rules
 
 
@@ -282,6 +313,7 @@ def main() -> int:
     ap.add_argument("--delta-abs-grid", action="store_true", help="Search abs(delta) minimum thresholds")
     ap.add_argument("--gap-grid", action="store_true", help="Search pm_vs_delta_gap minimum thresholds")
     ap.add_argument("--underpricing-grid", action="store_true", help="Search underpricing_score minimum thresholds")
+    ap.add_argument("--vol-ratio-grid", action="store_true", help="Search vol_ratio_5m_ma7 thresholds")
 
     args = ap.parse_args()
 

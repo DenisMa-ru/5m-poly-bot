@@ -731,6 +731,42 @@ def get_higher_timeframe_trend(symbol: str, interval: str = TREND_INTERVAL,
     except Exception:
         return None
 
+
+def get_binance_volume_features_5m(symbol: str) -> dict:
+    """Return simple 5m volume features for research.
+
+    Fields:
+      - binance_vol_5m: current 5m candle volume (base asset units)
+      - binance_vol_ma7_5m: SMA(7) of previous completed 5m candle volumes
+      - vol_ratio_5m_ma7: binance_vol_5m / binance_vol_ma7_5m
+
+    Best-effort: returns {} on errors/insufficient data.
+    """
+    try:
+        candles = get_binance_candles(symbol, interval="5m", limit=8)
+        if len(candles) < 8:
+            return {}
+
+        # Binance kline format: [ openTime, open, high, low, close, volume, ... ]
+        vols = []
+        for c in candles:
+            try:
+                vols.append(float(c[5]))
+            except Exception:
+                vols.append(0.0)
+
+        current_vol = vols[-1]
+        ma7 = _sma(vols[-8:-1], 7)
+        if ma7 is None or ma7 <= 0:
+            return {"binance_vol_5m": current_vol, "binance_vol_ma7_5m": ma7, "vol_ratio_5m_ma7": None}
+        return {
+            "binance_vol_5m": current_vol,
+            "binance_vol_ma7_5m": ma7,
+            "vol_ratio_5m_ma7": current_vol / ma7,
+        }
+    except Exception:
+        return {}
+
 def analyze_micro_momentum(candles: list) -> tuple[float, str]:
     """Weighted 5-candle micro momentum. Newer candles have more weight."""
     if len(candles) < 5:
@@ -3085,6 +3121,14 @@ class CryptoBot:
         shadow_live = shadow_context.get("shadow_live", {})
         shadow_state = self.shadow_window_state.get(slug, {})
 
+        vol_features = {}
+        try:
+            symbol = str(market.get("symbol") or "")
+            if symbol:
+                vol_features = get_binance_volume_features_5m(symbol)
+        except Exception:
+            vol_features = {}
+
         signal_data = {
             "timestamp": ts_str(),
             "entry_time": ts_str(),
@@ -3173,6 +3217,9 @@ class CryptoBot:
             "market_regime": window_features.get("market_regime", "unknown"),
             "pm_vs_delta_gap": window_features.get("pm_vs_delta_gap", 0.0),
             "underpricing_score": window_features.get("underpricing_score", 0.0),
+            "binance_vol_5m": vol_features.get("binance_vol_5m"),
+            "binance_vol_ma7_5m": vol_features.get("binance_vol_ma7_5m"),
+            "vol_ratio_5m_ma7": vol_features.get("vol_ratio_5m_ma7"),
             "shadow_entry_candidate": shadow.get("candidate", False),
             "shadow_entry_profile": shadow.get("profile", "none"),
             "shadow_entry_score": shadow.get("score", 0.0),
