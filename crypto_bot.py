@@ -2369,7 +2369,8 @@ def execute_buy_taker(token_id: str, amount_usdc: float, price: float,
 
 def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: float,
                             private_key: str, proxy_wallet: str, orderbook: dict,
-                            signal_age_sec: float, time_left: float) -> dict:
+                            signal_age_sec: float, time_left: float,
+                            ws_market: 'ClobWsMarketData' | None = None) -> dict:
     result = {
         "ok": False,
         "failure_type": "unknown",
@@ -2395,6 +2396,8 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
         "signal_age_sec_at_order_submit": round(float(signal_age_sec or 0.0), 3),
         "order_rest_seconds": 0.0,
         "fallback_used": False,
+        "early_cancel": False,
+        "early_cancel_reason": "",
     }
     if amount_usdc <= 0:
         result["failure_type"] = "invalid_amount"
@@ -2501,6 +2504,27 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
         result["order_status"] = "paper_rest"
         return result
 
+    def _should_early_cancel() -> tuple[bool, str]:
+        # Execution-first: if microstructure deteriorates after order is posted,
+        # cancel early instead of waiting full timeout.
+        try:
+            ob = get_orderbook_summary_ws(ws_market, token_id, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS) if ws_market is not None else get_orderbook_summary(token_id, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+            if not isinstance(ob, dict) or not ob.get("ok"):
+                return False, ""
+            bid = float(ob.get("best_bid_price", 0) or 0)
+            ask = float(ob.get("best_ask_price", 0) or 0)
+            spread_now = float(ob.get("spread", 0) or 0)
+            if bid <= 0 or ask <= 0 or ask <= bid:
+                return True, "book_empty"
+            if spread_now > MAKER_ENTRY_MAX_SPREAD:
+                return True, "spread_widened"
+            # If we are no longer at/near top-of-book, odds of fill drop sharply.
+            if bid > 0 and (limit_price + 1e-9) < (bid - MAKER_ENTRY_TICK_SIZE):
+                return True, "lost_top_of_book"
+        except Exception:
+            return False, ""
+        return False, ""
+
     try:
         import importlib
 
@@ -2573,6 +2597,17 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
             time.sleep(max(0.1, MAKER_ENTRY_POLL_INTERVAL_SEC))
             elapsed = time.time() - start_ts
             result["order_rest_seconds"] = round(elapsed, 3)
+
+            early_cancel, early_reason = _should_early_cancel()
+            if early_cancel:
+                _safe_cancel_order(client, order_id)
+                result["failure_type"] = "maker_early_cancel"
+                result["detail"] = f"reason={early_reason}"
+                result["maker_cancel_reason"] = "early_cancel"
+                result["early_cancel"] = True
+                result["early_cancel_reason"] = early_reason
+                return result
+
             current_status, payload = _safe_get_order_status(client, order_id)
             if current_status in {"matched", "filled", "complete", "completed"}:
                 fill_size = _extract_fill_size(payload, size)
@@ -2614,7 +2649,7 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
 def execute_buy(token_id: str, amount_usdc: float, price: float,
                 private_key: str, proxy_wallet: str, *, execution_mode: str = "taker",
                 orderbook: dict | None = None, signal_age_sec: float = 0.0,
-                time_left: float = 0.0) -> dict:
+                time_left: float = 0.0, ws_market: 'ClobWsMarketData' | None = None) -> dict:
     mode = str(execution_mode or "taker").strip().lower()
     if mode == "maker_entry":
         return execute_buy_maker_entry(
@@ -2626,6 +2661,7 @@ def execute_buy(token_id: str, amount_usdc: float, price: float,
             orderbook or {},
             signal_age_sec,
             time_left,
+            ws_market,
         )
     return execute_buy_taker(token_id, amount_usdc, price, private_key, proxy_wallet)
 
@@ -5329,6 +5365,7 @@ class CryptoBot:
                     orderbook=orderbook,
                     signal_age_sec=signal_age_sec,
                     time_left=seconds_left,
+                    ws_market=self.ws_market,
                 )
                 execution["detail"] = mode
             else:
@@ -5364,6 +5401,7 @@ class CryptoBot:
                 orderbook=orderbook,
                 signal_age_sec=signal_age_sec,
                 time_left=seconds_left,
+                ws_market=self.ws_market,
             )
 
         executed_price = execution.get("maker_fill_price") or execution.get("taker_price") or price
