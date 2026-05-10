@@ -28,6 +28,7 @@ import re
 import threading
 from datetime import datetime, timezone
 from collections import deque
+from typing import Optional
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -2377,7 +2378,7 @@ def execute_buy_taker(token_id: str, amount_usdc: float, price: float,
 def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: float,
                             private_key: str, proxy_wallet: str, orderbook: dict,
                             signal_age_sec: float, time_left: float,
-                            ws_market: 'ClobWsMarketData' | None = None) -> dict:
+                            ws_market: Optional['ClobWsMarketData'] = None) -> dict:
     result = {
         "ok": False,
         "failure_type": "unknown",
@@ -2656,7 +2657,7 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
 def execute_buy(token_id: str, amount_usdc: float, price: float,
                 private_key: str, proxy_wallet: str, *, execution_mode: str = "taker",
                 orderbook: dict | None = None, signal_age_sec: float = 0.0,
-                time_left: float = 0.0, ws_market: 'ClobWsMarketData' | None = None) -> dict:
+                time_left: float = 0.0, ws_market: Optional['ClobWsMarketData'] = None) -> dict:
     mode = str(execution_mode or "taker").strip().lower()
     if mode == "maker_entry":
         return execute_buy_maker_entry(
