@@ -1682,6 +1682,7 @@ def get_orderbook_summary_ws(ws_market: 'ClobWsMarketData', token_id: str, depth
     Returns the same shape as get_orderbook_summary(), but only includes L1 fields.
     Falls back to REST if WS is missing/stale.
     """
+    fallback_reason = "unknown"
     try:
         if ws_market is not None:
             snap = ws_market.get_best(token_id)
@@ -1702,12 +1703,18 @@ def get_orderbook_summary_ws(ws_market: 'ClobWsMarketData', token_id: str, depth
                         "source": "ws",
                         "ws_age_sec": round(age, 3),
                     }
+                fallback_reason = f"stale_snapshot age={round(age, 3)}"
+            else:
+                fallback_reason = "no_snapshot"
+        else:
+            fallback_reason = "ws_market_disabled"
     except Exception:
-        pass
+        fallback_reason = "ws_exception"
 
     rest = get_orderbook_summary(token_id, depth_levels=depth_levels)
     if isinstance(rest, dict):
         rest.setdefault("source", "rest")
+        rest.setdefault("ws_fallback_reason", fallback_reason)
     return rest
 
 
@@ -5252,6 +5259,9 @@ class CryptoBot:
                 src = str(orderbook.get("source", "") or "")
                 ws_age = orderbook.get("ws_age_sec")
                 extra = f" ws_age={ws_age}s" if ws_age is not None else ""
+                fallback_reason = str(orderbook.get("ws_fallback_reason", "") or "")
+                if fallback_reason:
+                    extra += f" fallback={fallback_reason}"
                 log(
                     f"   [{crypto}] ORDERBOOK({src}) bid={float(orderbook.get('best_bid_price', 0) or 0):.3f} "
                     f"ask={float(orderbook.get('best_ask_price', 0) or 0):.3f} spread={float(orderbook.get('spread', 0) or 0):.3f}{extra}"
