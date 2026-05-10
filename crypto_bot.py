@@ -3068,6 +3068,11 @@ class CryptoBot:
                 continue
         self.ws_market = ClobWsMarketData(assets_ids=sorted(set(token_ids)))
         self.ws_market.start()
+        if getattr(self.ws_market, "enabled", False):
+            log(f"[CLOB WS] market feed enabled | assets={len(getattr(self.ws_market, 'assets_ids', []) or [])}")
+        else:
+            reason = "no_assets" if not token_ids else "missing_websocket_client"
+            log(f"[CLOB WS] market feed disabled ({reason})")
 
         # Prevent duplicate bot processes before continuing.
         try:
@@ -5148,6 +5153,14 @@ class CryptoBot:
         orderbook = {}
         if entry_execution_mode == "maker_entry":
             orderbook = get_orderbook_summary_ws(self.ws_market, market["winner_token"], depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+            if isinstance(orderbook, dict):
+                src = str(orderbook.get("source", "") or "")
+                ws_age = orderbook.get("ws_age_sec")
+                extra = f" ws_age={ws_age}s" if ws_age is not None else ""
+                log(
+                    f"   [{crypto}] ORDERBOOK({src}) bid={float(orderbook.get('best_bid_price', 0) or 0):.3f} "
+                    f"ask={float(orderbook.get('best_ask_price', 0) or 0):.3f} spread={float(orderbook.get('spread', 0) or 0):.3f}{extra}"
+                )
         signal_age_sec = 0.0
         sig_ts_str = str(signal_data.get("timestamp", "") or "")
         if sig_ts_str:
