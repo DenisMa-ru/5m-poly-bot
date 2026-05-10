@@ -370,6 +370,7 @@ WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_en
 # Research-driven strategy override layer (optional).
 # When STRATEGY_MODE is set, it may force entry even when Core-EV would deny.
 STRATEGY_MODE = str(_bot_settings.get("strategy_mode", "") or "").strip().lower()
+STRATEGY_FORCE_ENABLED = bool(_bot_settings.get("strategy_force_enabled", True))
 LAG_REACT_TIME_LEFT_MIN = float(_bot_settings.get("lag_react_time_left_min", 60) or 60)
 LAG_REACT_TIME_LEFT_MAX = float(_bot_settings.get("lag_react_time_left_max", 120) or 120)
 LAG_REACT_PM_MAX_FORCED = float(_bot_settings.get("lag_react_pm_max_forced", 0.80) or 0.80)
@@ -403,6 +404,10 @@ MAKER_ENTRY_MAX_TIME_LEFT = float(_bot_settings.get("maker_entry_max_time_left",
 # Default bumped from 3s -> 4s; still blocks genuinely stale signals.
 MAKER_ENTRY_MAX_SIGNAL_AGE_SEC = float(_bot_settings.get("maker_entry_max_signal_age_sec", 4) or 4)
 MAKER_ENTRY_MIN_FILL_RATIO = float(_bot_settings.get("maker_entry_min_fill_ratio", 0.80) or 0.80)
+
+# Execution-first gating (WS orderbook quality)
+MAKER_ENTRY_REQUIRE_WS = bool(_bot_settings.get("maker_entry_require_ws", True))
+MAKER_ENTRY_MAX_WS_AGE_SEC = float(_bot_settings.get("maker_entry_max_ws_age_sec", 0.25) or 0.25)
 
 # Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
 MAKER_EXIT_ENABLED = bool(_bot_settings.get("maker_exit_enabled", False))
@@ -4428,6 +4433,8 @@ class CryptoBot:
 
             When enabled, may force an entry attempt even if Core-EV/shadow/full-window would block.
             """
+            if not STRATEGY_FORCE_ENABLED:
+                return False, ""
             if STRATEGY_MODE != "lag_react_v1":
                 return False, ""
             try:
@@ -5342,6 +5349,23 @@ class CryptoBot:
                     f"   [{crypto}] ORDERBOOK({src}) bid={float(orderbook.get('best_bid_price', 0) or 0):.3f} "
                     f"ask={float(orderbook.get('best_ask_price', 0) or 0):.3f} spread={float(orderbook.get('spread', 0) or 0):.3f}{extra}"
                 )
+
+            # Pre-entry gating: execution-first. Skip maker-entry when WS is missing/stale.
+            if MAKER_ENTRY_REQUIRE_WS:
+                if not isinstance(orderbook, dict) or str(orderbook.get("source", "")) != "ws":
+                    log(f"   [{crypto}] SKIP — maker_entry requires WS orderbook")
+                    signal_data["reason"] = "maker_entry requires WS orderbook"
+                    save_signal(signal_data)
+                    return
+                try:
+                    age = float(orderbook.get("ws_age_sec", 999) or 999)
+                except Exception:
+                    age = 999.0
+                if age > MAKER_ENTRY_MAX_WS_AGE_SEC:
+                    log(f"   [{crypto}] SKIP — WS orderbook stale (age={age:.3f}s > {MAKER_ENTRY_MAX_WS_AGE_SEC:.3f}s)")
+                    signal_data["reason"] = f"ws stale (age={age:.3f}s)"
+                    save_signal(signal_data)
+                    return
         signal_age_sec = 0.0
         sig_ts_str = str(signal_data.get("timestamp", "") or "")
         if sig_ts_str:
