@@ -371,11 +371,15 @@ EXECUTION_MODE = str(_bot_settings.get("execution_mode", "taker") or "taker").st
 # Default bumped from 5s -> 12s; can be overridden via settings.json maker_entry_timeout_sec.
 MAKER_ENTRY_TIMEOUT_SEC = float(_bot_settings.get("maker_entry_timeout_sec", 12.0) or 12.0)
 MAKER_ENTRY_POLL_INTERVAL_SEC = float(_bot_settings.get("maker_entry_poll_interval_sec", 0.5) or 0.5)
-MAKER_ENTRY_MAX_SPREAD = float(_bot_settings.get("maker_entry_max_spread", 0.02) or 0.02)
+# Phase 1 tuning: wide spreads materially reduce fill probability for join-bid maker entry.
+# Default tightened from 0.02 -> 0.01 (1 tick) to avoid low-quality/low-fill attempts.
+MAKER_ENTRY_MAX_SPREAD = float(_bot_settings.get("maker_entry_max_spread", 0.01) or 0.01)
 MAKER_ENTRY_TICK_SIZE = float(_bot_settings.get("maker_entry_tick_size", 0.01) or 0.01)
 MAKER_ENTRY_BOOK_DEPTH_LEVELS = int(_bot_settings.get("maker_entry_book_depth_levels", 5) or 5)
 MAKER_ENTRY_MIN_TIME_LEFT = float(_bot_settings.get("maker_entry_min_time_left", 20) or 20)
-MAKER_ENTRY_MAX_SIGNAL_AGE_SEC = float(_bot_settings.get("maker_entry_max_signal_age_sec", 3) or 3)
+# Phase 1 tuning: allow a bit more tolerance for scheduling / network jitter.
+# Default bumped from 3s -> 4s; still blocks genuinely stale signals.
+MAKER_ENTRY_MAX_SIGNAL_AGE_SEC = float(_bot_settings.get("maker_entry_max_signal_age_sec", 4) or 4)
 MAKER_ENTRY_MIN_FILL_RATIO = float(_bot_settings.get("maker_entry_min_fill_ratio", 0.80) or 0.80)
 
 # Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
