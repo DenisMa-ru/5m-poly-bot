@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 crypto_bot.py — ETH/BTC Up/Down 5min Trading Bot with Window Delta
 Strategy:
