@@ -377,6 +377,9 @@ MAKER_ENTRY_MAX_SPREAD = float(_bot_settings.get("maker_entry_max_spread", 0.01)
 MAKER_ENTRY_TICK_SIZE = float(_bot_settings.get("maker_entry_tick_size", 0.01) or 0.01)
 MAKER_ENTRY_BOOK_DEPTH_LEVELS = int(_bot_settings.get("maker_entry_book_depth_levels", 5) or 5)
 MAKER_ENTRY_MIN_TIME_LEFT = float(_bot_settings.get("maker_entry_min_time_left", 20) or 20)
+# Optional upper bound for maker-entry attempts. When set, maker-entry will only be attempted
+# if time_left <= this threshold. Keeps Phase 1 focused on the intended entry timing window.
+MAKER_ENTRY_MAX_TIME_LEFT = float(_bot_settings.get("maker_entry_max_time_left", 0) or 0)
 # Phase 1 tuning: allow a bit more tolerance for scheduling / network jitter.
 # Default bumped from 3s -> 4s; still blocks genuinely stale signals.
 MAKER_ENTRY_MAX_SIGNAL_AGE_SEC = float(_bot_settings.get("maker_entry_max_signal_age_sec", 4) or 4)
@@ -2076,6 +2079,11 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
     if time_left < MAKER_ENTRY_MIN_TIME_LEFT:
         result["failure_type"] = "late_signal"
         result["detail"] = f"time_left={time_left:.1f}s < maker minimum {MAKER_ENTRY_MIN_TIME_LEFT:.1f}s"
+        result["maker_cancel_reason"] = result["failure_type"]
+        return result
+    if MAKER_ENTRY_MAX_TIME_LEFT and time_left > MAKER_ENTRY_MAX_TIME_LEFT:
+        result["failure_type"] = "early_signal"
+        result["detail"] = f"time_left={time_left:.1f}s > maker maximum {MAKER_ENTRY_MAX_TIME_LEFT:.1f}s"
         result["maker_cancel_reason"] = result["failure_type"]
         return result
     if signal_age_sec > MAKER_ENTRY_MAX_SIGNAL_AGE_SEC:
