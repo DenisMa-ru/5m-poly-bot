@@ -1738,6 +1738,32 @@ class ClobWsMarketData:
         self._thread = threading.Thread(target=self._run, name="clob_ws_market", daemon=True)
         self._thread.start()
 
+    def update_assets(self, assets_ids: list[str]):
+        """Best-effort live update of subscribed assets.
+
+        We keep it simple: if the set changes, restart the websocket loop.
+        """
+        new_ids = [str(x) for x in (assets_ids or []) if str(x)]
+        if not new_ids:
+            return
+        cur = set(self.assets_ids or [])
+        nxt = set(new_ids)
+        if cur == nxt:
+            return
+        self.assets_ids = sorted(nxt)
+        self.enabled = bool(self.assets_ids) and websocket is not None
+        try:
+            with self._lock:
+                self._books = {k: v for k, v in (self._books or {}).items() if k in nxt}
+        except Exception:
+            pass
+        # Force reconnect to apply new subscription.
+        self._stop.set()
+        time.sleep(0.05)
+        self._stop = threading.Event()
+        self._thread = None
+        self.start()
+
     def stop(self):
         self._stop.set()
 
@@ -4193,6 +4219,20 @@ class CryptoBot:
 
         close_ts   = next_close_ts()
         sleep_secs = close_ts - now_unix() - WAKE_BEFORE
+
+        # Refresh WS subscription for the upcoming window (token IDs change every round).
+        try:
+            if getattr(self, "ws_market", None) is not None and getattr(self.ws_market, "enabled", False):
+                refreshed: list[str] = []
+                for prefix in self.active_markets:
+                    m = get_market_for_close(prefix, close_ts)
+                    if isinstance(m, dict) and isinstance(m.get("clob_token_ids"), list):
+                        refreshed.extend([str(x) for x in (m.get("clob_token_ids") or [])[:2] if str(x)])
+                if refreshed:
+                    self.ws_market.update_assets(sorted(set(refreshed)))
+                    log(f"[CLOB WS] market feed enabled | assets={len(getattr(self.ws_market, 'assets_ids', []) or [])}")
+        except Exception:
+            pass
 
         if sleep_secs > 0:
             log(f"💤 Sleeping {sleep_secs:.0f}s → next close "
