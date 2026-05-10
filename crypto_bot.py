@@ -1770,21 +1770,30 @@ class ClobWsMarketData:
             "initial_dump": True,
         }
 
+        self._conn_id = 0
+        self._last_msg_ts = 0.0
+        self._msg_seen = 0
+        self._type_seen: dict[str, int] = {}
+
         def on_open(ws):
+            self._conn_id += 1
+            log(f"[CLOB WS OPEN] conn={self._conn_id} assets={len(self.assets_ids)}")
             try:
                 ws.send(json.dumps(sub))
+                log(f"[CLOB WS SUB] conn={self._conn_id} initial_dump={bool(sub.get('initial_dump'))}")
             except Exception:
                 return
 
-            def ping_loop():
-                while not self._stop.is_set():
-                    time.sleep(50)
-                    try:
-                        ws.send("PING")
-                    except Exception:
-                        return
-
-            threading.Thread(target=ping_loop, name="clob_ws_ping", daemon=True).start()
+        def on_pong(ws, data):
+            # websocket-client handles ping/pong at protocol level when ping_interval is set.
+            # Keep a light trace to confirm liveness.
+            try:
+                payload = data.decode("utf-8", "ignore") if isinstance(data, (bytes, bytearray)) else str(data)
+            except Exception:
+                payload = ""
+            if payload:
+                payload = payload[:80]
+            log(f"[CLOB WS PONG] conn={self._conn_id} payload={payload}")
 
         def on_message(ws, message):
             try:
@@ -1793,7 +1802,21 @@ class ClobWsMarketData:
                 return
             if not isinstance(obj, dict):
                 return
-            if obj.get("type") != "book":
+            self._last_msg_ts = time.time()
+            self._msg_seen += 1
+            msg_type = str(obj.get("type") or "")
+            if msg_type:
+                self._type_seen[msg_type] = self._type_seen.get(msg_type, 0) + 1
+
+            # Log the first few messages per connection to validate schema.
+            if self._msg_seen <= 5:
+                try:
+                    preview = json.dumps(obj)[:350]
+                except Exception:
+                    preview = str(obj)[:350]
+                log(f"[CLOB WS MSG] conn={self._conn_id} n={self._msg_seen} {preview}")
+
+            if msg_type != "book":
                 return
             asset_id = str(obj.get("asset_id") or "")
             if not asset_id:
@@ -1806,21 +1829,53 @@ class ClobWsMarketData:
         def on_close(ws, code, reason):
             log(f"[CLOB WS CLOSED] code={code} reason={reason}")
 
+        def _calc_backoff_sec(attempt: int) -> float:
+            # Exponential backoff with cap; deterministic (no extra deps).
+            base = 1.5
+            cap = 60.0
+            try:
+                wait = min(cap, base ** max(0, attempt))
+            except Exception:
+                wait = 5.0
+            return float(wait)
+
+        attempt = 0
         while not self._stop.is_set():
             try:
+                attempt += 1
+                self._msg_seen = 0
+                self._type_seen = {}
                 ws = websocket.WebSocketApp(
                     url,
                     on_open=on_open,
                     on_message=on_message,
                     on_error=on_error,
                     on_close=on_close,
+                    on_pong=on_pong,
                 )
-                ws.run_forever(ping_interval=None)
+
+                # Use protocol-level ping/pong instead of sending "PING" text frames.
+                # This tends to be more compatible with infra/proxies and avoids servers
+                # closing on unexpected text messages.
+                ws.run_forever(
+                    ping_interval=20,
+                    ping_timeout=10,
+                    ping_payload="ping",
+                    skip_utf8_validation=True,
+                )
             except Exception as exc:
                 log(f"[CLOB WS LOOP ERROR] {exc}")
             if self._stop.is_set():
                 break
-            time.sleep(3)
+
+            # If we were receiving messages recently, treat it as a transient close and reconnect fast.
+            since_last = time.time() - float(self._last_msg_ts or 0.0)
+            if 0 <= since_last <= 10.0:
+                wait_s = 2.0
+            else:
+                wait_s = _calc_backoff_sec(attempt)
+            log(f"[CLOB WS RECONNECT] in={round(wait_s, 2)}s last_msg_age={round(since_last, 2)}s")
+            time.sleep(wait_s)
 
 
 def _round_to_tick(value: float, tick_size: float) -> float:
