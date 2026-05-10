@@ -365,6 +365,7 @@ STRATEGY_MODE = str(_bot_settings.get("strategy_mode", "") or "").strip().lower(
 LAG_REACT_TIME_LEFT_MIN = float(_bot_settings.get("lag_react_time_left_min", 60) or 60)
 LAG_REACT_TIME_LEFT_MAX = float(_bot_settings.get("lag_react_time_left_max", 120) or 120)
 LAG_REACT_GAP_MIN_DOWN = float(_bot_settings.get("lag_react_gap_min_down", 0.25) or 0.25)
+LAG_REACT_GAP_MIN_UP = float(_bot_settings.get("lag_react_gap_min_up", 0.25) or 0.25)
 LAG_REACT_ABS_DELTA_MIN_UP = float(_bot_settings.get("lag_react_abs_delta_min_up", 0.005) or 0.005)
 LAG_REACT_UNDERPRICING_MIN_UP = float(_bot_settings.get("lag_react_underpricing_min_up", -0.6) or -0.6)
 CORE_EV_ENTRY_TIME_MIN = float(_bot_settings.get("core_ev_entry_time_min", 10) or 10)
@@ -4082,9 +4083,15 @@ class CryptoBot:
                 delta_pct_local = float(ta.get("delta_pct", 0) or 0)
                 if side == "Down" and gap >= LAG_REACT_GAP_MIN_DOWN:
                     return True, f"lag_react_v1 down: gap={gap:+.3f}>= {LAG_REACT_GAP_MIN_DOWN:.3f} tl={tl:.1f}"
-                if side == "Up" and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP:
+                if (
+                    side == "Up"
+                    and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP
+                    and gap >= LAG_REACT_GAP_MIN_UP
+                    and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP
+                ):
                     return True, (
                         f"lag_react_v1 up: abs_delta={abs(delta_pct_local):.4f}>= {LAG_REACT_ABS_DELTA_MIN_UP:.4f} "
+                        f"gap={gap:+.3f}>= {LAG_REACT_GAP_MIN_UP:.3f} "
                         f"underpricing={underpricing:+.3f}>= {LAG_REACT_UNDERPRICING_MIN_UP:+.3f} tl={tl:.1f}"
                     )
             except Exception:
@@ -4372,7 +4379,12 @@ class CryptoBot:
                         # - Up performs when abs(delta) is non-trivial (and optionally underpricing not too negative).
                         if side == "Down" and gap >= LAG_REACT_GAP_MIN_DOWN:
                             strategy_forced = True
-                        elif side == "Up" and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP:
+                        elif (
+                            side == "Up"
+                            and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP
+                            and gap >= LAG_REACT_GAP_MIN_UP
+                            and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP
+                        ):
                             strategy_forced = True
                 except Exception:
                     strategy_forced = False
@@ -4387,6 +4399,7 @@ class CryptoBot:
             signal_data["strategy_forced_reason"] = (
                 f"lag_react_v1 override: tl={seconds_left:.1f} side={market.get('winner_side')} "
                 f"gap={float(snapshot.get('pm_vs_delta_gap', 0) or 0):+.3f} abs_delta={abs(float(ta.get('delta_pct', 0) or 0)):.4f}"
+                f" up_gap_min={LAG_REACT_GAP_MIN_UP:.3f}"
             )
             log(f"   [{crypto}] STRATEGY OVERRIDE — lag_react_v1 forces entry (core_ev={core_ev_decision})")
 
