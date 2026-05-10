@@ -323,7 +323,9 @@ def _bucket_imbalance(x: float | None) -> str:
     return ">=0.05"
 
 
-def summarize_realized_pnl_buckets(records: list[dict], *, min_trades: int = 3, top: int = 25) -> list[dict]:
+def summarize_realized_pnl_buckets(records: list[dict], *,
+                                  min_trades: int = 3, top: int = 25,
+                                  dims: str = "full") -> list[dict]:
     """Bucket realized pnl for entered+resolved trades.
 
     Purpose: quickly see which contexts (spread/imbalance/time_left/tier) are profitable.
@@ -331,6 +333,10 @@ def summarize_realized_pnl_buckets(records: list[dict], *, min_trades: int = 3, 
     resolved = [r for r in records if bool(r.get("entered")) and r.get("realized_pnl") is not None]
     buckets: dict[str, list[float]] = defaultdict(list)
     bucket_wins: dict[str, int] = defaultdict(int)
+
+    dims = str(dims or "full").strip().lower()
+    if dims not in {"full", "coarse"}:
+        dims = "full"
 
     for r in resolved:
         pnl = _safe_float(r.get("realized_pnl"), default=None)
@@ -340,7 +346,10 @@ def summarize_realized_pnl_buckets(records: list[dict], *, min_trades: int = 3, 
         imb_bucket = _bucket_imbalance(_safe_float(r.get("book_imbalance_at_entry"), default=None))
         tl_bucket = _bucket_time_left(_safe_float(r.get("time_left"), default=None))
         tier = str(r.get("signal_tier", "") or "").strip() or "unknown"
-        key = f"spread={spread_bucket} | imb={imb_bucket} | tl={tl_bucket} | tier={tier}"
+        if dims == "coarse":
+            key = f"spread={spread_bucket} | imb={imb_bucket}"
+        else:
+            key = f"spread={spread_bucket} | imb={imb_bucket} | tl={tl_bucket} | tier={tier}"
         buckets[key].append(pnl)
         if bool(r.get("won")):
             bucket_wins[key] += 1
@@ -375,6 +384,8 @@ def main() -> int:
         default="",
         help="Only include records with timestamp >= this UTC ISO string (e.g. 2026-05-09T00:00:00Z)",
     )
+    ap.add_argument("--pnl-bucket-min-trades", type=int, default=3)
+    ap.add_argument("--pnl-bucket-dims", choices=["coarse", "full"], default="full")
     args = ap.parse_args()
 
     if args.source == "signals":
@@ -395,7 +406,11 @@ def main() -> int:
 
     maker = summarize_maker_entry(records)
     pnl = summarize_realized_pnl(records)
-    pnl_buckets = summarize_realized_pnl_buckets(records)
+    pnl_buckets = summarize_realized_pnl_buckets(
+        records,
+        min_trades=max(1, int(args.pnl_bucket_min_trades or 1)),
+        dims=str(args.pnl_bucket_dims or "full"),
+    )
     skips = summarize_counterfactual_skips(records) if args.source == "window_samples" else None
 
     print("=== MAKER ENTRY (Phase 1) ===")
@@ -487,7 +502,9 @@ def main() -> int:
         print(f"pnl avg/sum/min/max: {pnl['pnl_avg']} / {pnl['pnl_sum']} / {pnl['pnl_min']} / {pnl['pnl_max']}")
 
     if pnl_buckets:
-        print("\n=== REALIZED PNL BREAKDOWN (top buckets, min_trades=3) ===")
+        print(
+            f"\n=== REALIZED PNL BREAKDOWN (top buckets, min_trades={max(1, int(args.pnl_bucket_min_trades or 1))}, dims={args.pnl_bucket_dims}) ==="
+        )
         for row in pnl_buckets:
             print(
                 f"  - trades={row['trades']} win_rate={row['win_rate_pct']}% "
