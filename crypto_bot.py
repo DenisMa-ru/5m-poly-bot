@@ -1743,12 +1743,20 @@ class ClobWsMarketData:
 
     def _update_book(self, asset_id: str, bids, asks):
         try:
+            def _price_of(row) -> float:
+                if isinstance(row, dict):
+                    return float(row.get("price", 0) or 0)
+                if isinstance(row, (list, tuple)) and len(row) >= 1:
+                    return float(row[0] or 0)
+                return 0.0
+
             best_bid = 0.0
             if isinstance(bids, list) and bids:
-                best_bid = max(float(row[0]) for row in bids if isinstance(row, (list, tuple)) and len(row) >= 2)
+                best_bid = max((_price_of(row) for row in bids), default=0.0)
             best_ask = 0.0
             if isinstance(asks, list) and asks:
-                best_ask = min(float(row[0]) for row in asks if isinstance(row, (list, tuple)) and len(row) >= 2)
+                ask_prices = [price for price in (_price_of(row) for row in asks) if price > 0]
+                best_ask = min(ask_prices, default=0.0)
             spread = (best_ask - best_bid) if best_bid > 0 and best_ask > 0 else 0.0
         except Exception:
             return
@@ -1795,6 +1803,24 @@ class ClobWsMarketData:
                 payload = payload[:80]
             log(f"[CLOB WS PONG] conn={self._conn_id} payload={payload}")
 
+        def _update_best(asset_id: str, best_bid, best_ask):
+            try:
+                bid = float(best_bid or 0)
+                ask = float(best_ask or 0)
+            except Exception:
+                return
+            if bid <= 0 and ask <= 0:
+                return
+            spread = (ask - bid) if bid > 0 and ask > 0 else 0.0
+            with self._lock:
+                current = self._books.get(str(asset_id), {})
+                self._books[str(asset_id)] = {
+                    "ts": time.time(),
+                    "best_bid": bid if bid > 0 else float(current.get("best_bid", 0) or 0),
+                    "best_ask": ask if ask > 0 else float(current.get("best_ask", 0) or 0),
+                    "spread": spread if spread > 0 else float(current.get("spread", 0) or 0),
+                }
+
         def on_message(ws, message):
             try:
                 obj = json.loads(message)
@@ -1816,12 +1842,26 @@ class ClobWsMarketData:
                     preview = str(obj)[:350]
                 log(f"[CLOB WS MSG] conn={self._conn_id} n={self._msg_seen} {preview}")
 
-            if msg_type != "book":
-                return
             asset_id = str(obj.get("asset_id") or "")
-            if not asset_id:
+            bids = obj.get("bids")
+            asks = obj.get("asks")
+            if asset_id and isinstance(bids, list) and isinstance(asks, list):
+                self._update_book(asset_id, bids, asks)
                 return
-            self._update_book(asset_id, obj.get("bids"), obj.get("asks"))
+
+            price_changes = obj.get("price_changes")
+            if isinstance(price_changes, list):
+                for row in price_changes:
+                    if not isinstance(row, dict):
+                        continue
+                    row_asset_id = str(row.get("asset_id") or "")
+                    if not row_asset_id:
+                        continue
+                    _update_best(row_asset_id, row.get("best_bid"), row.get("best_ask"))
+                return
+
+            if msg_type and self._msg_seen <= 10:
+                log(f"[CLOB WS SKIP] conn={self._conn_id} type={msg_type}")
 
         def on_error(ws, error):
             log(f"[CLOB WS ERROR] {error}")
