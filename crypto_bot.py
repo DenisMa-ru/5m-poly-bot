@@ -358,6 +358,15 @@ PRICE_MAX_STRONG  = float(_bot_settings.get("price_max_strong", max(float(PRICE_
 OBSERVE_WINDOW_SECONDS = int(_bot_settings.get("observe_window_seconds", 305) or 305)
 FULL_WINDOW_CORE_EV_ENABLED = bool(_bot_settings.get("full_window_core_ev_enabled", True))
 WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_enabled", True))
+
+# Research-driven strategy override layer (optional).
+# When STRATEGY_MODE is set, it may force entry even when Core-EV would deny.
+STRATEGY_MODE = str(_bot_settings.get("strategy_mode", "") or "").strip().lower()
+LAG_REACT_TIME_LEFT_MIN = float(_bot_settings.get("lag_react_time_left_min", 60) or 60)
+LAG_REACT_TIME_LEFT_MAX = float(_bot_settings.get("lag_react_time_left_max", 120) or 120)
+LAG_REACT_GAP_MIN_DOWN = float(_bot_settings.get("lag_react_gap_min_down", 0.25) or 0.25)
+LAG_REACT_ABS_DELTA_MIN_UP = float(_bot_settings.get("lag_react_abs_delta_min_up", 0.005) or 0.005)
+LAG_REACT_UNDERPRICING_MIN_UP = float(_bot_settings.get("lag_react_underpricing_min_up", -0.6) or -0.6)
 CORE_EV_ENTRY_TIME_MIN = float(_bot_settings.get("core_ev_entry_time_min", 10) or 10)
 CORE_EV_ENTRY_TIME_MAX = float(_bot_settings.get("core_ev_entry_time_max", max(10, OBSERVE_WINDOW_SECONDS)) or max(10, OBSERVE_WINDOW_SECONDS))
 FULL_WINDOW_CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("full_window_core_ev_time_left_max", 180) or 180)
@@ -4263,9 +4272,39 @@ class CryptoBot:
                 persist_record()
                 return
         if core_ev_decision not in {"allow", "strong_allow", "micro_allow"}:
-            signal_data["reason"] = f"core ev {core_ev_decision} | {signal_data['core_ev_reason']}"
-            persist_record()
-            return
+            # Strategy override (aggressive): allow entry based on research-driven rules.
+            # This is intended for dry-run experimentation only; keep Phase 2 disabled.
+            strategy_forced = False
+            if STRATEGY_MODE == "lag_react_v1":
+                try:
+                    tl = float(seconds_left or 0)
+                    if LAG_REACT_TIME_LEFT_MIN <= tl <= LAG_REACT_TIME_LEFT_MAX:
+                        side = str(market.get("winner_side") or "")
+                        gap = float(snapshot.get("pm_vs_delta_gap", 0) or signal_data.get("pm_vs_delta_gap", 0) or 0)
+                        underpricing = float(snapshot.get("underpricing_score", 0) or signal_data.get("underpricing_score", 0) or 0)
+                        delta_pct_local = float(ta.get("delta_pct", 0) or 0)
+                        # Research finding:
+                        # - Down performs when pm_vs_delta_gap is high.
+                        # - Up performs when abs(delta) is non-trivial (and optionally underpricing not too negative).
+                        if side == "Down" and gap >= LAG_REACT_GAP_MIN_DOWN:
+                            strategy_forced = True
+                        elif side == "Up" and abs(delta_pct_local) >= LAG_REACT_ABS_DELTA_MIN_UP and underpricing >= LAG_REACT_UNDERPRICING_MIN_UP:
+                            strategy_forced = True
+                except Exception:
+                    strategy_forced = False
+
+            if not strategy_forced:
+                signal_data["reason"] = f"core ev {core_ev_decision} | {signal_data['core_ev_reason']}"
+                persist_record()
+                return
+
+            signal_data["strategy_mode"] = STRATEGY_MODE
+            signal_data["strategy_forced_entry"] = True
+            signal_data["strategy_forced_reason"] = (
+                f"lag_react_v1 override: tl={seconds_left:.1f} side={market.get('winner_side')} "
+                f"gap={float(snapshot.get('pm_vs_delta_gap', 0) or 0):+.3f} abs_delta={abs(float(ta.get('delta_pct', 0) or 0)):.4f}"
+            )
+            log(f"   [{crypto}] STRATEGY OVERRIDE — lag_react_v1 forces entry (core_ev={core_ev_decision})")
 
         allow_full_window_entry, full_window_reason = self._should_take_full_window_entry(
             slug,
