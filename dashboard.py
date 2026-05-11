@@ -1341,6 +1341,7 @@ def build_dashboard_state(
 
     # Skip reasons breakdown
     skip_reasons = {}
+    ws_skip_reasons = {"ws_confirm_fail": 0, "ws_unstable": 0, "ws_missing": 0, "ws_stale": 0, "other": 0}
     for s in skipped:
         reason = s.get("reason", "other")
         coin = str(s.get("coin", "") or "").upper()
@@ -1360,6 +1361,18 @@ def build_dashboard_state(
         else:
             key = "other"
         skip_reasons[key] = skip_reasons.get(key, 0) + 1
+
+        reason_l = str(reason or "").lower()
+        if "ws trend confirmation failed" in reason_l:
+            ws_skip_reasons["ws_confirm_fail"] += 1
+        elif "ws unstable" in reason_l:
+            ws_skip_reasons["ws_unstable"] += 1
+        elif "requires ws orderbook" in reason_l:
+            ws_skip_reasons["ws_missing"] += 1
+        elif "ws stale" in reason_l:
+            ws_skip_reasons["ws_stale"] += 1
+        else:
+            ws_skip_reasons["other"] += 1
 
     # Последние сигналы (любые, не только вошедшие)
     last_signals = signals[-20:]
@@ -1382,6 +1395,23 @@ def build_dashboard_state(
     shadow_live_mode = "unknown"
     if shadow_live_signals:
         shadow_live_mode = str(shadow_live_signals[-1].get("shadow_live_mode", "unknown") or "unknown")
+
+    trend_profiles = {"trend_regime_probe": 0, "trend_early": 0, "trend_pullback_resume": 0, "late_lock": 0, "other": 0}
+    ws_confirm_counts = {"true": 0, "false": 0, "unknown": 0}
+    for s in signals[-150:]:
+        profile = str(s.get("shadow_entry_profile", "") or "")
+        if profile in trend_profiles:
+            trend_profiles[profile] += 1
+        elif profile and profile != "none":
+            trend_profiles["other"] += 1
+
+        ws_confirm = s.get("ws_confirm_trend")
+        if ws_confirm is True:
+            ws_confirm_counts["true"] += 1
+        elif ws_confirm is False:
+            ws_confirm_counts["false"] += 1
+        else:
+            ws_confirm_counts["unknown"] += 1
 
     # Последние цены BTC/ETH
     btc_price = None
@@ -1444,6 +1474,7 @@ def build_dashboard_state(
         "btc_pm": btc_pm,
         "eth_pm": eth_pm,
         "skip_reasons": skip_reasons,
+        "ws_skip_reasons": ws_skip_reasons,
         "last_signals": last_signals,
         "last_window_samples": last_window_samples,
         "last_entered": last_entered,
@@ -1455,6 +1486,8 @@ def build_dashboard_state(
         "shadow_live_mode": shadow_live_mode,
         "shadow_live_counts": shadow_live_counts,
         "shadow_live_total": len(shadow_live_signals),
+        "trend_profiles": trend_profiles,
+        "ws_confirm_counts": ws_confirm_counts,
         "core_ev_rules": core_ev_rules,
         "core_ev_rulebook_decisions": rulebook_decisions,
         "core_ev_rulebook_bucket_count": len(bucket_rows),
@@ -1923,6 +1956,38 @@ with tab_dashboard:
     q4.metric("Signals", D['total_signals'])
 
     st.markdown("---")
+    st.markdown("#### Новая стратегия: adaptive + WS confirm")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Shadow mode", str(D.get('shadow_live_mode') or 'unknown'))
+    s2.metric("WS confirm OK", int((D.get('ws_confirm_counts') or {}).get('true', 0)))
+    s3.metric("WS confirm FAIL", int((D.get('ws_confirm_counts') or {}).get('false', 0)))
+    s4.metric("Shadow DENY", int((D.get('shadow_live_counts') or {}).get('deny', 0)))
+
+    p1, p2 = st.columns(2)
+    with p1:
+        profile_rows = []
+        for key, value in (D.get("trend_profiles") or {}).items():
+            if value <= 0:
+                continue
+            profile_rows.append({"Profile": key, "Signals": value})
+        st.markdown("**Trend profiles (recent)**")
+        if profile_rows:
+            st.dataframe(profile_rows, width="stretch", hide_index=True, height=180)
+        else:
+            st.caption("Пока нет trend-profile сигналов.")
+    with p2:
+        ws_rows = []
+        for key, value in (D.get("ws_skip_reasons") or {}).items():
+            if value <= 0:
+                continue
+            ws_rows.append({"WS skip reason": key, "Count": value})
+        st.markdown("**WS-related skips**")
+        if ws_rows:
+            st.dataframe(ws_rows, width="stretch", hide_index=True, height=180)
+        else:
+            st.caption("WS skip-событий пока нет.")
+
+    st.markdown("---")
     st.markdown("#### Последние 5 сделок")
     recent_trade_rows = []
     for x in reversed(D['last_entered'][-5:]):
@@ -1981,7 +2046,7 @@ with tab_dashboard:
 # ==========================================
 with tab_stats:
     st.markdown("### 📈 Statistics")
-    st.caption("Только разбор решений, completed trades и лог. Всё второстепенное убрано.")
+    st.caption("Статистика только по новой логике: Core EV decisions, adaptive profiles, WS confirmation и completed trades.")
 
     if D['total_signals'] > 0:
         stat_n = st.selectbox("Период Core EV runtime", [50, 100, 200], index=2)
@@ -2013,6 +2078,26 @@ with tab_stats:
             st.dataframe(D['settled_trade_rows'], width="stretch", hide_index=True, height=320)
         else:
             st.caption("Пока нет завершённых сделок для таблицы разбора.")
+
+        st.markdown("---")
+        ws1, ws2 = st.columns(2)
+        with ws1:
+            st.markdown("**Adaptive / Shadow decisions**")
+            shadow_rows = []
+            for key in ("strong_allow", "allow", "watch", "deny", "neutral"):
+                shadow_rows.append({"Decision": key, "Count": int((D.get("shadow_live_counts") or {}).get(key, 0))})
+            st.dataframe(shadow_rows, width="stretch", hide_index=True, height=210)
+        with ws2:
+            st.markdown("**WS confirmation / skips**")
+            ws_rows = [
+                {"Metric": "ws_confirm_true", "Count": int((D.get("ws_confirm_counts") or {}).get("true", 0))},
+                {"Metric": "ws_confirm_false", "Count": int((D.get("ws_confirm_counts") or {}).get("false", 0))},
+                {"Metric": "ws_confirm_unknown", "Count": int((D.get("ws_confirm_counts") or {}).get("unknown", 0))},
+            ]
+            for key, value in (D.get("ws_skip_reasons") or {}).items():
+                if value > 0:
+                    ws_rows.append({"Metric": key, "Count": int(value)})
+            st.dataframe(ws_rows, width="stretch", hide_index=True, height=210)
 
         st.markdown("---")
         r1, r2 = st.columns(2)
@@ -2089,7 +2174,7 @@ with tab_stats:
 # ==========================================
 with tab_settings:
     st.markdown("### ⚙️ Settings")
-    st.markdown("<div class='safe-box'><strong>Основные настройки сверху.</strong> Тонкая калибровка спрятана в расширенный блок.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='safe-box'><strong>Настройки очищены под текущую стратегию.</strong> Оставлены только риск, maker-entry quality и adaptive/WS-confirm параметры.</div>", unsafe_allow_html=True)
     st.warning("Сохранение и перезапуск доступны только после ввода пароля, если он включён.")
 
     settings_password = os.getenv("DASHBOARD_PASSWORD", os.getenv("DASHBOARD_SETTINGS_PASSWORD", ""))
@@ -2115,10 +2200,10 @@ with tab_settings:
         new_settings["bank"] = float(new_settings["sim_bank"])
         new_settings["enabled_coins"] = st.multiselect("Активные монеты", ["BTC", "ETH"], default=settings.get("enabled_coins", ["BTC", "ETH"]))
 
-    with st.expander("Расширенные настройки: Core EV / full-window / L1 fallback / risk", expanded=False):
+    with st.expander("Стратегия и риск: adaptive / maker-entry / WS confirm", expanded=False):
         s1, s2, s3 = st.columns(3)
         with s1:
-            st.markdown("**Bank / Sizing**")
+            st.markdown("**Bank / Sizing / Daily Risk**")
             new_settings["daily_loss_limit"] = st.number_input("Дневной стоп-лосс (USDC)", min_value=1.0, max_value=1000.0, value=float(settings.get("daily_loss_limit", 15.0)), step=1.0)
             new_settings["daily_loss_limit_pct"] = st.slider("Дневной стоп-лосс (% от банка)", min_value=0.0, max_value=0.50, value=float(settings.get("daily_loss_limit_pct", 0.0)), step=0.05, format="%.2f")
             new_settings["dynamic_sizing"] = st.checkbox("Динамический размер ставки", value=bool(settings.get("dynamic_sizing", True)))
@@ -2130,38 +2215,40 @@ with tab_settings:
             new_settings["dynamic_max_risk_pct"] = st.slider("Макс риск", min_value=0.01, max_value=0.15, value=float(settings.get("dynamic_max_risk_pct", 0.08)), step=0.01, format="%.2f")
 
         with s2:
-            st.markdown("**Core EV / Full-Window**")
+            st.markdown("**Core EV / Time Window**")
             new_settings["core_ev_enabled"] = st.checkbox("Core EV enabled", value=bool(settings.get("core_ev_enabled", True)))
-            new_settings["core_ev_pm_min"] = st.number_input("Base PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_min", 0.58)), step=0.01, format="%.2f")
-            new_settings["core_ev_pm_max"] = st.number_input("Base PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_max", 0.70)), step=0.01, format="%.2f")
-            new_settings["core_ev_flex_pm_min"] = st.number_input("Flex PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_min", 0.50)), step=0.01, format="%.2f")
-            new_settings["core_ev_flex_pm_max"] = st.number_input("Flex PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_flex_pm_max", 0.99)), step=0.01, format="%.2f")
-            new_settings["core_ev_entry_time_min"] = st.number_input("Core EV entry time min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_entry_time_min", 10)), step=1)
-            new_settings["core_ev_entry_time_max"] = st.number_input("Core EV entry time max (s)", min_value=10, max_value=305, value=int(settings.get("core_ev_entry_time_max", 305)), step=5)
-            new_settings["core_ev_time_left_min"] = st.number_input("Core EV active time-left min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_time_left_min", settings.get("core_ev_entry_time_min", 10))), step=1)
-            new_settings["core_ev_time_left_max"] = st.number_input("Core EV active time-left max (s)", min_value=1, max_value=305, value=int(settings.get("core_ev_time_left_max", 20)), step=1)
-            new_settings["full_window_core_ev_enabled"] = st.checkbox("Full-window Core EV enabled", value=bool(settings.get("full_window_core_ev_enabled", True)))
-            new_settings["full_window_core_ev_time_left_max"] = st.number_input("Full-window eval max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_core_ev_time_left_max", 180)), step=5)
-            new_settings["full_window_core_ev_min_level"] = st.selectbox("Min Core EV bucket level", ["L1", "L2", "L3"], index=["L1", "L2", "L3"].index(str(settings.get("full_window_core_ev_min_level", "L2"))))
-            new_settings["full_window_entry_confirm_ticks"] = st.number_input("Confirm ticks", min_value=1, max_value=10, value=int(settings.get("full_window_entry_confirm_ticks", 2)), step=1)
-            new_settings["full_window_entry_commit_time_left"] = st.number_input("Commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_entry_commit_time_left", 19)), step=1)
-            new_settings["full_window_entry_min_score_gain"] = st.number_input("Min score gain to keep waiting", min_value=0.0, max_value=5.0, value=float(settings.get("full_window_entry_min_score_gain", 0.15)), step=0.05, format="%.2f")
-            new_settings["full_window_micro_entry_commit_time_left"] = st.number_input("Micro commit time left (s)", min_value=1, max_value=120, value=int(settings.get("full_window_micro_entry_commit_time_left", 30)), step=1)
-
-        with s3:
-            st.markdown("**L1 Fallback / Risk / Trend Conflict**")
-            new_settings["full_window_l1_fallback_min_trades"] = st.number_input("L1 fallback min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_fallback_min_trades", 8)), step=1)
-            new_settings["full_window_l1_fallback_require_recent_positive"] = st.checkbox("L1 fallback require recent positive", value=bool(settings.get("full_window_l1_fallback_require_recent_positive", True)))
-            new_settings["full_window_l1_fallback_time_left_max"] = st.number_input("L1 fallback max time left (s)", min_value=10, max_value=300, value=int(settings.get("full_window_l1_fallback_time_left_max", 150)), step=5)
-            new_settings["full_window_l1_strong_exception_min_trades"] = st.number_input("L1 strong exception min trades", min_value=1, max_value=100, value=int(settings.get("full_window_l1_strong_exception_min_trades", 2)), step=1)
-            new_settings["full_window_l1_strong_exception_min_roi"] = st.number_input("L1 strong exception min ROI %", min_value=-100.0, max_value=500.0, value=float(settings.get("full_window_l1_strong_exception_min_roi", 50.0)), step=1.0, format="%.1f")
+            new_settings["core_ev_pm_min"] = st.number_input("Core EV PM min", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_min", 0.58)), step=0.01, format="%.2f")
+            new_settings["core_ev_pm_max"] = st.number_input("Core EV PM max", min_value=0.01, max_value=1.0, value=float(settings.get("core_ev_pm_max", 0.70)), step=0.01, format="%.2f")
+            new_settings["core_ev_time_left_min"] = st.number_input("Core EV time-left min (s)", min_value=1, max_value=300, value=int(settings.get("core_ev_time_left_min", settings.get("core_ev_entry_time_min", 10))), step=1)
+            new_settings["core_ev_time_left_max"] = st.number_input("Core EV time-left max (s)", min_value=1, max_value=305, value=int(settings.get("core_ev_time_left_max", 20)), step=1)
             new_settings["core_ev_max_risk_pct"] = st.slider("Core EV max risk %", min_value=0.001, max_value=0.05, value=float(settings.get("core_ev_max_risk_pct", 0.02)), step=0.001, format="%.3f")
             new_settings["core_ev_micro_risk_pct"] = st.slider("Core EV micro risk %", min_value=0.001, max_value=0.02, value=float(settings.get("core_ev_micro_risk_pct", 0.005)), step=0.001, format="%.3f")
-            new_settings["core_ev_trend_conflict_micro_delta_min_pct"] = st.number_input("Trend-conflict micro delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("core_ev_trend_conflict_micro_delta_min_pct", 0.012)), step=0.001, format="%.3f")
-            new_settings["core_ev_trend_conflict_micro_confidence_min"] = st.number_input("Trend-conflict micro confidence min", min_value=0.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_confidence_min", 0.0)), step=0.01, format="%.2f")
-            new_settings["core_ev_trend_conflict_micro_indicator_min"] = st.number_input("Trend-conflict micro indicator min", min_value=-1.0, max_value=1.0, value=float(settings.get("core_ev_trend_conflict_micro_indicator_min", -0.10)), step=0.01, format="%.2f")
-            new_settings["trend_conflict_override_delta_min_pct"] = st.number_input("Trend conflict override delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("trend_conflict_override_delta_min_pct", 0.025)), step=0.001, format="%.3f")
+            new_settings["trend_conflict_override_delta_min_pct"] = st.number_input("Trend-conflict override delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("trend_conflict_override_delta_min_pct", 0.025)), step=0.001, format="%.3f")
+
+            st.markdown("**Maker-entry quality gates**")
+            new_settings["maker_entry_require_ws"] = st.checkbox("Require WS orderbook", value=bool(settings.get("maker_entry_require_ws", True)))
+            new_settings["maker_entry_max_ws_age_sec"] = st.number_input("Max WS age (s)", min_value=0.01, max_value=5.0, value=float(settings.get("maker_entry_max_ws_age_sec", 0.25)), step=0.01, format="%.2f")
+            new_settings["maker_entry_strict_max_spread"] = st.number_input("Max spread", min_value=0.0, max_value=0.10, value=float(settings.get("maker_entry_strict_max_spread", 0.01)), step=0.005, format="%.3f")
+            new_settings["maker_entry_precheck_enabled"] = st.checkbox("WS precheck enabled", value=bool(settings.get("maker_entry_precheck_enabled", True)))
+            new_settings["maker_entry_precheck_sleep_sec"] = st.number_input("WS precheck sleep (s)", min_value=0.05, max_value=2.0, value=float(settings.get("maker_entry_precheck_sleep_sec", 0.2)), step=0.05, format="%.2f")
+            new_settings["maker_entry_min_pm_minus_mid"] = st.number_input("Min PM - WS mid edge", min_value=0.0, max_value=0.20, value=float(settings.get("maker_entry_min_pm_minus_mid", 0.02)), step=0.005, format="%.3f")
+
+        with s3:
+            st.markdown("**Adaptive / Shadow / WS confirm**")
             new_settings["shadow_live_mode"] = st.selectbox("Shadow live mode", ["observe", "off", "block_deny", "hybrid"], index=["observe", "off", "block_deny", "hybrid"].index(str(settings.get("shadow_live_mode", "observe"))))
+            new_settings["shadow_live_allow_min_score"] = st.number_input("Shadow allow min score", min_value=0.0, max_value=20.0, value=float(settings.get("shadow_live_allow_min_score", 4.5)), step=0.5, format="%.1f")
+            new_settings["shadow_live_strong_allow_min_score"] = st.number_input("Shadow strong-allow min score", min_value=0.0, max_value=20.0, value=float(settings.get("shadow_live_strong_allow_min_score", 6.0)), step=0.5, format="%.1f")
+            new_settings["shadow_live_watch_min_score"] = st.number_input("Shadow watch min score", min_value=0.0, max_value=20.0, value=float(settings.get("shadow_live_watch_min_score", 3.0)), step=0.5, format="%.1f")
+            new_settings["shadow_pm_max"] = st.number_input("Shadow PM max", min_value=0.01, max_value=1.0, value=float(settings.get("shadow_pm_max", 0.76)), step=0.01, format="%.2f")
+            new_settings["shadow_underpricing_min"] = st.number_input("Shadow underpricing min", min_value=-1.0, max_value=1.0, value=float(settings.get("shadow_underpricing_min", 0.01)), step=0.01, format="%.2f")
+            new_settings["shadow_min_stable_ticks"] = st.number_input("Shadow min stable ticks", min_value=1, max_value=20, value=int(settings.get("shadow_min_stable_ticks", 3)), step=1)
+            new_settings["shadow_early_delta_min_pct"] = st.number_input("Shadow early delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("shadow_early_delta_min_pct", 0.010)), step=0.001, format="%.3f")
+            new_settings["shadow_late_delta_min_pct"] = st.number_input("Shadow late delta min %", min_value=0.0, max_value=0.2, value=float(settings.get("shadow_late_delta_min_pct", 0.015)), step=0.001, format="%.3f")
+
+            st.markdown("**WS trend confirmation**")
+            new_settings["shadow_ws_confirm_enabled"] = st.checkbox("Enable WS trend confirmation", value=bool(settings.get("shadow_ws_confirm_enabled", True)))
+            new_settings["shadow_ws_min_samples_3s"] = st.number_input("Min WS samples (3s)", min_value=1, max_value=50, value=int(settings.get("shadow_ws_min_samples_3s", 3)), step=1)
+            new_settings["shadow_ws_max_top_moves_3s"] = st.number_input("Max top-book moves (3s)", min_value=0, max_value=50, value=int(settings.get("shadow_ws_max_top_moves_3s", 6)), step=1)
             new_settings["window_sample_logging_enabled"] = st.checkbox("Window sample logging enabled", value=bool(settings.get("window_sample_logging_enabled", True)))
 
     # ===== BUTTONS =====
