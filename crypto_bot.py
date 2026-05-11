@@ -2454,6 +2454,27 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
     best_bid = result["best_bid_at_entry"]
     best_ask = result["best_ask_at_entry"]
     spread = result["spread_at_entry"]
+
+    # Final book sanity check right before price computation.
+    # If top-of-book moved, treat as a microstructure skip (not an "invalid price" bug).
+    if ws_market is not None:
+        try:
+            fresh = get_orderbook_summary_ws(ws_market, token_id, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+            if isinstance(fresh, dict) and fresh.get("ok") and fresh.get("source") == "ws":
+                fb = float(fresh.get("best_bid_price", 0) or 0)
+                fa = float(fresh.get("best_ask_price", 0) or 0)
+                if fb > 0 and fa > 0:
+                    # If best bid/ask changed since handoff snapshot, skip to avoid chasing.
+                    if abs(fb - best_bid) > 1e-9 or abs(fa - best_ask) > 1e-9:
+                        result["failure_type"] = "book_moved"
+                        result["detail"] = f"b/a moved {best_bid:.3f}/{best_ask:.3f}->{fb:.3f}/{fa:.3f}"
+                        result["maker_cancel_reason"] = "book_moved"
+                        return result
+                    best_bid = fb
+                    best_ask = fa
+                    spread = float(fresh.get("spread", 0) or 0)
+        except Exception:
+            pass
     if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
         result["failure_type"] = "empty_book"
         result["detail"] = f"best_bid={best_bid:.3f} best_ask={best_ask:.3f}"
