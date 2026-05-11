@@ -5576,7 +5576,7 @@ class CryptoBot:
                     "maker_fill_price": None,
                     "maker_fill_size": None,
                     "maker_fill_latency_ms": None,
-                    "maker_cancel_reason": "",
+                    "maker_cancel_reason": "skipped_edge_gate",
                     "fallback_used": False,
                 }
 
@@ -5601,7 +5601,7 @@ class CryptoBot:
                         "maker_fill_price": None,
                         "maker_fill_size": None,
                         "maker_fill_latency_ms": None,
-                        "maker_cancel_reason": "",
+                        "maker_cancel_reason": "skipped_ws_missing",
                         "fallback_used": False,
                     }
                 try:
@@ -5627,7 +5627,7 @@ class CryptoBot:
                         "maker_fill_price": None,
                         "maker_fill_size": None,
                         "maker_fill_latency_ms": None,
-                        "maker_cancel_reason": "",
+                        "maker_cancel_reason": "skipped_ws_stale",
                         "fallback_used": False,
                     }
 
@@ -5655,7 +5655,7 @@ class CryptoBot:
                     "maker_fill_price": None,
                     "maker_fill_size": None,
                     "maker_fill_latency_ms": None,
-                    "maker_cancel_reason": "",
+                    "maker_cancel_reason": "skipped_spread_too_wide",
                     "fallback_used": False,
                 }
 
