@@ -1757,6 +1757,7 @@ class ClobWsMarketData:
         self.enabled = bool(self.assets_ids) and websocket is not None
         self._lock = threading.Lock()
         self._books: dict[str, dict] = {}
+        self._history: dict[str, deque] = {}
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -1802,6 +1803,69 @@ class ClobWsMarketData:
             snap = self._books.get(str(asset_id))
             return dict(snap) if isinstance(snap, dict) else None
 
+    def get_micro_features(self, asset_id: str) -> dict:
+        if not asset_id:
+            return {}
+        now_ts = time.time()
+        with self._lock:
+            rows = list(self._history.get(str(asset_id), deque()))
+        if not rows:
+            return {}
+
+        latest = rows[-1]
+        latest_mid = float(latest.get("mid", 0) or 0)
+        latest_bid = float(latest.get("best_bid", 0) or 0)
+        latest_ask = float(latest.get("best_ask", 0) or 0)
+
+        def _pick_older(seconds: float):
+            target = now_ts - seconds
+            chosen = rows[0]
+            for row in rows:
+                if float(row.get("ts", 0) or 0) <= target:
+                    chosen = row
+                else:
+                    break
+            return chosen
+
+        prev_1s = _pick_older(1.0)
+        prev_3s = _pick_older(3.0)
+        top_moves_3s = 0
+        recent_3s = [row for row in rows if now_ts - float(row.get("ts", 0) or 0) <= 3.0]
+        last_pair = None
+        for row in recent_3s:
+            pair = (float(row.get("best_bid", 0) or 0), float(row.get("best_ask", 0) or 0))
+            if last_pair is not None and pair != last_pair:
+                top_moves_3s += 1
+            last_pair = pair
+
+        bid_up_moves_3s = 0
+        ask_down_moves_3s = 0
+        prev_bid = None
+        prev_ask = None
+        for row in recent_3s:
+            bid = float(row.get("best_bid", 0) or 0)
+            ask = float(row.get("best_ask", 0) or 0)
+            if prev_bid is not None and bid > prev_bid:
+                bid_up_moves_3s += 1
+            if prev_ask is not None and ask < prev_ask:
+                ask_down_moves_3s += 1
+            prev_bid = bid
+            prev_ask = ask
+
+        mid_1s = latest_mid - float(prev_1s.get("mid", 0) or 0)
+        mid_3s = latest_mid - float(prev_3s.get("mid", 0) or 0)
+        return {
+            "ws_mid_price": round(latest_mid, 4),
+            "ws_best_bid": round(latest_bid, 4),
+            "ws_best_ask": round(latest_ask, 4),
+            "ws_mid_change_1s": round(mid_1s, 4),
+            "ws_mid_change_3s": round(mid_3s, 4),
+            "ws_top_moves_3s": int(top_moves_3s),
+            "ws_bid_up_moves_3s": int(bid_up_moves_3s),
+            "ws_ask_down_moves_3s": int(ask_down_moves_3s),
+            "ws_samples_3s": int(len(recent_3s)),
+        }
+
     def _update_book(self, asset_id: str, bids, asks):
         try:
             def _price_of(row) -> float:
@@ -1829,6 +1893,15 @@ class ClobWsMarketData:
                 "best_ask": float(best_ask or 0),
                 "spread": float(spread or 0),
             }
+            hist = self._history.setdefault(str(asset_id), deque(maxlen=256))
+            mid = ((best_bid + best_ask) / 2.0) if best_bid > 0 and best_ask > 0 else 0.0
+            hist.append({
+                "ts": time.time(),
+                "best_bid": float(best_bid or 0),
+                "best_ask": float(best_ask or 0),
+                "spread": float(spread or 0),
+                "mid": float(mid or 0),
+            })
 
     def _run(self):
         url = f"{WS_CLOB_HOST}/ws/market"
@@ -3527,6 +3600,14 @@ class CryptoBot:
         except Exception:
             vol_features = {}
 
+        ws_features = {}
+        try:
+            winner_token = str(market.get("winner_token") or "")
+            if winner_token and getattr(self, "ws_market", None) is not None:
+                ws_features = self.ws_market.get_micro_features(winner_token)
+        except Exception:
+            ws_features = {}
+
         signal_data = {
             "timestamp": ts_str(),
             "entry_time": ts_str(),
@@ -3585,6 +3666,15 @@ class CryptoBot:
             "maker_fill_latency_ms": None,
             "maker_cancel_reason": "",
             "fallback_used": False,
+            "ws_mid_price": None,
+            "ws_best_bid": None,
+            "ws_best_ask": None,
+            "ws_mid_change_1s": None,
+            "ws_mid_change_3s": None,
+            "ws_top_moves_3s": None,
+            "ws_bid_up_moves_3s": None,
+            "ws_ask_down_moves_3s": None,
+            "ws_samples_3s": None,
             "execution_entry_price": None,
             "maker_exit_enabled": False,
             "exit_attempted": False,
@@ -3647,6 +3737,9 @@ class CryptoBot:
             "core_ev_recent_trades": 0,
             "core_ev_size_fraction": 0.0,
         }
+
+        if ws_features:
+            signal_data.update(ws_features)
 
         shadow_live_decision = str(shadow_live.get("decision", "neutral") or "neutral")
         shadow_live_reason = str(shadow_live.get("reason", "") or "")
