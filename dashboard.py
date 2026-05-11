@@ -285,15 +285,39 @@ def load_window_samples():
     """Load full-window observation samples."""
     try:
         if WINDOW_SAMPLES_JSONL_FILE.exists():
-            tail = deque(maxlen=50000)
-            with WINDOW_SAMPLES_JSONL_FILE.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    tail.append(line)
+            max_lines = int(os.getenv("DASHBOARD_WINDOW_SAMPLES_TAIL_LINES", "5000") or 5000)
+            max_bytes = int(os.getenv("DASHBOARD_WINDOW_SAMPLES_TAIL_BYTES", "5000000") or 5000000)
+
+            def _tail_lines(path: Path, *, max_lines: int, max_bytes: int) -> list[str]:
+                if max_lines <= 0:
+                    return []
+                try:
+                    size = path.stat().st_size
+                except Exception:
+                    size = 0
+                if size <= 0:
+                    return []
+
+                read_size = min(int(max_bytes), int(size))
+                try:
+                    with path.open("rb") as fh:
+                        fh.seek(-read_size, 2)
+                        chunk = fh.read(read_size)
+                except Exception:
+                    return []
+
+                try:
+                    text = chunk.decode("utf-8", "ignore")
+                except Exception:
+                    return []
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                if not lines:
+                    return []
+                return lines[-int(max_lines):]
+
+            raws = _tail_lines(WINDOW_SAMPLES_JSONL_FILE, max_lines=max_lines, max_bytes=max_bytes)
             samples = []
-            for raw in tail:
+            for raw in raws:
                 try:
                     obj = json.loads(raw)
                 except Exception:
