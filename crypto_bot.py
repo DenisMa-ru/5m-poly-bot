@@ -427,6 +427,9 @@ MAKER_ENTRY_MIN_FILL_RATIO = float(_bot_settings.get("maker_entry_min_fill_ratio
 # Execution-first gating (WS orderbook quality)
 MAKER_ENTRY_REQUIRE_WS = _as_bool(_bot_settings.get("maker_entry_require_ws"), True)
 MAKER_ENTRY_MAX_WS_AGE_SEC = float(_bot_settings.get("maker_entry_max_ws_age_sec", 0.25) or 0.25)
+MAKER_ENTRY_STRICT_MAX_SPREAD = float(_bot_settings.get("maker_entry_strict_max_spread", 0.01) or 0.01)
+MAKER_ENTRY_PRECHECK_ENABLED = _as_bool(_bot_settings.get("maker_entry_precheck_enabled"), True)
+MAKER_ENTRY_PRECHECK_SLEEP_SEC = float(_bot_settings.get("maker_entry_precheck_sleep_sec", 0.2) or 0.2)
 
 # Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
 MAKER_EXIT_ENABLED = bool(_bot_settings.get("maker_exit_enabled", False))
@@ -5391,6 +5394,40 @@ class CryptoBot:
                     signal_data["reason"] = f"ws stale (age={age:.3f}s)"
                     save_signal(signal_data)
                     return
+
+            # Strict spread gate (execution-first): skip when spread is above 1 tick.
+            try:
+                spread_now = float(orderbook.get("spread", 0) or 0) if isinstance(orderbook, dict) else 0.0
+            except Exception:
+                spread_now = 0.0
+            if spread_now > MAKER_ENTRY_STRICT_MAX_SPREAD + 1e-12:
+                log(f"   [{crypto}] SKIP — spread too wide for maker-entry (spread={spread_now:.3f} > {MAKER_ENTRY_STRICT_MAX_SPREAD:.3f})")
+                signal_data["reason"] = f"spread too wide ({spread_now:.3f})"
+                save_signal(signal_data)
+                return
+
+            # Microstructure stability precheck: confirm book is stable for a short interval.
+            if MAKER_ENTRY_PRECHECK_ENABLED and MAKER_ENTRY_PRECHECK_SLEEP_SEC > 0:
+                try:
+                    b0 = float(orderbook.get("best_bid_price", 0) or 0)
+                    a0 = float(orderbook.get("best_ask_price", 0) or 0)
+                    time.sleep(max(0.05, MAKER_ENTRY_PRECHECK_SLEEP_SEC))
+                    ob2 = get_orderbook_summary_ws(self.ws_market, market["winner_token"], depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+                    b1 = float(ob2.get("best_bid_price", 0) or 0) if isinstance(ob2, dict) else 0.0
+                    a1 = float(ob2.get("best_ask_price", 0) or 0) if isinstance(ob2, dict) else 0.0
+                    if b0 <= 0 or a0 <= 0 or b1 <= 0 or a1 <= 0:
+                        log(f"   [{crypto}] SKIP — unstable WS book (empty during precheck)")
+                        signal_data["reason"] = "ws unstable (empty during precheck)"
+                        save_signal(signal_data)
+                        return
+                    # If top-of-book moved, skip to avoid chasing / adverse selection.
+                    if abs(b1 - b0) > 1e-9 or abs(a1 - a0) > 1e-9:
+                        log(f"   [{crypto}] SKIP — unstable WS book (b/a moved during precheck {b0:.3f}/{a0:.3f}->{b1:.3f}/{a1:.3f})")
+                        signal_data["reason"] = "ws unstable (top moved)"
+                        save_signal(signal_data)
+                        return
+                except Exception:
+                    pass
         signal_age_sec = 0.0
         sig_ts_str = str(signal_data.get("timestamp", "") or "")
         if sig_ts_str:
