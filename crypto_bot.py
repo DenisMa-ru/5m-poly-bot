@@ -5534,15 +5534,43 @@ class CryptoBot:
                 )
 
             # Edge gate: require PM to be sufficiently above WS midpoint to compensate microstructure risk.
+            pm_minus_mid = 0.0
             try:
-                pm_minus_mid = float(snapshot.get("pm_minus_clob_mid_at_entry", signal_data.get("pm_minus_clob_mid_at_entry", 0)) or 0)
+                bid = float(orderbook.get("best_bid_price", 0) or 0) if isinstance(orderbook, dict) else 0.0
+                ask = float(orderbook.get("best_ask_price", 0) or 0) if isinstance(orderbook, dict) else 0.0
+                mid = ((bid + ask) / 2.0) if bid > 0 and ask > 0 else 0.0
+                pm_minus_mid = float(market_prob or 0) - float(mid or 0)
             except Exception:
                 pm_minus_mid = 0.0
             if pm_minus_mid < MAKER_ENTRY_MIN_PM_MINUS_MID - 1e-12:
+                detail = f"edge gate pm-mid={pm_minus_mid:+.3f}"
                 log(f"   [{crypto}] SKIP — insufficient edge (pm-mid={pm_minus_mid:+.3f} < {MAKER_ENTRY_MIN_PM_MINUS_MID:+.3f})")
-                signal_data["reason"] = f"edge gate pm-mid={pm_minus_mid:+.3f}"
+                signal_data["reason"] = detail
                 save_signal(signal_data)
-                return
+                return {
+                    "ok": False,
+                    "failure_type": "skipped",
+                    "detail": detail,
+                    "order_status": "skipped",
+                    "order_id": "",
+                    "execution_mode": entry_execution_mode,
+                    "post_only": True,
+                    "limit_price": None,
+                    "best_bid_at_entry": bid if 'bid' in locals() else None,
+                    "best_ask_at_entry": ask if 'ask' in locals() else None,
+                    "spread_at_entry": orderbook.get("spread") if isinstance(orderbook, dict) else None,
+                    "bid_depth_top_n": orderbook.get("bid_depth") if isinstance(orderbook, dict) else None,
+                    "ask_depth_top_n": orderbook.get("ask_depth") if isinstance(orderbook, dict) else None,
+                    "book_imbalance_at_entry": orderbook.get("book_imbalance") if isinstance(orderbook, dict) else None,
+                    "signal_age_sec_at_order_submit": None,
+                    "order_rest_seconds": 0.0,
+                    "maker_filled": False,
+                    "maker_fill_price": None,
+                    "maker_fill_size": None,
+                    "maker_fill_latency_ms": None,
+                    "maker_cancel_reason": "",
+                    "fallback_used": False,
+                }
 
             # Pre-entry gating: execution-first. Skip maker-entry when WS is missing/stale.
             if MAKER_ENTRY_REQUIRE_WS:
@@ -5550,7 +5578,24 @@ class CryptoBot:
                     log(f"   [{crypto}] SKIP — maker_entry requires WS orderbook")
                     signal_data["reason"] = "maker_entry requires WS orderbook"
                     save_signal(signal_data)
-                    return
+                    return {
+                        "ok": False,
+                        "failure_type": "skipped",
+                        "detail": "maker_entry requires WS orderbook",
+                        "order_status": "skipped",
+                        "order_id": "",
+                        "execution_mode": entry_execution_mode,
+                        "post_only": True,
+                        "limit_price": None,
+                        "signal_age_sec_at_order_submit": None,
+                        "order_rest_seconds": 0.0,
+                        "maker_filled": False,
+                        "maker_fill_price": None,
+                        "maker_fill_size": None,
+                        "maker_fill_latency_ms": None,
+                        "maker_cancel_reason": "",
+                        "fallback_used": False,
+                    }
                 try:
                     age = float(orderbook.get("ws_age_sec", 999) or 999)
                 except Exception:
@@ -5559,7 +5604,24 @@ class CryptoBot:
                     log(f"   [{crypto}] SKIP — WS orderbook stale (age={age:.3f}s > {MAKER_ENTRY_MAX_WS_AGE_SEC:.3f}s)")
                     signal_data["reason"] = f"ws stale (age={age:.3f}s)"
                     save_signal(signal_data)
-                    return
+                    return {
+                        "ok": False,
+                        "failure_type": "skipped",
+                        "detail": f"ws stale (age={age:.3f}s)",
+                        "order_status": "skipped",
+                        "order_id": "",
+                        "execution_mode": entry_execution_mode,
+                        "post_only": True,
+                        "limit_price": None,
+                        "signal_age_sec_at_order_submit": None,
+                        "order_rest_seconds": 0.0,
+                        "maker_filled": False,
+                        "maker_fill_price": None,
+                        "maker_fill_size": None,
+                        "maker_fill_latency_ms": None,
+                        "maker_cancel_reason": "",
+                        "fallback_used": False,
+                    }
 
             # Strict spread gate (execution-first): skip when spread is above 1 tick.
             try:
@@ -5570,7 +5632,24 @@ class CryptoBot:
                 log(f"   [{crypto}] SKIP — spread too wide for maker-entry (spread={spread_now:.3f} > {MAKER_ENTRY_STRICT_MAX_SPREAD:.3f})")
                 signal_data["reason"] = f"spread too wide ({spread_now:.3f})"
                 save_signal(signal_data)
-                return
+                return {
+                    "ok": False,
+                    "failure_type": "skipped",
+                    "detail": f"spread too wide ({spread_now:.3f})",
+                    "order_status": "skipped",
+                    "order_id": "",
+                    "execution_mode": entry_execution_mode,
+                    "post_only": True,
+                    "limit_price": None,
+                    "signal_age_sec_at_order_submit": None,
+                    "order_rest_seconds": 0.0,
+                    "maker_filled": False,
+                    "maker_fill_price": None,
+                    "maker_fill_size": None,
+                    "maker_fill_latency_ms": None,
+                    "maker_cancel_reason": "",
+                    "fallback_used": False,
+                }
 
             # Microstructure stability precheck: confirm book is stable for a short interval.
             if MAKER_ENTRY_PRECHECK_ENABLED and MAKER_ENTRY_PRECHECK_SLEEP_SEC > 0:
@@ -5585,13 +5664,47 @@ class CryptoBot:
                         log(f"   [{crypto}] SKIP — unstable WS book (empty during precheck)")
                         signal_data["reason"] = "ws unstable (empty during precheck)"
                         save_signal(signal_data)
-                        return
+                        return {
+                            "ok": False,
+                            "failure_type": "skipped",
+                            "detail": "ws unstable (empty during precheck)",
+                            "order_status": "skipped",
+                            "order_id": "",
+                            "execution_mode": entry_execution_mode,
+                            "post_only": True,
+                            "limit_price": None,
+                            "signal_age_sec_at_order_submit": None,
+                            "order_rest_seconds": 0.0,
+                            "maker_filled": False,
+                            "maker_fill_price": None,
+                            "maker_fill_size": None,
+                            "maker_fill_latency_ms": None,
+                            "maker_cancel_reason": "",
+                            "fallback_used": False,
+                        }
                     # If top-of-book moved, skip to avoid chasing / adverse selection.
                     if abs(b1 - b0) > 1e-9 or abs(a1 - a0) > 1e-9:
                         log(f"   [{crypto}] SKIP — unstable WS book (b/a moved during precheck {b0:.3f}/{a0:.3f}->{b1:.3f}/{a1:.3f})")
                         signal_data["reason"] = "ws unstable (top moved)"
                         save_signal(signal_data)
-                        return
+                        return {
+                            "ok": False,
+                            "failure_type": "skipped",
+                            "detail": "ws unstable (top moved)",
+                            "order_status": "skipped",
+                            "order_id": "",
+                            "execution_mode": entry_execution_mode,
+                            "post_only": True,
+                            "limit_price": None,
+                            "signal_age_sec_at_order_submit": None,
+                            "order_rest_seconds": 0.0,
+                            "maker_filled": False,
+                            "maker_fill_price": None,
+                            "maker_fill_size": None,
+                            "maker_fill_latency_ms": None,
+                            "maker_cancel_reason": "",
+                            "fallback_used": False,
+                        }
                 except Exception:
                     pass
         signal_age_sec = 0.0
