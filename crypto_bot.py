@@ -431,6 +431,9 @@ MAKER_ENTRY_STRICT_MAX_SPREAD = float(_bot_settings.get("maker_entry_strict_max_
 MAKER_ENTRY_PRECHECK_ENABLED = _as_bool(_bot_settings.get("maker_entry_precheck_enabled"), True)
 MAKER_ENTRY_PRECHECK_SLEEP_SEC = float(_bot_settings.get("maker_entry_precheck_sleep_sec", 0.2) or 0.2)
 MAKER_ENTRY_MIN_PM_MINUS_MID = float(_bot_settings.get("maker_entry_min_pm_minus_mid", 0.02) or 0.02)
+SHADOW_WS_CONFIRM_ENABLED = _as_bool(_bot_settings.get("shadow_ws_confirm_enabled"), True)
+SHADOW_WS_MAX_TOP_MOVES_3S = int(_bot_settings.get("shadow_ws_max_top_moves_3s", 6) or 6)
+SHADOW_WS_MIN_SAMPLES_3S = int(_bot_settings.get("shadow_ws_min_samples_3s", 3) or 3)
 
 # Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
 MAKER_EXIT_ENABLED = bool(_bot_settings.get("maker_exit_enabled", False))
@@ -5223,6 +5226,26 @@ class CryptoBot:
                 unique_dirs = {d for d in dirs if d in ("Up", "Down")}
                 regime = "chop" if len(unique_dirs) > 1 else regime
 
+        ws_features = {}
+        try:
+            token_id = str(market.get("winner_token") or "")
+            if token_id and self.ws_market is not None:
+                ws_features = self.ws_market.get_micro_features(token_id) or {}
+        except Exception:
+            ws_features = {}
+
+        ws_samples_3s = int(ws_features.get("ws_samples_3s", 0) or 0)
+        ws_top_moves_3s = int(ws_features.get("ws_top_moves_3s", 0) or 0)
+        ws_mid_change_3s = float(ws_features.get("ws_mid_change_3s", 0) or 0)
+        ws_bid_up_moves_3s = int(ws_features.get("ws_bid_up_moves_3s", 0) or 0)
+        ws_ask_down_moves_3s = int(ws_features.get("ws_ask_down_moves_3s", 0) or 0)
+        ws_confirm_trend = (
+            ws_samples_3s >= SHADOW_WS_MIN_SAMPLES_3S
+            and ws_top_moves_3s <= SHADOW_WS_MAX_TOP_MOVES_3S
+            and ws_mid_change_3s >= -0.01
+            and (ws_bid_up_moves_3s > 0 or ws_ask_down_moves_3s > 0)
+        )
+
         return {
             "stable_ticks": stable_ticks,
             "direction_persistence": direction_persistence,
@@ -5236,6 +5259,12 @@ class CryptoBot:
             "market_regime": regime,
             "pm_vs_delta_gap": pm_vs_delta_gap,
             "underpricing_score": underpricing_score,
+            "ws_mid_change_3s": round(ws_mid_change_3s, 4),
+            "ws_top_moves_3s": ws_top_moves_3s,
+            "ws_bid_up_moves_3s": ws_bid_up_moves_3s,
+            "ws_ask_down_moves_3s": ws_ask_down_moves_3s,
+            "ws_samples_3s": ws_samples_3s,
+            "ws_confirm_trend": ws_confirm_trend,
         }
 
     def _evaluate_shadow_entry(self, features: dict, market: dict, ta: dict, seconds_left: float) -> dict:
@@ -5324,11 +5353,15 @@ class CryptoBot:
         pullback_recovered = bool(features.get("pullback_recovered"))
         reversal_flag = bool(features.get("reversal_flag"))
         direction_persistence = float(features.get("direction_persistence", 0.0) or 0.0)
+        ws_confirm_trend = bool(features.get("ws_confirm_trend"))
+        ws_top_moves_3s = int(features.get("ws_top_moves_3s", 0) or 0)
+        ws_samples_3s = int(features.get("ws_samples_3s", 0) or 0)
 
         decision = "neutral"
         reason = "no live shadow edge"
         regime_support = regime.startswith("trend_") and recent_streak >= 2
         early_shadow_too_cheap = pm_price < SHADOW_OBSERVE_PM_FLOOR and progress < SHADOW_OBSERVE_CHEAP_PM_MAX_PROGRESS
+        ws_trend_required = SHADOW_WS_CONFIRM_ENABLED and profile in {"trend_regime_probe", "trend_early", "trend_pullback_resume", "late_lock"}
 
         if early_shadow_too_cheap and candidate:
             decision = "neutral"
@@ -5381,6 +5414,9 @@ class CryptoBot:
             if reversal_flag and not pullback_recovered:
                 decision = "deny"
                 reason = "reversal risk not recovered"
+            elif ws_trend_required and not ws_confirm_trend:
+                decision = "deny"
+                reason = f"ws trend confirmation failed (samples={ws_samples_3s} top_moves={ws_top_moves_3s})"
             elif pm_gap >= SHADOW_LIVE_DENY_MAX_PM_GAP and progress >= SHADOW_LIVE_DENY_MIN_PROGRESS:
                 decision = "deny"
                 reason = "pm already too far ahead late in window"
@@ -5418,6 +5454,9 @@ class CryptoBot:
             "window_progress_pct": round(progress, 4),
             "underpricing_score": round(underpricing_score, 4),
             "pm_vs_delta_gap": round(pm_gap, 4),
+            "ws_confirm_trend": ws_confirm_trend,
+            "ws_top_moves_3s": ws_top_moves_3s,
+            "ws_samples_3s": ws_samples_3s,
         }
 
     def _finalize_window_summaries(self, close_ts: int):

@@ -1842,7 +1842,7 @@ with tab_dashboard:
     with ctrl_cols[1]:
         st.markdown(
             "<div class='safe-box'><strong>Лёгкий обзор бота.</strong> "
-            "Ключевые метрики, последние сделки и быстрый refresh без перегруженной аналитики.</div>",
+            "Только ключевые метрики, качество торговли и последние сделки.</div>",
             unsafe_allow_html=True,
         )
         if L.get("has_service_conflict"):
@@ -1916,21 +1916,11 @@ with tab_dashboard:
     o6.metric("✅ Win rate", f"{win_rate:.0f}%" if win_rate is not None else "—")
 
     st.markdown("---")
-    g1, g2, g3, g4 = st.columns(4)
-    g1.metric("Wins", D['wins'])
-    g2.metric("Losses", D['losses'])
-    g3.metric("Pending", D['pending'])
-    g4.metric("Mode", mode)
-
-    st.markdown("---")
-    st.markdown("#### Live all-time")
-    lt1, lt2, lt3, lt4 = st.columns(4)
-    live_total_resolved = D['live_all_time_wins'] + D['live_all_time_losses']
-    live_all_time_wr = (D['live_all_time_wins'] / live_total_resolved * 100) if live_total_resolved else None
-    lt1.metric("Live trades", D['live_all_time_trades'])
-    lt2.metric("Live PnL", f"${D['live_all_time_pnl']:+.2f}")
-    lt3.metric("Live wins", D['live_all_time_wins'])
-    lt4.metric("Live WR", f"{live_all_time_wr:.0f}%" if live_all_time_wr is not None else "—")
+    q1, q2, q3, q4 = st.columns(4)
+    q1.metric("Wins", D['wins'])
+    q2.metric("Losses", D['losses'])
+    q3.metric("Pending", D['pending'])
+    q4.metric("Signals", D['total_signals'])
 
     st.markdown("---")
     st.markdown("#### Последние 5 сделок")
@@ -1954,15 +1944,24 @@ with tab_dashboard:
     quick1, quick2, quick3, quick4 = st.columns(4)
     quick1.metric("BTC", f"${D['btc_price']:.0f}" if D['btc_price'] else "—")
     quick2.metric("ETH", f"${D['eth_price']:.0f}" if D['eth_price'] else "—")
-    quick3.metric("Signals", D['total_signals'])
-    quick4.metric("Binance", "❌ Err" if L['err'] else "✅ OK")
+    quick3.metric("Binance", "❌ Err" if L['err'] else "✅ OK")
+    quick4.metric("Live trades", D['live_all_time_trades'])
 
-    with st.expander("Показать дополнительные runtime-метрики", expanded=False):
+    with st.expander("Дополнительные runtime-метрики", expanded=False):
         extra1, extra2, extra3, extra4 = st.columns(4)
         extra1.metric("Session Bank Start", f"${float(L.get('session_bank_start') or D['bank_start']):.2f}")
         extra2.metric("Signals in Session", D['total_signals'])
         extra3.metric("Portfolio vs Start", f"${net_result:+.2f}" if net_result is not None else "—")
         extra4.metric("Updated", D['time'])
+
+        st.markdown("**Live all-time**")
+        lt1, lt2, lt3, lt4 = st.columns(4)
+        live_total_resolved = D['live_all_time_wins'] + D['live_all_time_losses']
+        live_all_time_wr = (D['live_all_time_wins'] / live_total_resolved * 100) if live_total_resolved else None
+        lt1.metric("Live trades", D['live_all_time_trades'])
+        lt2.metric("Live PnL", f"${D['live_all_time_pnl']:+.2f}")
+        lt3.metric("Live wins", D['live_all_time_wins'])
+        lt4.metric("Live WR", f"{live_all_time_wr:.0f}%" if live_all_time_wr is not None else "—")
 
         if D['last_full_window_waits']:
             wait_rows = []
@@ -1982,7 +1981,7 @@ with tab_dashboard:
 # ==========================================
 with tab_stats:
     st.markdown("### 📈 Statistics")
-    st.caption("Глубокая аналитика по Core EV, отказам и времени входа.")
+    st.caption("Только разбор решений, completed trades и лог. Всё второстепенное убрано.")
 
     if D['total_signals'] > 0:
         stat_n = st.selectbox("Период Core EV runtime", [50, 100, 200], index=2)
@@ -2014,33 +2013,6 @@ with tab_stats:
             st.dataframe(D['settled_trade_rows'], width="stretch", hide_index=True, height=320)
         else:
             st.caption("Пока нет завершённых сделок для таблицы разбора.")
-
-        st.markdown("---")
-
-        if D['win_rate_by_time_bucket']:
-            st.markdown("**Win Rate by Time Left Bucket**")
-            wr_rows = []
-            for key, payload in D['win_rate_by_time_bucket'].items():
-                wins = int(payload.get("wins", 0) or 0)
-                losses = int(payload.get("losses", 0) or 0)
-                total = wins + losses
-                wr_rows.append({
-                    "Time Bucket": key,
-                    "Wins": wins,
-                    "Losses": losses,
-                    "Win Rate": f"{(wins / total * 100):.0f}%" if total else "—",
-                })
-            st.dataframe(wr_rows, width="stretch", hide_index=True, height=220)
-
-        st.markdown("---")
-        st.markdown("**Core EV Denial Reasons Breakdown**")
-        if D['core_ev_deny_reasons']:
-            total_core_ev_denies = sum(D['core_ev_deny_reasons'].values())
-            for rr, cnt in sorted(D['core_ev_deny_reasons'].items(), key=lambda x: -x[1]):
-                pct = cnt / max(total_core_ev_denies, 1)
-                st.progress(pct, text=f"{rr}: {cnt} ({pct*100:.0f}%)")
-        else:
-            st.caption("No Core EV deny data")
 
         st.markdown("---")
         r1, r2 = st.columns(2)

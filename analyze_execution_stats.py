@@ -443,6 +443,100 @@ def _bucket_imbalance(x: float | None) -> str:
     return ">=0.05"
 
 
+def _bucket_ws_top_moves(x: float | None) -> str:
+    if x is None:
+        return "unknown"
+    try:
+        v = int(float(x))
+    except Exception:
+        return "unknown"
+    if v <= 1:
+        return "0-1"
+    if v <= 3:
+        return "2-3"
+    if v <= 6:
+        return "4-6"
+    return ">6"
+
+
+def _bucket_ws_mid_change(x: float | None) -> str:
+    if x is None:
+        return "unknown"
+    try:
+        v = float(x)
+    except Exception:
+        return "unknown"
+    if v <= -0.02:
+        return "<=-0.02"
+    if v < 0:
+        return "(-0.02..0)"
+    if v < 0.02:
+        return "[0..0.02)"
+    return ">=0.02"
+
+
+def summarize_ws_regime_pnl(records: list[dict], *, top: int = 20, min_trades: int = 5) -> list[dict]:
+    resolved = [r for r in records if bool(r.get("entered")) and r.get("realized_pnl") is not None]
+    buckets: dict[str, list[float]] = defaultdict(list)
+    wins: dict[str, int] = defaultdict(int)
+
+    for r in resolved:
+        pnl = _safe_float(r.get("realized_pnl"), default=None)
+        if pnl is None:
+            continue
+        ws_confirm = r.get("ws_confirm_trend")
+        ws_confirm_label = "unknown"
+        if isinstance(ws_confirm, bool):
+            ws_confirm_label = "true" if ws_confirm else "false"
+        elif ws_confirm is not None:
+            ws_confirm_label = str(ws_confirm)
+        key = " | ".join([
+            f"profile={str(r.get('shadow_entry_profile', '') or 'unknown')}",
+            f"regime={str(r.get('market_regime', '') or 'unknown')}",
+            f"ws_confirm={ws_confirm_label}",
+            f"ws_top_moves={_bucket_ws_top_moves(_safe_float(r.get('ws_top_moves_3s'), default=None))}",
+            f"ws_mid_3s={_bucket_ws_mid_change(_safe_float(r.get('ws_mid_change_3s'), default=None))}",
+        ])
+        buckets[key].append(pnl)
+        if bool(r.get("won")):
+            wins[key] += 1
+
+    rows = []
+    for key, pnls in buckets.items():
+        if len(pnls) < int(min_trades):
+            continue
+        w = wins.get(key, 0)
+        rows.append({
+            "bucket": key,
+            "trades": len(pnls),
+            "win_rate_pct": round(_pct(w, len(pnls)), 1),
+            "pnl_sum": round(sum(pnls), 4),
+            "pnl_avg": round(_mean(pnls) or 0.0, 4),
+            "pnl_min": round(min(pnls), 4),
+            "pnl_max": round(max(pnls), 4),
+        })
+
+    rows.sort(key=lambda r: (r["pnl_sum"], r["trades"]), reverse=True)
+    return rows[: int(top)]
+
+
+def summarize_skip_reasons_ws(records: list[dict]) -> dict[str, int]:
+    counter: dict[str, int] = defaultdict(int)
+    for r in records:
+        if bool(r.get("entered")):
+            continue
+        reason = str(r.get("reason", "") or "")
+        if "ws trend confirmation failed" in reason:
+            counter["ws_trend_confirmation_failed"] += 1
+        elif "ws unstable" in reason:
+            counter["ws_unstable"] += 1
+        elif "maker_entry requires ws" in reason.lower():
+            counter["ws_missing"] += 1
+        elif "ws stale" in reason.lower():
+            counter["ws_stale"] += 1
+    return dict(sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def summarize_realized_pnl_buckets(records: list[dict], *,
                                   min_trades: int = 3, top: int = 25,
                                   dims: str = "full") -> list[dict]:
@@ -538,6 +632,12 @@ def main() -> int:
         top=int(args.pnl_context_top or 20),
         min_trades=max(1, int(args.pnl_context_min_trades or 1)),
     )
+    ws_regime_pnl = summarize_ws_regime_pnl(
+        records,
+        top=int(args.pnl_context_top or 20),
+        min_trades=max(1, int(args.pnl_context_min_trades or 1)),
+    )
+    ws_skip_reasons = summarize_skip_reasons_ws(records)
     skips = summarize_counterfactual_skips(records) if args.source == "window_samples" else None
     counterfactual_context = (
         summarize_counterfactual_pnl_by_context(
@@ -694,6 +794,22 @@ def main() -> int:
                 f"pnl_sum={row['pnl_sum']} pnl_avg={row['pnl_avg']} min/max={row['pnl_min']}/{row['pnl_max']}"
             )
             print(f"    {row['bucket']}")
+
+    if ws_regime_pnl:
+        print(
+            f"\n=== WS / REGIME / PROFILE BREAKDOWN (min_trades={max(1, int(args.pnl_context_min_trades or 1))}) ==="
+        )
+        for row in ws_regime_pnl:
+            print(
+                f"  - trades={row['trades']} win_rate={row['win_rate_pct']}% "
+                f"pnl_sum={row['pnl_sum']} pnl_avg={row['pnl_avg']} min/max={row['pnl_min']}/{row['pnl_max']}"
+            )
+            print(f"    {row['bucket']}")
+
+    if ws_skip_reasons:
+        print("\n=== WS-RELATED SKIP REASONS ===")
+        for reason, cnt in ws_skip_reasons.items():
+            print(f"  - {reason}: {cnt}")
 
     return 0
 
