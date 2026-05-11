@@ -465,6 +465,7 @@ CORE_EV_FLEX_PM_MIN = float(_bot_settings.get("core_ev_flex_pm_min", 0.50) or 0.
 CORE_EV_FLEX_PM_MAX = float(_bot_settings.get("core_ev_flex_pm_max", 0.99) or 0.99)
 CORE_EV_TIME_LEFT_MIN = float(_bot_settings.get("core_ev_time_left_min", CORE_EV_ENTRY_TIME_MIN) or CORE_EV_ENTRY_TIME_MIN)
 CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("core_ev_time_left_max", min(20, CORE_EV_ENTRY_TIME_MAX)) or min(20, CORE_EV_ENTRY_TIME_MAX))
+CORE_EV_RUNTIME_MIN_DELTA_PCT = float(_bot_settings.get("core_ev_runtime_min_delta_pct", 0.020) or 0.020)
 CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
 CORE_EV_MICRO_RISK_PCT = float(_bot_settings.get("core_ev_micro_risk_pct", max(0.0025, CORE_EV_MAX_RISK_PCT * 0.25)) or max(0.0025, CORE_EV_MAX_RISK_PCT * 0.25))
 CORE_EV_TREND_CONFLICT_MICRO_DELTA_MIN_PCT = float(_bot_settings.get("core_ev_trend_conflict_micro_delta_min_pct", max(DELTA_SKIP * 100, 0.012)) or max(DELTA_SKIP * 100, 0.012))
@@ -3966,12 +3967,12 @@ class CryptoBot:
                 ),
                 "size_fraction": 0.0,
             }
-        if delta_pct < 0.020:
+        if delta_pct < CORE_EV_RUNTIME_MIN_DELTA_PCT - 1e-12:
             return {
                 "decision": "deny",
                 "reason": (
                     "low delta denied by runtime envelope "
-                    f"(delta={delta_pct:.4f}% < 0.020% pm={pm:.3f} t={time_left:.1f}s conf={confidence:.0%})"
+                    f"(delta={delta_pct:.4f}% < {CORE_EV_RUNTIME_MIN_DELTA_PCT:.3f}% pm={pm:.3f} t={time_left:.1f}s conf={confidence:.0%})"
                 ),
                 "size_fraction": 0.0,
             }
