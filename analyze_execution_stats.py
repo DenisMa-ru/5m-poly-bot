@@ -98,13 +98,18 @@ def _reason_bucket(record: dict) -> str:
         return "unknown"
 
     alias = {
+        "": "unknown",
         "maker_timeout": "timeout",
         "timeout": "timeout",
         "wide_spread": "wide_spread",
         "late_signal": "late_signal",
         "signal_stale": "signal_stale",
         "empty_book": "empty_book",
+        "book_empty": "empty_book",
         "partial_fill_below_min_ratio": "partial_fill_low_ratio",
+        "maker_early_cancel": "early_cancel",
+        "early_cancel": "early_cancel",
+        "book_moved": "book_moved",
         "rejected": "post_only_reject",
         "canceled": "post_only_reject",
         "cancelled": "post_only_reject",

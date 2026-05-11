@@ -2777,6 +2777,12 @@ def execute_buy_maker_entry(token_id: str, amount_usdc: float, desired_price: fl
         failure_type, detail = _classify_polymarket_exception(exc)
         result["failure_type"] = failure_type
         result["detail"] = detail
+        # Ensure analytics never sees an empty cancel reason (reported as "unknown").
+        # For maker-entry attempts, any exception means the order was not filled.
+        if not str(result.get("maker_cancel_reason", "") or "").strip():
+            result["maker_cancel_reason"] = failure_type or "exception"
+        if not str(result.get("order_status", "") or "").strip():
+            result["order_status"] = "exception"
         return result
 
 
