@@ -389,7 +389,9 @@ WINDOW_SAMPLE_LOGGING_ENABLED = bool(_bot_settings.get("window_sample_logging_en
 # Research-driven strategy override layer (optional).
 # When STRATEGY_MODE is set, it may force entry even when Core-EV would deny.
 STRATEGY_MODE = str(_bot_settings.get("strategy_mode", "") or "").strip().lower()
-STRATEGY_FORCE_ENABLED = _as_bool(_bot_settings.get("strategy_force_enabled"), True)
+# Safety default: strategy forcing must be explicitly enabled in settings.json.
+# Otherwise it can silently skew execution stats / experiments.
+STRATEGY_FORCE_ENABLED = _as_bool(_bot_settings.get("strategy_force_enabled"), False)
 LAG_REACT_TIME_LEFT_MIN = float(_bot_settings.get("lag_react_time_left_min", 60) or 60)
 LAG_REACT_TIME_LEFT_MAX = float(_bot_settings.get("lag_react_time_left_max", 120) or 120)
 LAG_REACT_PM_MAX_FORCED = float(_bot_settings.get("lag_react_pm_max_forced", 0.80) or 0.80)
