@@ -430,6 +430,7 @@ MAKER_ENTRY_MAX_WS_AGE_SEC = float(_bot_settings.get("maker_entry_max_ws_age_sec
 MAKER_ENTRY_STRICT_MAX_SPREAD = float(_bot_settings.get("maker_entry_strict_max_spread", 0.01) or 0.01)
 MAKER_ENTRY_PRECHECK_ENABLED = _as_bool(_bot_settings.get("maker_entry_precheck_enabled"), True)
 MAKER_ENTRY_PRECHECK_SLEEP_SEC = float(_bot_settings.get("maker_entry_precheck_sleep_sec", 0.2) or 0.2)
+MAKER_ENTRY_MIN_PM_MINUS_MID = float(_bot_settings.get("maker_entry_min_pm_minus_mid", 0.02) or 0.02)
 
 # Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
 MAKER_EXIT_ENABLED = bool(_bot_settings.get("maker_exit_enabled", False))
@@ -5398,6 +5399,17 @@ class CryptoBot:
                     f"   [{crypto}] ORDERBOOK({src}) bid={float(orderbook.get('best_bid_price', 0) or 0):.3f} "
                     f"ask={float(orderbook.get('best_ask_price', 0) or 0):.3f} spread={float(orderbook.get('spread', 0) or 0):.3f}{extra}"
                 )
+
+            # Edge gate: require PM to be sufficiently above WS midpoint to compensate microstructure risk.
+            try:
+                pm_minus_mid = float(snapshot.get("pm_minus_clob_mid_at_entry", signal_data.get("pm_minus_clob_mid_at_entry", 0)) or 0)
+            except Exception:
+                pm_minus_mid = 0.0
+            if pm_minus_mid < MAKER_ENTRY_MIN_PM_MINUS_MID - 1e-12:
+                log(f"   [{crypto}] SKIP — insufficient edge (pm-mid={pm_minus_mid:+.3f} < {MAKER_ENTRY_MIN_PM_MINUS_MID:+.3f})")
+                signal_data["reason"] = f"edge gate pm-mid={pm_minus_mid:+.3f}"
+                save_signal(signal_data)
+                return
 
             # Pre-entry gating: execution-first. Skip maker-entry when WS is missing/stale.
             if MAKER_ENTRY_REQUIRE_WS:
