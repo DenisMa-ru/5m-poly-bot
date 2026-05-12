@@ -475,6 +475,7 @@ CORE_EV_FLEX_PM_MAX = float(_bot_settings.get("core_ev_flex_pm_max", 0.99) or 0.
 CORE_EV_TIME_LEFT_MIN = float(_bot_settings.get("core_ev_time_left_min", CORE_EV_ENTRY_TIME_MIN) or CORE_EV_ENTRY_TIME_MIN)
 CORE_EV_TIME_LEFT_MAX = float(_bot_settings.get("core_ev_time_left_max", min(20, CORE_EV_ENTRY_TIME_MAX)) or min(20, CORE_EV_ENTRY_TIME_MAX))
 CORE_EV_RUNTIME_MIN_DELTA_PCT = float(_bot_settings.get("core_ev_runtime_min_delta_pct", 0.020) or 0.020)
+CORE_EV_UNDERSAMPLED_POSITIVE_MIN_TRADES = int(_bot_settings.get("core_ev_undersampled_positive_min_trades", 5) or 5)
 CORE_EV_MAX_RISK_PCT = float(_bot_settings.get("core_ev_max_risk_pct", 0.02) or 0.02)
 CORE_EV_MICRO_RISK_PCT = float(_bot_settings.get("core_ev_micro_risk_pct", max(0.0025, CORE_EV_MAX_RISK_PCT * 0.25)) or max(0.0025, CORE_EV_MAX_RISK_PCT * 0.25))
 CORE_EV_TREND_CONFLICT_MICRO_DELTA_MIN_PCT = float(_bot_settings.get("core_ev_trend_conflict_micro_delta_min_pct", max(DELTA_SKIP * 100, 0.012)) or max(DELTA_SKIP * 100, 0.012))
@@ -4081,7 +4082,12 @@ class CryptoBot:
                 decision_value = str(stats.get("decision", "unknown") or "unknown")
                 trades = int(stats.get("trades", 0) or 0)
                 roi = float(stats.get("roi", 0) or 0)
-                if decision_value == "unknown" and trades > 0 and roi > 0 and recent_positive_ok(stats):
+                if (
+                    decision_value == "unknown"
+                    and trades >= CORE_EV_UNDERSAMPLED_POSITIVE_MIN_TRADES
+                    and roi > 0
+                    and recent_positive_ok(stats)
+                ):
                     undersampled_positive = (level, stats)
                     break
             if undersampled_positive is not None:
@@ -5378,6 +5384,25 @@ class CryptoBot:
         regime_support = regime.startswith("trend_") and recent_streak >= 2
         early_shadow_too_cheap = pm_price < SHADOW_OBSERVE_PM_FLOOR and progress < SHADOW_OBSERVE_CHEAP_PM_MAX_PROGRESS
         ws_trend_required = SHADOW_WS_CONFIRM_ENABLED and profile in {"trend_regime_probe", "trend_early", "trend_pullback_resume", "late_lock"}
+
+        # Chop regime is inherently noisy; require stronger confidence before allowing.
+        if regime == "chop" and float(ta.get("confidence", 0) or 0) < 0.25:
+            return {
+                "decision": "deny",
+                "reason": f"chop regime denied due to low confidence (conf={float(ta.get('confidence',0) or 0):.2f})",
+                "profile": profile,
+                "score": round(score, 4),
+                "candidate": candidate,
+                "market_regime": regime,
+                "stable_ticks": stable_ticks,
+                "recent_5m_streak": recent_streak,
+                "window_progress_pct": round(progress, 4),
+                "underpricing_score": round(underpricing_score, 4),
+                "pm_vs_delta_gap": round(pm_gap, 4),
+                "ws_confirm_trend": ws_confirm_trend,
+                "ws_top_moves_3s": ws_top_moves_3s,
+                "ws_samples_3s": ws_samples_3s,
+            }
 
         if early_shadow_too_cheap and candidate:
             decision = "neutral"
