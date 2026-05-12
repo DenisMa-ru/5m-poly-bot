@@ -437,6 +437,13 @@ SHADOW_WS_CONFIRM_ENABLED = _as_bool(_bot_settings.get("shadow_ws_confirm_enable
 SHADOW_WS_MAX_TOP_MOVES_3S = int(_bot_settings.get("shadow_ws_max_top_moves_3s", 6) or 6)
 SHADOW_WS_MIN_SAMPLES_3S = int(_bot_settings.get("shadow_ws_min_samples_3s", 3) or 3)
 
+# Global maker-entry WS noise guard (execution quality filter).
+# Separate from shadow WS-confirm: this can block any maker-entry attempt when the
+# WS microstructure is too noisy.
+MAKER_ENTRY_WS_NOISE_GUARD_ENABLED = _as_bool(_bot_settings.get("maker_entry_ws_noise_guard_enabled"), False)
+MAKER_ENTRY_WS_NOISE_MIN_SAMPLES_3S = int(_bot_settings.get("maker_entry_ws_noise_min_samples_3s", 8) or 8)
+MAKER_ENTRY_WS_NOISE_MAX_TOP_MOVES_3S = int(_bot_settings.get("maker_entry_ws_noise_max_top_moves_3s", 6) or 6)
+
 # Phase 2 (maker exit) — code support exists, but can be disabled for staged rollout.
 MAKER_EXIT_ENABLED = bool(_bot_settings.get("maker_exit_enabled", False))
 MAKER_EXIT_TARGET_IMPROVEMENT = float(_bot_settings.get("maker_exit_target_improvement", 0.02) or 0.02)
@@ -5540,6 +5547,39 @@ class CryptoBot:
                     f"   [{crypto}] ORDERBOOK({src}) bid={float(orderbook.get('best_bid_price', 0) or 0):.3f} "
                     f"ask={float(orderbook.get('best_ask_price', 0) or 0):.3f} spread={float(orderbook.get('spread', 0) or 0):.3f}{extra}"
                 )
+
+            if MAKER_ENTRY_WS_NOISE_GUARD_ENABLED and self.ws_market is not None:
+                try:
+                    token_id = str(market.get("winner_token") or "")
+                    ws_feats = self.ws_market.get_micro_features(token_id) if token_id else {}
+                    ws_samples_3s = int((ws_feats or {}).get("ws_samples_3s", 0) or 0)
+                    ws_top_moves_3s = int((ws_feats or {}).get("ws_top_moves_3s", 0) or 0)
+                except Exception:
+                    ws_samples_3s = 0
+                    ws_top_moves_3s = 0
+                if ws_samples_3s >= MAKER_ENTRY_WS_NOISE_MIN_SAMPLES_3S and ws_top_moves_3s > MAKER_ENTRY_WS_NOISE_MAX_TOP_MOVES_3S:
+                    detail = f"ws noise guard: top_moves={ws_top_moves_3s} samples={ws_samples_3s}"
+                    log(f"   [{crypto}] SKIP — {detail}")
+                    signal_data["reason"] = detail
+                    save_signal(signal_data)
+                    return {
+                        "ok": False,
+                        "failure_type": "skipped",
+                        "detail": detail,
+                        "order_status": "skipped",
+                        "order_id": "",
+                        "execution_mode": entry_execution_mode,
+                        "post_only": True,
+                        "limit_price": None,
+                        "signal_age_sec_at_order_submit": None,
+                        "order_rest_seconds": 0.0,
+                        "maker_filled": False,
+                        "maker_fill_price": None,
+                        "maker_fill_size": None,
+                        "maker_fill_latency_ms": None,
+                        "maker_cancel_reason": "skipped_ws_noise",
+                        "fallback_used": False,
+                    }
 
             # Edge gate: require PM to be sufficiently above WS midpoint to compensate microstructure risk.
             pm_minus_mid = 0.0

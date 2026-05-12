@@ -114,6 +114,7 @@ def _reason_bucket(record: dict) -> str:
         "skipped_ws_missing": "skipped_ws_missing",
         "skipped_ws_stale": "skipped_ws_stale",
         "skipped_spread_too_wide": "skipped_spread_too_wide",
+        "skipped_ws_noise": "skipped_ws_noise",
         "rejected": "post_only_reject",
         "canceled": "post_only_reject",
         "cancelled": "post_only_reject",
