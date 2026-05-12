@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 def _iter_jsonl(path: Path):
@@ -89,6 +90,29 @@ def _parse_ts(value: str | None) -> datetime | None:
         return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _parse_since_window(value: str | None) -> datetime | None:
+    """Parse short lookback windows like '1h', '6h', '2d', '30m'."""
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    m = re.fullmatch(r"(\d+)([smhd])", text)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2)
+    if n <= 0:
+        return None
+    delta = {
+        "s": timedelta(seconds=n),
+        "m": timedelta(minutes=n),
+        "h": timedelta(hours=n),
+        "d": timedelta(days=n),
+    }[unit]
+    return datetime.now(timezone.utc) - delta
 
 
 def _reason_bucket(record: dict) -> str:
@@ -644,6 +668,11 @@ def main() -> int:
         default="",
         help="Only include records with timestamp >= this UTC ISO string (e.g. 2026-05-09T00:00:00Z)",
     )
+    ap.add_argument(
+        "--since",
+        default="",
+        help="Lookback window like '1h', '6h', '2d', '30m'. Overrides --since-ts if provided.",
+    )
     ap.add_argument("--pnl-bucket-min-trades", type=int, default=3)
     ap.add_argument("--pnl-bucket-dims", choices=["coarse", "full"], default="full")
     ap.add_argument("--pnl-context-min-trades", type=int, default=5)
@@ -655,16 +684,22 @@ def main() -> int:
     else:
         records = list(_iter_jsonl(Path(args.window_samples_jsonl)))
 
-    if args.since_ts:
+    since = None
+    if args.since:
+        since = _parse_since_window(args.since)
+        if since is None:
+            raise SystemExit(f"Invalid --since value: {args.since!r} (expected like 1h, 2d, 30m)")
+    elif args.since_ts:
         since = _parse_ts(args.since_ts)
-        if since is not None:
-            filtered = []
-            for r in records:
-                ts = _parse_ts(r.get("timestamp"))
-                if ts is None or ts < since:
-                    continue
-                filtered.append(r)
-            records = filtered
+
+    if since is not None:
+        filtered = []
+        for r in records:
+            ts = _parse_ts(r.get("timestamp"))
+            if ts is None or ts < since:
+                continue
+            filtered.append(r)
+        records = filtered
 
     maker = summarize_maker_entry(records)
     pnl = summarize_realized_pnl(records)
