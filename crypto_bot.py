@@ -4851,14 +4851,21 @@ class CryptoBot:
                 persist_record()
                 return
 
+        # signal_tier=observe must never trade. Previously this was treated as
+        # advisory in core-first mode, which allowed noisy observe trades.
         if signal_tier == "observe" and not normal_zone_live_pass and not hybrid_shadow_live_pass:
-            if core_first_mode:
-                log(f"   [{crypto}] NOTE — legacy signal tier observe ({signal_tier_reason}) ignored in core-first mode")
-            else:
-                log(f"   [{crypto}] SKIP — signal tier observe ({signal_tier_reason})")
-                signal_data["reason"] = f"signal tier observe | {signal_tier_reason}"
-                persist_record()
-                return
+            log(f"   [{crypto}] SKIP — signal tier observe ({signal_tier_reason})")
+            signal_data["reason"] = f"signal tier observe | {signal_tier_reason}"
+            persist_record()
+            return
+
+        # Negative (or zero) edge is a hard deny. Core EV can still be positive
+        # historically, but entering with edge<=0 contradicts the current signal.
+        if (edge is not None) and float(edge) <= 0 and not strategy_forced:
+            log(f"   [{crypto}] SKIP — edge {float(edge):+.4f} <= 0")
+            signal_data["reason"] = f"edge {float(edge):+.4f} <= 0"
+            persist_record()
+            return
 
         core_ev = self._evaluate_core_ev_gate(signal_data, shadow_live_decision)
         signal_data["core_ev_bucket_key"] = str(core_ev.get("bucket_key", "") or "")
@@ -4941,6 +4948,46 @@ class CryptoBot:
                 f" up_gap_min={LAG_REACT_GAP_MIN_UP:.3f}"
             )
             log(f"   [{crypto}] STRATEGY OVERRIDE — lag_react_v1 forces entry (core_ev={core_ev_decision})")
+
+        # Candidate tier needs extra confirmation: stronger local signal AND
+        # either shadow_live=allow or empirical bucket beyond L1 fallback.
+        if signal_tier == "candidate" and not strategy_forced:
+            candidate_ok = True
+
+            if indicator_confirm is None or float(indicator_confirm) < 0:
+                candidate_ok = False
+                candidate_reason = f"candidate confirm {float(indicator_confirm or 0):+.2f} < 0"
+            elif float(seconds_left or 0) < 40:
+                candidate_ok = False
+                candidate_reason = f"candidate time_left {float(seconds_left):.1f}s < 40s"
+            elif edge is None or float(edge) <= 0:
+                candidate_ok = False
+                candidate_reason = f"candidate edge {float(edge or 0):+.4f} <= 0"
+            else:
+                bucket_level = str(signal_data.get("core_ev_bucket_level", "") or "")
+                shadow_ok = (str(shadow_live_decision or "") == "allow")
+                bucket_ok = bucket_level in {"L2", "L3"}
+                if not (shadow_ok or bucket_ok):
+                    candidate_ok = False
+                    candidate_reason = (
+                        f"candidate requires shadow allow or L2/L3 bucket "
+                        f"(shadow={shadow_live_decision} core_level={bucket_level or 'unknown'})"
+                    )
+
+            if not candidate_ok:
+                log(f"   [{crypto}] SKIP — {candidate_reason}")
+                signal_data["reason"] = candidate_reason
+                persist_record()
+                return
+
+        # Even for strong trade-tier signals, entering too close to the close is
+        # effectively a lottery in maker-only mode (no taker fallback, no retries).
+        if signal_tier == "trade" and not strategy_forced:
+            if float(seconds_left or 0) < 15:
+                log(f"   [{crypto}] SKIP — trade time_left {float(seconds_left):.1f}s < 15s")
+                signal_data["reason"] = f"trade time_left {float(seconds_left):.1f}s < 15s"
+                persist_record()
+                return
 
         allow_full_window_entry, full_window_reason = self._should_take_full_window_entry(
             slug,
