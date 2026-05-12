@@ -147,24 +147,27 @@ def _is_entry_execution_row(r: dict) -> bool:
     ):
         return True
 
-    # Newer/flat schema: look for execution markers.
+    # Newer/flat schema: treat as attempt only if we have a *non-empty* execution marker.
     if bool(r.get("maker_filled")) or bool(r.get("entered")):
         return True
 
-    # Any of these implies we actually attempted an order.
-    for k in (
-        "execution_order_status",
-        "execution_order_id",
-        "maker_cancel_reason",
-        "maker_fill_latency_ms",
-        "maker_fill_price",
-        "maker_fill_size",
-    ):
-        v = r.get(k)
-        if isinstance(v, str) and v.strip():
-            return True
-        if v is not None and not isinstance(v, str):
-            return True
+    def _nonempty(value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        return True
+
+    if _nonempty(r.get("maker_cancel_reason")):
+        return True
+    if _nonempty(r.get("execution_order_status")):
+        return True
+    if _nonempty(r.get("execution_order_id")):
+        return True
+
+    # Fill details without fill marker are suspicious; only count if explicitly present & non-empty.
+    if _nonempty(r.get("maker_fill_price")) or _nonempty(r.get("maker_fill_size")):
+        return True
 
     return False
 
