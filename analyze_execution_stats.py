@@ -124,14 +124,53 @@ def _reason_bucket(record: dict) -> str:
     return alias.get(lowered, lowered)
 
 
-def summarize_maker_entry(records: list[dict]) -> dict:
-    attempts = [
-        r
-        for r in records
-        if str(r.get("execution_mode", "") or "") == "maker_entry"
-        and str(r.get("record_type", "") or "") == "window_sample"
+def _is_entry_execution_row(r: dict) -> bool:
+    """Best-effort detection of maker-entry execution attempts.
+
+    JSONL schema evolved over time (flat keys vs nested execution dict). We treat a
+    row as an entry-execution attempt if it contains any concrete execution fields
+    (status/id/cancel reason/fill markers) and is not just a passive observe tick.
+    """
+
+    if not isinstance(r, dict):
+        return False
+
+    # If execution_mode is present, restrict to maker_entry attempts.
+    exec_mode = str(r.get("execution_mode", "") or "").strip()
+    if exec_mode and exec_mode != "maker_entry":
+        return False
+
+    # Fast-path: old schema tagged rows.
+    if (
+        str(r.get("record_type", "") or "") == "window_sample"
         and str(r.get("sample_source", "") or "") == "entry_execution"
-    ]
+    ):
+        return True
+
+    # Newer/flat schema: look for execution markers.
+    if bool(r.get("maker_filled")) or bool(r.get("entered")):
+        return True
+
+    # Any of these implies we actually attempted an order.
+    for k in (
+        "execution_order_status",
+        "execution_order_id",
+        "maker_cancel_reason",
+        "maker_fill_latency_ms",
+        "maker_fill_price",
+        "maker_fill_size",
+    ):
+        v = r.get(k)
+        if isinstance(v, str) and v.strip():
+            return True
+        if v is not None and not isinstance(v, str):
+            return True
+
+    return False
+
+
+def summarize_maker_entry(records: list[dict]) -> dict:
+    attempts = [r for r in records if _is_entry_execution_row(r)]
 
     filled = [r for r in attempts if bool(r.get("maker_filled"))]
     cancels = Counter(_reason_bucket(r) for r in attempts if not bool(r.get("maker_filled")))
@@ -244,13 +283,7 @@ def summarize_maker_entry(records: list[dict]) -> dict:
 
 
 def summarize_strategy_override(records: list[dict]) -> dict:
-    attempts = [
-        r
-        for r in records
-        if str(r.get("execution_mode", "") or "") == "maker_entry"
-        and str(r.get("record_type", "") or "") == "window_sample"
-        and str(r.get("sample_source", "") or "") == "entry_execution"
-    ]
+    attempts = [r for r in records if _is_entry_execution_row(r)]
 
     forced = [r for r in attempts if bool(r.get("strategy_forced_entry"))]
     normal = [r for r in attempts if not bool(r.get("strategy_forced_entry"))]
@@ -278,10 +311,10 @@ def summarize_strategy_override(records: list[dict]) -> dict:
 
 def summarize_counterfactual_skips(records: list[dict]) -> dict:
     skipped = [
-        r for r in records
-        if str(r.get("record_type", "") or "") == "window_sample"
-        and str(r.get("sample_source", "") or "") == "entry_execution"
-        and not bool(r.get("entered"))
+        r
+        for r in records
+        if _is_entry_execution_row(r)
+        and (not bool(r.get("entered")))
         and r.get("pnl_if_entered") is not None
     ]
     pnls = [_safe_float(r.get("pnl_if_entered"), default=None) for r in skipped]
