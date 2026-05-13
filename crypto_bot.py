@@ -392,6 +392,17 @@ STRATEGY_MODE = str(_bot_settings.get("strategy_mode", "") or "").strip().lower(
 # Safety default: strategy forcing must be explicitly enabled in settings.json.
 # Otherwise it can silently skew execution stats / experiments.
 STRATEGY_FORCE_ENABLED = _as_bool(_bot_settings.get("strategy_force_enabled"), False)
+TWO_REGIME_CONSENSUS_PM_MIN = float(_bot_settings.get("two_regime_consensus_pm_min", 0.60) or 0.60)
+TWO_REGIME_CONSENSUS_PM_MAX = float(_bot_settings.get("two_regime_consensus_pm_max", 0.95) or 0.95)
+TWO_REGIME_CONSENSUS_CONFIDENCE_MIN = float(_bot_settings.get("two_regime_consensus_confidence_min", 0.35) or 0.35)
+TWO_REGIME_CONSENSUS_CONFIRM_MIN = float(_bot_settings.get("two_regime_consensus_confirm_min", 0.0) or 0.0)
+TWO_REGIME_CONSENSUS_RISK_PCT = float(_bot_settings.get("two_regime_consensus_risk_pct", 0.01) or 0.01)
+TWO_REGIME_OPPOSITE_PM_MIN = float(_bot_settings.get("two_regime_opposite_pm_min", 0.85) or 0.85)
+TWO_REGIME_OPPOSITE_PM_MAX = float(_bot_settings.get("two_regime_opposite_pm_max", 0.95) or 0.95)
+TWO_REGIME_OPPOSITE_CONFIDENCE_MAX = float(_bot_settings.get("two_regime_opposite_confidence_max", 0.35) or 0.35)
+TWO_REGIME_OPPOSITE_CONFIRM_MAX = float(_bot_settings.get("two_regime_opposite_confirm_max", -0.15) or -0.15)
+TWO_REGIME_OPPOSITE_RISK_PCT = float(_bot_settings.get("two_regime_opposite_risk_pct", 0.005) or 0.005)
+TWO_REGIME_MIN_TIME_LEFT = float(_bot_settings.get("two_regime_min_time_left", 40.0) or 40.0)
 LAG_REACT_TIME_LEFT_MIN = float(_bot_settings.get("lag_react_time_left_min", 60) or 60)
 LAG_REACT_TIME_LEFT_MAX = float(_bot_settings.get("lag_react_time_left_max", 120) or 120)
 LAG_REACT_PM_MAX_FORCED = float(_bot_settings.get("lag_react_pm_max_forced", 0.80) or 0.80)
@@ -1232,7 +1243,9 @@ def get_market_for_close(slug_prefix: str, close_ts: int) -> dict | None:
         "winner_side":  outcomes[winner_idx],
         "winner_price": prices[winner_idx],
         "winner_token": clob_token_ids[winner_idx],
+        "loser_side":   outcomes[1 - winner_idx],
         "loser_price":  prices[1 - winner_idx],
+        "loser_token":  clob_token_ids[1 - winner_idx],
         "pm_price_spread": price_spread,
         "pm_price_source": "gamma",
         "clob_midpoint_refresh_count": 0,
@@ -3641,6 +3654,11 @@ class CryptoBot:
             "coin": crypto,
             "side": market["winner_side"],
             "pm": market["winner_price"],
+            "pm_market_side": market["winner_side"],
+            "pm_market_price": market["winner_price"],
+            "chosen_side": market["winner_side"],
+            "chosen_price": market["winner_price"],
+            "entry_plan": "consensus",
             "delta": ta.get("delta_pct", 0),
             "confidence": ta.get("confidence", 0),
             "score": ta.get("score", 0),
@@ -4507,7 +4525,9 @@ class CryptoBot:
                     market["winner_side"] = outcomes[winner_idx]
                     market["winner_price"] = resolved_prices[winner_idx]
                     market["winner_token"] = token_ids[winner_idx]
+                    market["loser_side"] = outcomes[1 - winner_idx]
                     market["loser_price"] = resolved_prices[1 - winner_idx]
+                    market["loser_token"] = token_ids[1 - winner_idx]
                     market["pm_price_spread"] = abs(resolved_prices[0] - resolved_prices[1])
                     market["pm_price_source"] = "clob_midpoint" if use_midpoints else "gamma"
                     market["clob_midpoint_refresh_count"] = refresh_count
@@ -4675,6 +4695,173 @@ class CryptoBot:
         delta_pct = float(ta.get("delta_pct", 0) or 0)
         pm_price = float(market["winner_price"] or 0)
         core_first_mode = CORE_EV_ENABLED
+        chosen_side = str(market.get("winner_side") or "")
+        chosen_token = str(market.get("winner_token") or "")
+        chosen_price = float(market.get("winner_price", 0) or 0)
+        entry_plan = "consensus"
+
+        opposite_entry_ok = (
+            pm_price >= 0.85
+            and indicator_confirm <= -0.15
+            and confidence <= 0.40
+            and float(seconds_left or 0) >= 40
+            and float(market.get("loser_price", 0) or 0) > 0
+            and str(market.get("loser_token") or "")
+        )
+        if opposite_entry_ok:
+            chosen_side = str(market.get("loser_side") or chosen_side)
+            chosen_token = str(market.get("loser_token") or chosen_token)
+            chosen_price = float(market.get("loser_price", 0) or chosen_price)
+            entry_plan = "opposite"
+            trade_amount = max(
+                self.dynamic_min_amount,
+                min(self.bank_balance * 0.005, self.dynamic_max_amount, self.bank_balance),
+            )
+            signal_data["amount"] = trade_amount
+            signal_data["signal_tier"] = "trade"
+            signal_data["signal_tier_reason"] = "opposite high-pm contradiction"
+            signal_tier = "trade"
+            signal_tier_reason = "opposite high-pm contradiction"
+            log(
+                f"   [{crypto}] OPPOSITE SETUP — market={market.get('winner_side')}@{pm_price:.3f} "
+                f"chosen={chosen_side}@{chosen_price:.3f} conf={confidence:.0%} 1m={indicator_confirm:+.2f} "
+                f"size=${trade_amount:.2f}"
+            )
+
+        signal_data["entry_plan"] = entry_plan
+        signal_data["chosen_side"] = chosen_side
+        signal_data["chosen_price"] = chosen_price
+        signal_data["side"] = chosen_side
+        signal_data["pm"] = chosen_price
+
+        if STRATEGY_MODE == "two_regime_v1":
+            consensus_ok = (
+                TWO_REGIME_CONSENSUS_PM_MIN <= pm_price <= TWO_REGIME_CONSENSUS_PM_MAX
+                and indicator_confirm >= TWO_REGIME_CONSENSUS_CONFIRM_MIN
+                and confidence >= TWO_REGIME_CONSENSUS_CONFIDENCE_MIN
+                and float(seconds_left or 0) >= TWO_REGIME_MIN_TIME_LEFT
+                and str(market.get("winner_token") or "")
+            )
+            opposite_ok = (
+                TWO_REGIME_OPPOSITE_PM_MIN <= pm_price <= TWO_REGIME_OPPOSITE_PM_MAX
+                and indicator_confirm <= TWO_REGIME_OPPOSITE_CONFIRM_MAX
+                and confidence <= TWO_REGIME_OPPOSITE_CONFIDENCE_MAX
+                and float(seconds_left or 0) >= TWO_REGIME_MIN_TIME_LEFT
+                and float(market.get("loser_price", 0) or 0) > 0
+                and str(market.get("loser_token") or "")
+            )
+
+            if opposite_ok:
+                entry_plan = "opposite"
+                chosen_side = str(market.get("loser_side") or chosen_side)
+                chosen_token = str(market.get("loser_token") or chosen_token)
+                chosen_price = float(market.get("loser_price", 0) or chosen_price)
+                trade_amount = max(
+                    self.dynamic_min_amount,
+                    min(self.bank_balance * TWO_REGIME_OPPOSITE_RISK_PCT, self.dynamic_max_amount, self.bank_balance),
+                )
+                signal_tier = "trade"
+                signal_tier_reason = "two_regime opposite contradiction"
+            elif consensus_ok:
+                entry_plan = "consensus"
+                chosen_side = str(market.get("winner_side") or chosen_side)
+                chosen_token = str(market.get("winner_token") or chosen_token)
+                chosen_price = float(market.get("winner_price", 0) or chosen_price)
+                trade_amount = max(
+                    self.dynamic_min_amount,
+                    min(self.bank_balance * TWO_REGIME_CONSENSUS_RISK_PCT, self.dynamic_max_amount, self.bank_balance),
+                )
+                signal_tier = "trade"
+                signal_tier_reason = "two_regime consensus"
+            else:
+                reason_bits = []
+                if float(seconds_left or 0) < TWO_REGIME_MIN_TIME_LEFT:
+                    reason_bits.append(f"time_left {float(seconds_left):.1f}s < {TWO_REGIME_MIN_TIME_LEFT:.0f}s")
+                if not (TWO_REGIME_CONSENSUS_PM_MIN <= pm_price <= TWO_REGIME_CONSENSUS_PM_MAX) and not (TWO_REGIME_OPPOSITE_PM_MIN <= pm_price <= TWO_REGIME_OPPOSITE_PM_MAX):
+                    reason_bits.append(f"pm {pm_price:.3f} outside two_regime bands")
+                if indicator_confirm < TWO_REGIME_CONSENSUS_CONFIRM_MIN and indicator_confirm > TWO_REGIME_OPPOSITE_CONFIRM_MAX:
+                    reason_bits.append(f"confirm {indicator_confirm:+.2f} fits neither consensus nor opposite")
+                if confidence < TWO_REGIME_CONSENSUS_CONFIDENCE_MIN and confidence > TWO_REGIME_OPPOSITE_CONFIDENCE_MAX:
+                    reason_bits.append(f"confidence {confidence:.0%} fits neither consensus nor opposite")
+                signal_data["reason"] = "two_regime skip | " + (", ".join(reason_bits) if reason_bits else "no regime matched")
+                persist_record()
+                return
+
+            signal_data["amount"] = trade_amount
+            signal_data["signal_tier"] = signal_tier
+            signal_data["signal_tier_reason"] = signal_tier_reason
+            signal_data["entry_plan"] = entry_plan
+            signal_data["chosen_side"] = chosen_side
+            signal_data["chosen_price"] = chosen_price
+            signal_data["side"] = chosen_side
+            signal_data["pm"] = chosen_price
+            signal_data["strategy_mode"] = STRATEGY_MODE
+
+            log(
+                f"   [{crypto}] TWO-REGIME {entry_plan.upper()} — market={market.get('winner_side')}@{pm_price:.3f} "
+                f"chosen={chosen_side}@{chosen_price:.3f} conf={confidence:.0%} 1m={indicator_confirm:+.2f} size=${trade_amount:.2f}"
+            )
+
+            execution = self._enter(
+                market,
+                ta,
+                seconds_left,
+                trade_amount,
+                signal_tier,
+                signal_tier_reason,
+                signal_data,
+                chosen_side=chosen_side,
+                chosen_token=chosen_token,
+                chosen_price=chosen_price,
+                entry_plan=entry_plan,
+            )
+
+            for key in (
+                "execution_mode",
+                "post_only",
+                "limit_price",
+                "best_bid_at_entry",
+                "best_ask_at_entry",
+                "spread_at_entry",
+                "bid_depth_top_n",
+                "ask_depth_top_n",
+                "book_imbalance_at_entry",
+                "signal_age_sec_at_order_submit",
+                "order_rest_seconds",
+                "maker_filled",
+                "maker_fill_price",
+                "maker_fill_size",
+                "maker_fill_latency_ms",
+                "maker_cancel_reason",
+                "fallback_used",
+            ):
+                if key in execution:
+                    signal_data[key] = execution.get(key)
+            if execution.get("size") is not None:
+                signal_data["execution_size"] = execution.get("size")
+            if execution.get("taker_price") is not None:
+                signal_data["execution_taker_price"] = execution.get("taker_price")
+
+            entry_price = execution.get("maker_fill_price") or execution.get("taker_price") or chosen_price
+            signal_data["execution_entry_price"] = entry_price
+            if execution.get("ok"):
+                signal_data["entered"] = True
+                signal_data["reason"] = f"two_regime {entry_plan}"
+                signal_data["exec_status"] = "success"
+                signal_data["execution_order_status"] = str(execution.get("order_status", "") or "success")
+                signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
+                if entry_price:
+                    signal_data["pnl_expected"] = (trade_amount / entry_price) - trade_amount
+            else:
+                signal_data["entered"] = False
+                signal_data["exec_status"] = "failed"
+                signal_data["execution_failure_type"] = str(execution.get("failure_type", "") or "")
+                signal_data["execution_failure_detail"] = str(execution.get("detail", "") or "")
+                signal_data["execution_order_status"] = str(execution.get("order_status", "") or "")
+                signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
+
+            persist_record(force=True)
+            return
 
         # Filter 1: legacy PM bounds. In Core EV mode these become diagnostic only;
         # the Core EV rulebook remains the actual entry gate.
@@ -4814,7 +5001,7 @@ class CryptoBot:
         # Filter 3: direction mismatch is now evaluated after Core EV so a
         # positive empirical bucket can explicitly override it.
         ta_dir  = ta.get("direction")
-        pm_side = market["winner_side"]
+        pm_side = chosen_side if entry_plan == "opposite" else market["winner_side"]
         mismatch_reason = ""
         mismatch_debug = ""
         has_direction_mismatch = bool(ta_dir and ta_dir != pm_side)
@@ -5085,6 +5272,10 @@ class CryptoBot:
             signal_tier,
             signal_tier_reason,
             signal_data,
+            chosen_side=chosen_side,
+            chosen_token=chosen_token,
+            chosen_price=chosen_price,
+            entry_plan=entry_plan,
         )
 
         # Persist maker/taker execution audit details (both success and failure paths).
@@ -5580,22 +5771,26 @@ class CryptoBot:
         signal_tier: str,
         signal_tier_reason: str,
         signal_data: dict,
+        chosen_side: str,
+        chosen_token: str,
+        chosen_price: float,
+        entry_plan: str,
     ) -> dict:
-        price        = market["winner_price"]
+        price        = float(chosen_price or 0)
         expected_pnl = (trade_amount / price) - trade_amount
         expected_pct = expected_pnl / trade_amount * 100
         crypto       = market["crypto"]
         market_prob  = float(price or 0)
         model_prob   = estimate_model_prob(
             ta.get("direction"),
-            market["winner_side"],
+            chosen_side,
             ta.get("confidence", 0),
             market_prob,
             ta.get("score", 0),
         )
         edge         = model_prob - market_prob
 
-        log(f"🟢 ENTERING [{crypto} {market['winner_side']}] invested=${trade_amount:.2f} expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
+        log(f"🟢 ENTERING [{crypto} {chosen_side}] plan={entry_plan} invested=${trade_amount:.2f} expected_pnl=+${expected_pnl:.2f} (+{expected_pct:.1f}%)")
         log(f"   {market['title'][:60]} | price={price:.3f} | time_left={seconds_left:.1f}s")
         log(f"   Price:{ta.get('current_price',0):.2f} | "
             f"delta:{ta.get('delta_pct',0):.4f}% | "
@@ -5607,7 +5802,7 @@ class CryptoBot:
         entry_execution_mode = "maker_entry" if configured_mode in {"maker_entry", "maker_entry_exit", "two_sided_mm"} else "taker"
         orderbook = {}
         if entry_execution_mode == "maker_entry":
-            orderbook = get_orderbook_summary_ws(self.ws_market, market["winner_token"], depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+            orderbook = get_orderbook_summary_ws(self.ws_market, chosen_token, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
             if isinstance(orderbook, dict):
                 src = str(orderbook.get("source", "") or "")
                 ws_age = orderbook.get("ws_age_sec")
@@ -5622,7 +5817,7 @@ class CryptoBot:
 
             if MAKER_ENTRY_WS_NOISE_GUARD_ENABLED and self.ws_market is not None:
                 try:
-                    token_id = str(market.get("winner_token") or "")
+                    token_id = str(chosen_token or "")
                     ws_feats = self.ws_market.get_micro_features(token_id) if token_id else {}
                     ws_samples_3s = int((ws_feats or {}).get("ws_samples_3s", 0) or 0)
                     ws_top_moves_3s = int((ws_feats or {}).get("ws_top_moves_3s", 0) or 0)
@@ -5777,7 +5972,7 @@ class CryptoBot:
                     b0 = float(orderbook.get("best_bid_price", 0) or 0)
                     a0 = float(orderbook.get("best_ask_price", 0) or 0)
                     time.sleep(max(0.05, MAKER_ENTRY_PRECHECK_SLEEP_SEC))
-                    ob2 = get_orderbook_summary_ws(self.ws_market, market["winner_token"], depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
+                    ob2 = get_orderbook_summary_ws(self.ws_market, chosen_token, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
                     b1 = float(ob2.get("best_bid_price", 0) or 0) if isinstance(ob2, dict) else 0.0
                     a1 = float(ob2.get("best_ask_price", 0) or 0) if isinstance(ob2, dict) else 0.0
                     if b0 <= 0 or a0 <= 0 or b1 <= 0 or a1 <= 0:
@@ -5841,7 +6036,7 @@ class CryptoBot:
             log(f"   {mode} — paper/dry-run execution simulation")
             if entry_execution_mode == "maker_entry":
                 execution = execute_buy(
-                    market["winner_token"],
+                    chosen_token,
                     trade_amount,
                     price,
                     "",
@@ -5880,7 +6075,7 @@ class CryptoBot:
                 }
         else:
             execution = execute_buy(
-                market["winner_token"], trade_amount, price,
+                chosen_token, trade_amount, price,
                 self.private_key, self.proxy_wallet,
                 execution_mode=entry_execution_mode,
                 orderbook=orderbook,
@@ -5911,7 +6106,7 @@ class CryptoBot:
             entry_price = execution.get("maker_fill_price") or execution.get("taker_price") or price
             if entry_price and execution.get("size"):
                 exit_exec = execute_sell_maker_exit(
-                    market["winner_token"],
+                    chosen_token,
                     float(execution.get("size") or 0),
                     float(entry_price),
                     self.private_key if not (self.paper or self.dry_run) else "",
@@ -5959,7 +6154,7 @@ class CryptoBot:
             self.trades.append({
                 "crypto":       crypto,
                 "title":        market["title"],
-                "side":         market["winner_side"],
+                "side":         chosen_side,
                 "price_entry":  executed_price,
                 "amount":       trade_amount,
                 "seconds_left": seconds_left,
@@ -5970,6 +6165,7 @@ class CryptoBot:
                 "indicator_confirm": ta.get("indicator_confirm", 0),
                 "signal_tier":  signal_tier,
                 "signal_tier_reason": signal_tier_reason,
+                "entry_plan":   entry_plan,
                 "model_prob":   model_prob,
                 "market_prob":  market_prob,
                 "edge":         edge,
