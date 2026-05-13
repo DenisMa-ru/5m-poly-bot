@@ -444,6 +444,8 @@ MAKER_ENTRY_STRICT_MAX_SPREAD = float(_bot_settings.get("maker_entry_strict_max_
 MAKER_ENTRY_PRECHECK_ENABLED = _as_bool(_bot_settings.get("maker_entry_precheck_enabled"), True)
 MAKER_ENTRY_PRECHECK_SLEEP_SEC = float(_bot_settings.get("maker_entry_precheck_sleep_sec", 0.2) or 0.2)
 MAKER_ENTRY_MIN_PM_MINUS_MID = float(_bot_settings.get("maker_entry_min_pm_minus_mid", 0.02) or 0.02)
+MAKER_ENTRY_OPPOSITE_STRICT_MAX_SPREAD = float(_bot_settings.get("maker_entry_opposite_strict_max_spread", 0.02) or 0.02)
+MAKER_ENTRY_OPPOSITE_MIN_PM_MINUS_MID = float(_bot_settings.get("maker_entry_opposite_min_pm_minus_mid", 0.005) or 0.005)
 SHADOW_WS_CONFIRM_ENABLED = _as_bool(_bot_settings.get("shadow_ws_confirm_enabled"), True)
 SHADOW_WS_MAX_TOP_MOVES_3S = int(_bot_settings.get("shadow_ws_max_top_moves_3s", 6) or 6)
 SHADOW_WS_MIN_SAMPLES_3S = int(_bot_settings.get("shadow_ws_min_samples_3s", 3) or 3)
@@ -3685,6 +3687,7 @@ class CryptoBot:
             "exec_status": "pending",
             "execution_failure_type": "",
             "execution_failure_detail": "",
+            "execution_skip_reason": "",
             "execution_order_status": "",
             "execution_order_id": "",
             "execution_mode": "taker",
@@ -4857,6 +4860,7 @@ class CryptoBot:
                 signal_data["exec_status"] = "failed"
                 signal_data["execution_failure_type"] = str(execution.get("failure_type", "") or "")
                 signal_data["execution_failure_detail"] = str(execution.get("detail", "") or "")
+                signal_data["execution_skip_reason"] = str(execution.get("skip_reason", "") or execution.get("maker_cancel_reason", "") or "")
                 signal_data["execution_order_status"] = str(execution.get("order_status", "") or "")
                 signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
 
@@ -5325,6 +5329,7 @@ class CryptoBot:
             signal_data["reason"] = "execution failed"
             signal_data["execution_failure_type"] = str(execution.get("failure_type", "") or "unknown")
             signal_data["execution_failure_detail"] = str(execution.get("detail", "") or "")
+            signal_data["execution_skip_reason"] = str(execution.get("skip_reason", "") or execution.get("maker_cancel_reason", "") or "")
             signal_data["execution_order_status"] = str(execution.get("order_status", "") or "")
             signal_data["execution_order_id"] = str(execution.get("order_id", "") or "")
             signal_data["exec_status"] = signal_data["execution_failure_type"] or signal_data["execution_order_status"] or "exception"
@@ -5800,6 +5805,9 @@ class CryptoBot:
 
         configured_mode = str(EXECUTION_MODE or "taker").strip().lower()
         entry_execution_mode = "maker_entry" if configured_mode in {"maker_entry", "maker_entry_exit", "two_sided_mm"} else "taker"
+        execution_is_opposite = (str(entry_plan or "") == "opposite")
+        maker_min_pm_minus_mid = MAKER_ENTRY_OPPOSITE_MIN_PM_MINUS_MID if execution_is_opposite else MAKER_ENTRY_MIN_PM_MINUS_MID
+        maker_strict_max_spread = MAKER_ENTRY_OPPOSITE_STRICT_MAX_SPREAD if execution_is_opposite else MAKER_ENTRY_STRICT_MAX_SPREAD
         orderbook = {}
         if entry_execution_mode == "maker_entry":
             orderbook = get_orderbook_summary_ws(self.ws_market, chosen_token, depth_levels=MAKER_ENTRY_BOOK_DEPTH_LEVELS)
@@ -5833,6 +5841,7 @@ class CryptoBot:
                         "ok": False,
                         "failure_type": "skipped",
                         "detail": detail,
+                        "skip_reason": "skipped_ws_noise",
                         "order_status": "skipped",
                         "order_id": "",
                         "execution_mode": entry_execution_mode,
@@ -5857,15 +5866,16 @@ class CryptoBot:
                 pm_minus_mid = float(market_prob or 0) - float(mid or 0)
             except Exception:
                 pm_minus_mid = 0.0
-            if pm_minus_mid < MAKER_ENTRY_MIN_PM_MINUS_MID - 1e-12:
+            if pm_minus_mid < maker_min_pm_minus_mid - 1e-12:
                 detail = f"edge gate pm-mid={pm_minus_mid:+.3f}"
-                log(f"   [{crypto}] SKIP — insufficient edge (pm-mid={pm_minus_mid:+.3f} < {MAKER_ENTRY_MIN_PM_MINUS_MID:+.3f})")
+                log(f"   [{crypto}] SKIP — insufficient edge (pm-mid={pm_minus_mid:+.3f} < {maker_min_pm_minus_mid:+.3f})")
                 signal_data["reason"] = detail
                 save_signal(signal_data)
                 return {
                     "ok": False,
                     "failure_type": "skipped",
                     "detail": detail,
+                    "skip_reason": "skipped_edge_gate",
                     "order_status": "skipped",
                     "order_id": "",
                     "execution_mode": entry_execution_mode,
@@ -5897,6 +5907,7 @@ class CryptoBot:
                         "ok": False,
                         "failure_type": "skipped",
                         "detail": "maker_entry requires WS orderbook",
+                        "skip_reason": "skipped_ws_missing",
                         "order_status": "skipped",
                         "order_id": "",
                         "execution_mode": entry_execution_mode,
@@ -5923,6 +5934,7 @@ class CryptoBot:
                         "ok": False,
                         "failure_type": "skipped",
                         "detail": f"ws stale (age={age:.3f}s)",
+                        "skip_reason": "skipped_ws_stale",
                         "order_status": "skipped",
                         "order_id": "",
                         "execution_mode": entry_execution_mode,
@@ -5943,14 +5955,15 @@ class CryptoBot:
                 spread_now = float(orderbook.get("spread", 0) or 0) if isinstance(orderbook, dict) else 0.0
             except Exception:
                 spread_now = 0.0
-            if spread_now > MAKER_ENTRY_STRICT_MAX_SPREAD + 1e-12:
-                log(f"   [{crypto}] SKIP — spread too wide for maker-entry (spread={spread_now:.3f} > {MAKER_ENTRY_STRICT_MAX_SPREAD:.3f})")
+            if spread_now > maker_strict_max_spread + 1e-12:
+                log(f"   [{crypto}] SKIP — spread too wide for maker-entry (spread={spread_now:.3f} > {maker_strict_max_spread:.3f})")
                 signal_data["reason"] = f"spread too wide ({spread_now:.3f})"
                 save_signal(signal_data)
                 return {
                     "ok": False,
                     "failure_type": "skipped",
                     "detail": f"spread too wide ({spread_now:.3f})",
+                    "skip_reason": "skipped_spread_too_wide",
                     "order_status": "skipped",
                     "order_id": "",
                     "execution_mode": entry_execution_mode,
@@ -5983,6 +5996,7 @@ class CryptoBot:
                             "ok": False,
                             "failure_type": "skipped",
                             "detail": "ws unstable (empty during precheck)",
+                            "skip_reason": "skipped_ws_unstable_empty",
                             "order_status": "skipped",
                             "order_id": "",
                             "execution_mode": entry_execution_mode,
@@ -6006,6 +6020,7 @@ class CryptoBot:
                             "ok": False,
                             "failure_type": "skipped",
                             "detail": "ws unstable (top moved)",
+                            "skip_reason": "skipped_ws_unstable_top_moved",
                             "order_status": "skipped",
                             "order_id": "",
                             "execution_mode": entry_execution_mode,
