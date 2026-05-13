@@ -3339,6 +3339,7 @@ class CryptoBot:
         self.mode         = current_runtime_mode(paper, dry_run)
         self.service_name = current_service_name(paper, dry_run)
         self.traded_slugs = set()
+        self.attempted_entry_keys = set()
         self.trades       = []
         self.private_key  = os.getenv("POLY_PRIVATE_KEY", "")
         self.proxy_wallet = os.getenv("POLY_PROXY_WALLET", "")
@@ -4480,6 +4481,7 @@ class CryptoBot:
             f"{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M:%SZ')} UTC")
 
         entered_slugs = set()
+        attempted_entry_keys = set()
 
         while True:
             seconds_left = close_ts - now_unix()
@@ -4590,6 +4592,7 @@ class CryptoBot:
                         ta,
                         seconds_left,
                         entered_slugs,
+                        attempted_entry_keys,
                         shadow_context,
                         snapshot=snapshot,
                         persist_signal=not FULL_WINDOW_CORE_EV_ENABLED,
@@ -4597,7 +4600,7 @@ class CryptoBot:
 
             time.sleep(POLL_INTERVAL)
 
-    def _evaluate_entry(self, market, ta, seconds_left, entered_slugs, shadow_context: dict | None = None,
+    def _evaluate_entry(self, market, ta, seconds_left, entered_slugs, attempted_entry_keys, shadow_context: dict | None = None,
                         snapshot: dict | None = None, persist_signal: bool = True):
         snapshot = snapshot or self._build_signal_snapshot(market, ta, seconds_left, shadow_context)
         signal_data = snapshot["signal_data"]
@@ -4799,6 +4802,13 @@ class CryptoBot:
             signal_data["side"] = chosen_side
             signal_data["pm"] = chosen_price
             signal_data["strategy_mode"] = STRATEGY_MODE
+
+            attempt_key = (slug, entry_plan, chosen_side)
+            if attempt_key in attempted_entry_keys:
+                signal_data["reason"] = f"duplicate entry attempt blocked | plan={entry_plan} side={chosen_side}"
+                persist_record()
+                return
+            attempted_entry_keys.add(attempt_key)
 
             log(
                 f"   [{crypto}] TWO-REGIME {entry_plan.upper()} — market={market.get('winner_side')}@{pm_price:.3f} "
